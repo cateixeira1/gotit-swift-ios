@@ -92,6 +92,21 @@ final class EditorTests: XCTestCase {
         XCTAssertNil(roundTrip.runs.last?.style.namedStyle)
     }
 
+    func testPagesAreStackedAndOnlyNearbyPagesAreRealized() throws {
+        var document = CanvasDocument(title: "Stack")
+        for index in 2...12 { document.pages.append(CanvasPage(title: "Página \(index)")) }
+        let editors = try document.pages.map { CanvasEditor(document: try document.pageDocument($0.id), onCommands: { _ in }) }
+        var visible: [UUID] = []
+        let controller = PagedCanvasViewController(configuration: PagedCanvasEditor(
+            pages: editors, tool: .select, session: EditorSession(), focusPageID: document.pages.first?.id,
+            onVisiblePage: { visible.append($0) }))
+        controller.loadViewIfNeeded(); controller.view.frame = CGRect(x: 0, y: 0, width: 400, height: 800)
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        XCTAssertGreaterThan(controller.realizedPageCount, 0)
+        XCTAssertLessThan(controller.realizedPageCount, 12)   // 12 A4 pages, only those near the viewport
+        XCTAssertTrue(visible.isEmpty || visible.first == document.pages.first?.id)
+    }
+
     func testOffscreenBlocksAreNotInstantiated() {
         var document = CanvasDocument(title: "Viewport")
         for i in 0..<1000 {

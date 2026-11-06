@@ -28,7 +28,6 @@ struct EditorWorkspace: View {
         var sticker: Bool
     }
     private var pageID: UUID { model.activePageID ?? document.id }
-    private var page: CanvasDocument { (try? document.pageDocument(pageID)) ?? document }
 
     var body: some View {
         GeometryReader { geometry in
@@ -71,14 +70,20 @@ struct EditorWorkspace: View {
             }
         }
         .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
-        .onChange(of: pageID) { _, _ in session.hasTextSelection = false }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.perform(.finish) } }
     }
 
     private var canvas: some View {
+        PagedCanvasEditor(pages: document.pages.map { pageEditor($0.id) }, tool: tool, session: session,
+                          focusPageID: pageID, onVisiblePage: { model.selectedPageID = $0 })
+            .id(document.id)
+            .accessibilityIdentifier("pageEditor")
+    }
+
+    private func pageEditor(_ targetPage: UUID) -> CanvasEditor {
         // Capture identifiers, so delayed imports/drawing callbacks never land on another page.
-        let targetPage = pageID
         let targetDocument = document.id
+        let page = (try? document.pageDocument(targetPage)) ?? document
         return CanvasEditor(document: page, tool: tool, session: session,
             inkColor: UIColor(inkColor).resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)),
             inkWidth: inkWidth, vectorEraser: vectorEraser,
@@ -94,8 +99,6 @@ struct EditorWorkspace: View {
             },
             onOpenNote: { id in Task { await model.open(id) } },
             onError: { model.error = String(describing: $0) })
-            .id("\(targetDocument)-\(targetPage)")
-            .accessibilityIdentifier("pageEditor")
     }
 
     private var formattingBar: some View {

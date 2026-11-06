@@ -9,7 +9,7 @@ final class EditorUITests: XCTestCase {
         app.launch()
         let pages = app.buttons["showPages"]
         let addPage = app.buttons["addPage"]
-        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas"].firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
         if pages.exists { pages.tap() }
         XCTAssertTrue(addPage.waitForExistence(timeout: 10)); addPage.tap()
         let second = app.buttons["page-2"]
@@ -30,7 +30,8 @@ final class EditorUITests: XCTestCase {
         if app.buttons["showTools"].exists { app.buttons["showTools"].tap() }
         let pen = app.buttons["tool-pen"]
         XCTAssertTrue(pen.waitForExistence(timeout: 10)); pen.tap()
-        let drawing = app.descendants(matching: .any)["drawingCanvas"].firstMatch
+        // Pages are stacked; selecting page 2 scrolls it into view and it has its own canvas.
+        let drawing = app.descendants(matching: .any)["drawingCanvas-2"].firstMatch
         XCTAssertTrue(drawing.waitForExistence(timeout: 10))
         XCTAssertGreaterThanOrEqual(drawing.frame.minX, 0)
         XCTAssertGreaterThanOrEqual(drawing.frame.minY, 0)
@@ -48,7 +49,7 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["showPages"].waitForExistence(timeout: 10) || app.buttons["addPage"].exists)
         if app.buttons["showPages"].exists { app.buttons["showPages"].tap() }
         XCTAssertTrue(app.buttons["page-2"].waitForExistence(timeout: 10)); app.buttons["page-2"].tap()
-        let restored = app.descendants(matching: .any)["drawingCanvas"].firstMatch
+        let restored = app.descendants(matching: .any)["drawingCanvas-2"].firstMatch
         XCTAssertTrue(restored.waitForExistence(timeout: 10))
         XCTAssertEqual(restored.value as? String, "1 traços")
     }

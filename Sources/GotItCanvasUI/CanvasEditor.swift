@@ -32,6 +32,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onOpenPDF: (UUID) -> Void
     public var onOpenNote: (UUID) -> Void
     public var onError: (Error) -> Void
+    /// 1-based page number, used for per-page accessibility identifiers in stacked layouts.
+    public var pageNumber: Int?
 
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
@@ -42,7 +44,9 @@ public struct CanvasEditor: UIViewControllerRepresentable {
                 onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)? = nil,
                 onCommands: @escaping ([DocumentCommand]) -> Void,
                 onOpenPDF: @escaping (UUID) -> Void = { _ in },
-                onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in }) {
+                onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in },
+                pageNumber: Int? = nil) {
+        self.pageNumber = pageNumber
         self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
         self.drawingData = drawingData; self.onDrawing = onDrawing
         self.onOpenPDF = onOpenPDF
@@ -108,7 +112,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var typingStarted = Date.distantPast
     private var pendingTyping = false
 
-    init(configuration: CanvasEditor) { self.configuration = configuration; super.init(nibName: nil, bundle: nil) }
+    /// Embedded pages live inside PagedCanvasViewController, which owns scrolling, zoom,
+    /// the ruler and toolbar routing. The page itself is laid out at its logical size.
+    let embedded: Bool
+    init(configuration: CanvasEditor, embedded: Bool = false) {
+        self.configuration = configuration; self.embedded = embedded; super.init(nibName: nil, bundle: nil)
+    }
+    var hasActiveText: Bool { activeText != nil || cellEditor != nil }
+    func performAction(_ action: TextEditingAction) { perform(action) }
     required init?(coder: NSCoder) { fatalError("Use CanvasEditor") }
 
     public override func viewDidLoad() {
@@ -135,11 +146,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ink.accessibilityLabel = "Desenho da página"
         bindSession()
         surface.addSubview(ink)
+        if embedded {
+            scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 1
+            scroll.isScrollEnabled = false; scroll.delaysContentTouches = false
+            scroll.backgroundColor = .clear; view.backgroundColor = .clear
+            ruler.isHidden = true
+        }
         render()
     }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        if embedded { scroll.frame = view.bounds; return }
         ruler.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 28)
         scroll.frame = CGRect(x: 0, y: 28, width: view.bounds.width, height: max(0, view.bounds.height - 28))
         if !fitted, scroll.bounds.width > 0 { fitted = true; fitPage() }
@@ -277,6 +295,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if configuration.tool.isDrawing { activeText?.resignFirstResponder() }
         loadDrawing()
         ink.accessibilityValue = "\(ink.drawing.strokes.count) traços"
+        ink.accessibilityIdentifier = configuration.pageNumber.map { "drawingCanvas-\($0)" } ?? "drawingCanvas"
         surface.bringSubviewToFront(ink)
         selectionOverlay?.removeFromSuperview(); selectionOverlay = nil
         if configuration.tool == .select, let id = selectedObjectID, let object = blockViews[id],
@@ -337,6 +356,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     private func bindSession() {
+        // Stacked pages share one session; the container routes toolbar actions to the right page.
+        guard !embedded else { return }
         configuration.session?.handler = { [weak self] action in self?.perform(action) }
     }
 

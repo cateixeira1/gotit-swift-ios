@@ -85,3 +85,18 @@ e ampliação do reconhecimento permanecem congelados.
 A próxima entrega deve fechar esses critérios, sem retomar Teia/equações antes
 que o núcleo de edição tenha sido validado.
 
+
+## Continuação: recuperação de gravações
+
+O esquema v6 acrescenta recibos de operações na mesma transação do documento.
+O host grava uma fila em arquivo atômico antes da atualização otimista; ao abrir,
+reexecuta as entradas ainda presentes e reconhece operações já confirmadas pelo
+SQLite. Só remove uma entrada após o commit. Corrupção ou conflito interrompem a
+recuperação e preservam a fila para diagnóstico, sem reset silencioso. Falhas de
+energia do dispositivo e indisponibilidade física do armazenamento ainda exigem
+testes em hardware; a garantia aqui cobre encerramento do processo nos pontos
+entre gravação da fila, commit e remoção da entrada.
+
+A estratégia de retomada dos recursos adiados está em [workflow.md](workflow.md).
+Teia entra após catálogo/indexação; equações após estabilização da tinta e
+validação do reconhecimento, com reavaliação na inteligência local se necessário.

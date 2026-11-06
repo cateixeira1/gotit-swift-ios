@@ -29,7 +29,8 @@ final class AppModel {
     var writeFailed = false
     private var store: SQLiteStore?
     private var directory: URL?
-    private var pending: [(UUID, Int64, [DocumentCommand], String?)] = []
+    private var journal: PendingEditJournal?
+    private var pending: [PendingEdit] { journal?.entries ?? [] }
     private var nextAssetCleanup = Date.distantPast
     private let images = NSCache<NSString, UIImage>()
 
@@ -46,12 +47,21 @@ final class AppModel {
             #endif
             try FileManager.default.createDirectory(at: root.appendingPathComponent("assets"), withIntermediateDirectories: true)
             directory = root
-            store = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
+            let repository = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
+            store = repository
+            journal = try PendingEditJournal(url: root.appendingPathComponent("pending-edits.json"))
+            isSaving = true
+            while let edit = journal?.entries.first {
+                _ = try await repository.execute(edit.commands, documentID: edit.documentID, expectedRevision: edit.expectedRevision, historyGroup: edit.historyGroup, operationID: edit.id)
+                try journal?.removeFirst(edit.id)
+                try await repository.acknowledgeOperation(edit.id)
+            }
+            isSaving = false
             try await collectUnusedAssets()
             try await refresh()
             if summaries.isEmpty { await createNote() }
             else if let first = summaries.first { await open(first.id) }
-        } catch { self.error = String(describing: error) }
+        } catch { isSaving = false; writeFailed = true; self.error = "Recuperação interrompida; as edições pendentes foram preservadas. \(error)" }
     }
 
     func refresh() async throws {
@@ -69,13 +79,13 @@ final class AppModel {
     }
 
     func open(_ id: UUID) async {
-        guard !isSaving, let store else { return }
+        guard !isSaving, !writeFailed, let store else { return }
         do { document = try await store.load(id); selectedPageID = document?.pages.first?.id }
         catch { self.error = String(describing: error) }
     }
 
     func createNote() async {
-        guard !isSaving, let store else { return }
+        guard !isSaving, !writeFailed, let store else { return }
         do {
             document = try await store.create(.init(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18)))
             try await refresh()
@@ -83,7 +93,7 @@ final class AppModel {
     }
 
     func createWeb(including id: UUID? = nil) async {
-        guard !isSaving, let store else { return }
+        guard !isSaving, !writeFailed, let store else { return }
         do {
             var web = CanvasDocument(title: "Teia \(summaries.filter { $0.kind == .web }.count + 1)", kind: .web)
             if let id, let summary = summaries.first(where: { $0.id == id && $0.kind == .note }) {
@@ -107,26 +117,33 @@ final class AppModel {
             guard document.revision < Int64.max else { throw DocumentError.invalid("Revision exhausted") }
             optimistic.revision = document.revision + 1
             optimistic.updatedAt = max(Date(), document.updatedAt)
+            guard let journal else { throw DocumentError.invalid("Journal unavailable") }
+            try journal.append(PendingEdit(documentID: document.id, expectedRevision: document.revision, commands: commands, historyGroup: historyGroup))
             self.document = optimistic
         } catch { self.error = String(describing: error); return }
-        pending.append((document.id, document.revision, commands, historyGroup))
         guard !isSaving else { return }
         isSaving = true
         Task { await drain() }
     }
 
     private func drain() async {
-        defer { isSaving = false }
+        defer {
+            isSaving = false
+            if !pending.isEmpty, !writeFailed { isSaving = true; Task { await drain() } }
+        }
         guard let store else { return }
-        while !pending.isEmpty {
-            let (id, expectedRevision, commands, group) = pending.removeFirst()
+        while let edit = pending.first {
+            let id = edit.documentID, expectedRevision = edit.expectedRevision
+            let commands = edit.commands, group = edit.historyGroup
             do {
                 guard document?.id == id else { throw DocumentError.invalid("Editor changed during save") }
-                let saved = try await store.execute(commands, documentID: id, expectedRevision: expectedRevision, historyGroup: group)
+                let saved = try await store.execute(commands, documentID: id, expectedRevision: expectedRevision, historyGroup: group, operationID: edit.id)
+                try journal?.removeFirst(edit.id)
+                try await store.acknowledgeOperation(edit.id)
                 if document?.revision == saved.revision { document = saved }
             } catch {
                 // Stop on a failed commit; do not pretend subsequent edits were saved.
-                writeFailed = true; pending.removeAll(); self.error = "Gravação interrompida. Copie o texto em edição antes de fechar. \(error)"
+                writeFailed = true; self.error = "Gravação interrompida. As edições pendentes foram preservadas para recuperação. \(error)"
                 return
             }
         }

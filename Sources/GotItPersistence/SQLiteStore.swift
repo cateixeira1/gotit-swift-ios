@@ -57,18 +57,33 @@ public actor SQLiteStore {
 
     /// The revision is checked while holding SQLite's write lock, including across connections.
     @discardableResult
-    public func execute(_ commands: [DocumentCommand], documentID: UUID, expectedRevision: Int64, historyGroup: String? = nil) throws -> CanvasDocument {
+    public func execute(_ commands: [DocumentCommand], documentID: UUID, expectedRevision: Int64, historyGroup: String? = nil, operationID: UUID? = nil) throws -> CanvasDocument {
         let saved = try db.transaction {
+            if let operationID, let receipt = try db.execute("SELECT document_id, expected_revision, commands FROM edit_receipts WHERE id = ?", [.text(operationID.uuidString)]).first {
+                guard case .text(let owner) = receipt[0], owner == documentID.uuidString, receipt[1].int == expectedRevision,
+                      let bytes = receipt[2].data, try JSONDecoder().decode([DocumentCommand].self, from: bytes) == commands else {
+                    throw DocumentError.invalid("Operation ID reused with different contents")
+                }
+                return try readDocument(documentID)
+            }
             let before = try readDocument(documentID)
             try checkRevision(before, expected: expectedRevision)
             var after = try CommandEngine.applying(commands, to: before)
             try advance(&after, from: before)
             try writeContents(after, previous: before)
             try HistoryStore.record(db, before: before, after: after, commands: commands, limit: historyLimit, group: historyGroup)
+            if let operationID {
+                try db.execute("INSERT INTO edit_receipts VALUES (?, ?, ?, ?)", [.text(operationID.uuidString), .text(documentID.uuidString), .integer(expectedRevision), .blob(try JSONEncoder().encode(commands))])
+            }
             return after
         }
         cachedDocument = saved
         return saved
+    }
+
+    /// Acknowledge only after the host has durably removed this entry from its journal.
+    public func acknowledgeOperation(_ id: UUID) throws {
+        try db.execute("DELETE FROM edit_receipts WHERE id = ?", [.text(id.uuidString)])
     }
 
     @discardableResult

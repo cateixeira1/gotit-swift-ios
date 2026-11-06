@@ -218,7 +218,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 5)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 6)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -381,4 +381,35 @@ private func multimediaDocument() -> CanvasDocument {
     #expect(undone.assets == original.assets)
     #expect(undone.blocks == original.blocks)
     try await store.close()
+}
+
+@Test func committedOperationCanReplayAfterCrashWithoutDuplicatingHistory() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let note = try await store.create(.init(title: "Before"))
+    let operation = UUID()
+    let saved = try await store.execute([.rename("After")], documentID: note.id, expectedRevision: 0, operationID: operation)
+    try await store.close()
+    let reopened = try SQLiteStore(url: fixture.url)
+    let replayed = try await reopened.execute([.rename("After")], documentID: note.id, expectedRevision: 0, operationID: operation)
+    #expect(replayed == saved)
+    #expect(try await reopened.historyState(documentID: note.id).retainedEntries == 1)
+    await #expect(throws: DocumentError.self) { try await reopened.execute([.rename("Different")], documentID: note.id, expectedRevision: 0, operationID: operation) }
+    try await reopened.acknowledgeOperation(operation)
+    try await reopened.close()
+}
+
+@Test @MainActor func journalSurvivesRestartAndRejectsCorruption() throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let url = fixture.directory.appendingPathComponent("pending.json")
+    let journal = try PendingEditJournal(url: url)
+    let edit = PendingEdit(documentID: UUID(), expectedRevision: 7, commands: [.rename("Recovered")])
+    try journal.append(edit)
+    let restored = try PendingEditJournal(url: url)
+    #expect(restored.entries == [edit])
+    try restored.removeFirst(edit.id)
+    #expect(try PendingEditJournal(url: url).entries.isEmpty)
+    try Data("invalid".utf8).write(to: url)
+    #expect(throws: (any Error).self) { try PendingEditJournal(url: url) }
+    #expect(try Data(contentsOf: url) == Data("invalid".utf8))
 }

@@ -65,6 +65,33 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(paginated.blocks.allSatisfy { $0.textFlowID == block.id })
     }
 
+    func testTableDrawsCellsAndBordersAtItsFrameSize() throws {
+        var table = CanvasTable(rows: 2, columns: 2, width: 200)
+        table = try table.settingText(RichText("Data"), row: 0, column: 0)
+        table.cells[1][1].background = "#DBEAFE"
+        let size = CGSize(width: table.width, height: table.height)
+        let image = UIGraphicsImageRenderer(size: size).image { _ in TableRendering.draw(table, in: CGRect(origin: .zero, size: size)) }
+        // Sample the coloured cell centre and a border pixel: drawing really happened.
+        let cg = try XCTUnwrap(image.cgImage)
+        let data = try XCTUnwrap(cg.dataProvider?.data as Data?)
+        func pixel(_ x: Int, _ y: Int) -> [UInt8] {
+            let scale = Int(image.scale), offset = (y * scale) * cg.bytesPerRow + (x * scale) * (cg.bitsPerPixel / 8)
+            return Array(data[offset..<(offset + 4)])
+        }
+        XCTAssertNotEqual(pixel(150, 54), [0, 0, 0, 0])   // filled cell (row 2, column 2)
+        XCTAssertNotEqual(pixel(100, 18), [0, 0, 0, 0])   // vertical border between columns
+    }
+
+    func testTextBridgeKeepsNamedStyleThroughEditing() throws {
+        let heading = try XCTUnwrap(NamedStyle.builtIn.first { $0.id == "heading1" })
+        let styled = RichText("Fatos\nPedido").applyingNamedStyle(heading, utf16Range: 0..<0)
+        let roundTrip = TextBridge.richText(TextBridge.attributed(styled, base: .init(fontSize: 18)))
+        XCTAssertEqual(roundTrip.plainText, styled.plainText)
+        XCTAssertEqual(roundTrip.runs.first?.style.namedStyle, "heading1")
+        XCTAssertEqual(roundTrip.runs.first?.style.fontSize, 24)
+        XCTAssertNil(roundTrip.runs.last?.style.namedStyle)
+    }
+
     func testOffscreenBlocksAreNotInstantiated() {
         var document = CanvasDocument(title: "Viewport")
         for i in 0..<1000 {

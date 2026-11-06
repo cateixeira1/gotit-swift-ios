@@ -3,6 +3,11 @@ import UIKit
 import GotItDomain
 import GotItCanvas
 
+extension NSAttributedString.Key {
+    /// Carries BlockStyle.namedStyle through UITextView edits; typing continues the style.
+    static let gotItNamedStyle = NSAttributedString.Key("GotItNamedStyle")
+}
+
 @MainActor
 enum TextBridge {
     static func attributed(_ rich: RichText, base: BlockStyle) -> NSAttributedString {
@@ -33,6 +38,7 @@ enum TextBridge {
             if let link = style.link, !link.isEmpty { attributes[.link] = link }
             if style.baseline == .superscript { attributes[.baselineOffset] = font.pointSize * 0.35 }
             if style.baseline == .subscript { attributes[.baselineOffset] = -font.pointSize * 0.2 }
+            if let named = style.namedStyle { attributes[.gotItNamedStyle] = named }
             output.append(NSAttributedString(string: run.text, attributes: attributes))
         }
         return output
@@ -55,7 +61,8 @@ enum TextBridge {
                 foreground: (attributes[.foregroundColor] as? UIColor)?.hex, background: (attributes[.backgroundColor] as? UIColor)?.hex,
                 alignment: alignment, underline: ((attributes[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0,
                 strikethrough: ((attributes[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0,
-                baseline: offset == 0 ? .normal : (offset > 0 ? .superscript : .subscript), link: link, paragraph: format)
+                baseline: offset == 0 ? .normal : (offset > 0 ? .superscript : .subscript), link: link, paragraph: format,
+                namedStyle: attributes[.gotItNamedStyle] as? String)
             runs.append(TextRun(text.attributedSubstring(from: range).string, style: style))
         }
         return RichText(runs: runs)

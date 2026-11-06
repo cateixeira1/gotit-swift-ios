@@ -7,6 +7,13 @@ public enum DocumentValidator {
               document.updatedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw DocumentError.invalid("Invalid document metadata")
         }
+        guard Set(document.namedStyles.map(\.id)).count == document.namedStyles.count else { throw DocumentError.invalid("Duplicate named style") }
+        for named in document.namedStyles {
+            guard !named.id.isEmpty, named.id.count <= 64, !named.name.trimmingCharacters(in: .whitespaces).isEmpty, named.name.count <= 64 else {
+                throw DocumentError.invalid("Invalid named style")
+            }
+            try validate(style: named.style)
+        }
         guard !document.pages.isEmpty, Set(document.pages.map(\.id)).count == document.pages.count else {
             throw DocumentError.invalid("A document needs unique pages")
         }
@@ -138,6 +145,7 @@ public enum DocumentValidator {
     }
 
     private static func validate(style: BlockStyle) throws {
+        if let name = style.namedStyle, name.isEmpty || name.count > 64 { throw DocumentError.invalid("Invalid named style reference") }
         if let paragraph = style.paragraph {
             guard [paragraph.lineSpacing, paragraph.paragraphSpacing, paragraph.headIndent, paragraph.firstLineIndent].allSatisfy({ $0.isFinite && $0 >= 0 }) else {
                 throw DocumentError.invalid("Invalid paragraph format")

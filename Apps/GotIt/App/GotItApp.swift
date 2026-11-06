@@ -204,7 +204,9 @@ final class AppModel {
             switch $0 { case .insertBlock, .replaceBlock, .removeSubtree, .setCanvasSettings: return true; default: return false }
         }), var working = try? CommandEngine.applying(commands, to: document) else { return [] }
         var extra: [DocumentCommand] = []
-        for story in working.storiesAffectedByObstacleChanges(since: document) {
+        var stories = working.storiesAffectedByObstacleChanges(since: document)
+        for story in working.storiesWithTextChanges(since: document) where !stories.contains(story) { stories.append(story) }
+        for story in stories {
             guard let first = working.textFlowFragments(story: story).first else { continue }
             do {
                 let result = try TextPagination.reflow(first, in: working, selection: NSRange(location: 0, length: 0))

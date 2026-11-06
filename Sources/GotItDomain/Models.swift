@@ -13,6 +13,8 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
     public var kind: DocumentKind
     public var canvas: CanvasSettings
     public var pages: [CanvasPage]
+    /// Named styles changed or added in this note; built-ins not listed keep their defaults.
+    public var namedStyles: [NamedStyle]
 
     public init(id: UUID = UUID(), title: String, defaultStyle: BlockStyle = .init(), now: Date = Date(), kind: DocumentKind = .note, canvas: CanvasSettings = .init()) {
         self.id = id
@@ -27,10 +29,11 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
         self.kind = kind
         self.canvas = canvas
         self.pages = [CanvasPage(id: id, title: "Página 1")]
+        self.namedStyles = []
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, revision, createdAt, updatedAt, defaultStyle, blocks, assets, relations, kind, canvas, pages
+        case id, title, revision, createdAt, updatedAt, defaultStyle, blocks, assets, relations, kind, canvas, pages, namedStyles
     }
 
     public init(from decoder: Decoder) throws {
@@ -47,6 +50,7 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
         kind = try c.decodeIfPresent(DocumentKind.self, forKey: .kind) ?? .note
         canvas = try c.decodeIfPresent(CanvasSettings.self, forKey: .canvas) ?? .init()
         pages = try c.decodeIfPresent([CanvasPage].self, forKey: .pages) ?? [CanvasPage(id: id, title: "Página 1")]
+        namedStyles = try c.decodeIfPresent([NamedStyle].self, forKey: .namedStyles) ?? []
     }
 
     public func children(of parentID: UUID? = nil) -> [CanvasBlock] {
@@ -139,15 +143,19 @@ public struct BlockStyle: Codable, Equatable, Sendable {
     public var baseline: TextBaseline?
     public var link: String?
     public var paragraph: ParagraphFormat?
+    /// Identifier of the named style (Título, Corpo...) this text was formatted with. A tag only:
+    /// the concrete attributes above stay authoritative, so text renders identically without it.
+    public var namedStyle: String?
 
     public init(fontName: String? = nil, fontSize: Double? = nil, bold: Bool? = nil,
                 italic: Bool? = nil, foreground: String? = nil, background: String? = nil,
                 alignment: TextAlignment? = nil, underline: Bool? = nil, strikethrough: Bool? = nil,
-                baseline: TextBaseline? = nil, link: String? = nil, paragraph: ParagraphFormat? = nil) {
+                baseline: TextBaseline? = nil, link: String? = nil, paragraph: ParagraphFormat? = nil,
+                namedStyle: String? = nil) {
         self.fontName = fontName; self.fontSize = fontSize; self.bold = bold; self.italic = italic
         self.foreground = foreground; self.background = background; self.alignment = alignment
         self.underline = underline; self.strikethrough = strikethrough; self.baseline = baseline; self.link = link
-        self.paragraph = paragraph
+        self.paragraph = paragraph; self.namedStyle = namedStyle
     }
 
     public func merging(_ overrides: BlockStyle) -> BlockStyle {
@@ -156,7 +164,8 @@ public struct BlockStyle: Codable, Equatable, Sendable {
                    foreground: overrides.foreground ?? foreground, background: overrides.background ?? background,
                    alignment: overrides.alignment ?? alignment, underline: overrides.underline ?? underline,
                    strikethrough: overrides.strikethrough ?? strikethrough,
-                   baseline: overrides.baseline ?? baseline, link: overrides.link ?? link, paragraph: overrides.paragraph ?? paragraph)
+                   baseline: overrides.baseline ?? baseline, link: overrides.link ?? link, paragraph: overrides.paragraph ?? paragraph,
+                   namedStyle: overrides.namedStyle ?? namedStyle)
     }
 }
 

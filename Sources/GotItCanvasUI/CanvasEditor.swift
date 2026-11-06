@@ -569,7 +569,20 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private func textMenu(_ text: UITextView) -> UIMenu {
         let colors: [(String, UIColor)] = [("Preto", .black), ("Azul", .systemBlue), ("Vermelho", .systemRed), ("Verde", .systemGreen)]
         let alignments: [(String, NSTextAlignment)] = [("Esquerda", .left), ("Centro", .center), ("Direita", .right), ("Justificado", .justified)]
+        let styles = configuration.document.effectiveNamedStyles.map { named in
+            UIAction(title: named.name) { [weak self, weak text] _ in
+                // Look the definition up when chosen: the style may have been redefined since.
+                guard let self, let text else { return }
+                self.applyNamedStyle(text, self.configuration.document.namedStyle(named.id) ?? named)
+            }
+        }
+        let styleMenu = UIMenu(title: "Estilo", image: UIImage(systemName: "textformat"), children: styles + [
+            UIAction(title: "Atualizar estilo pela seleção", image: UIImage(systemName: "arrow.triangle.2.circlepath")) { [weak self, weak text] _ in
+                if let text { self?.redefineNamedStyle(from: text) }
+            }
+        ])
         return UIMenu(children: [
+            styleMenu,
             UIMenu(title: "Cor", children: colors.map { name, color in UIAction(title: name) { [weak self, weak text] _ in if let text { self?.format(text, key: .foregroundColor, value: color) } } }),
             UIMenu(title: "Fonte", children: ["Helvetica", "Times New Roman", "Menlo"].map { name in UIAction(title: name) { [weak self, weak text] _ in
                 if let text, let font = UIFont(name: name, size: (text.typingAttributes[.font] as? UIFont)?.pointSize ?? 18) { self?.format(text, key: .font, value: font) }
@@ -587,6 +600,43 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             UIAction(title: "Inserir link") { [weak self, weak text] _ in if let text { self?.insertLink(text) } },
             UIAction(title: "Localizar e substituir") { [weak text] _ in text?.findInteraction?.presentFindNavigator(showingReplace: true) }
         ])
+    }
+
+    /// Applies a named style to the paragraphs under the selection (or caret), like Word.
+    private func applyNamedStyle(_ text: UITextView, _ named: NamedStyle) {
+        guard let id = textIDs[ObjectIdentifier(text)] else { return }
+        let selection = text.selectedRange
+        let styled = TextBridge.richText(text.attributedText)
+            .applyingNamedStyle(named, utf16Range: selection.location..<(selection.location + selection.length))
+        let base = (try? configuration.document.resolvedStyle(for: id)) ?? .init()
+        let rendered = TextBridge.attributed(styled, base: base)
+        text.attributedText = rendered
+        text.selectedRange = NSRange(location: min(selection.location, rendered.length), length: min(selection.length, max(0, rendered.length - selection.location)))
+        // New typing continues in the chosen style, including in an empty block.
+        let caretStyle = rendered.length > 0
+            ? rendered.attributes(at: min(selection.location, rendered.length - 1), effectiveRange: nil)
+            : TextBridge.attributed(RichText(runs: [TextRun(" ", style: styled.runs.first?.style ?? named.style)]), base: base).attributes(at: 0, effectiveRange: nil)
+        text.typingAttributes = caretStyle
+        textViewDidChange(text)
+    }
+
+    /// "Update style to match selection": the formatting at the caret becomes the style's
+    /// definition, and every text tagged with that style in the note follows.
+    private func redefineNamedStyle(from text: UITextView) {
+        let attributed = text.attributedText ?? NSAttributedString()
+        guard attributed.length > 0 else { return }
+        let location = min(text.selectedRange.location, attributed.length - 1)
+        let current = TextBridge.richText(attributed.attributedSubstring(from: NSRange(location: location, length: 1))).runs.first?.style
+        guard let current, let id = current.namedStyle, var named = configuration.document.namedStyle(id) else {
+            configuration.onError(DocumentError.invalid("Posicione o cursor em um texto com estilo (Título, Corpo…) para atualizá-lo."))
+            return
+        }
+        // System fonts report private names (".SFUI…"); keep the definition on the system font.
+        named.style.fontName = current.fontName.flatMap { $0.hasPrefix(".") ? nil : $0 }
+        named.style.fontSize = current.fontSize; named.style.bold = current.bold; named.style.italic = current.italic
+        named.style.foreground = current.foreground; named.style.paragraph = current.paragraph
+        do { configuration.onCommands(try configuration.document.redefiningNamedStyle(named)) }
+        catch { configuration.onError(error) }
     }
 
     private func paragraph(_ text: UITextView, update: (NSMutableParagraphStyle) -> Void) {

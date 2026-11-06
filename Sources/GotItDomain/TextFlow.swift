@@ -100,3 +100,18 @@ public extension CanvasDocument {
         return stories
     }
 }
+
+public extension CanvasDocument {
+    /// Stories whose text content changed outside the typing path (e.g. a named style was
+    /// redefined and every heading grew): their pagination must be recomputed.
+    func storiesWithTextChanges(since old: CanvasDocument) -> [UUID] {
+        let previous = Dictionary(old.blocks.map { ($0.id, $0.content) }, uniquingKeysWith: { first, _ in first })
+        var seen: Set<UUID> = [], stories: [UUID] = []
+        for block in blocks where block.parentID == nil {
+            guard case .text = block.content, let story = block.textFlowID, previous[block.id] != block.content,
+                  seen.insert(story).inserted else { continue }
+            stories.append(story)
+        }
+        return stories
+    }
+}

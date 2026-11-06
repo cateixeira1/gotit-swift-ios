@@ -24,6 +24,8 @@ public enum DocumentCommand: Codable, Equatable, Sendable {
     case unregisterAsset(String)
     case setRelation(BlockRelation)
     case removeRelation(UUID)
+    /// Replaces the note's named-style definitions (overrides of built-ins and custom styles).
+    case setNamedStyles([NamedStyle])
 }
 
 public enum CommandEngine {
@@ -81,6 +83,7 @@ public enum CommandEngine {
                     throw DocumentError.invalid("Missing relation")
                 }
                 document.relations.removeAll { $0.id == id }
+            case .setNamedStyles(let styles): document.namedStyles = styles
             }
         }
         try DocumentValidator.validate(document)

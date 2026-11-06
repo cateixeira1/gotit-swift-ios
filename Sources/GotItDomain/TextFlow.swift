@@ -59,3 +59,44 @@ public extension CanvasDocument {
         return nil
     }
 }
+
+public extension CanvasDocument {
+    /// Stories whose text may need to reflow because something that text wraps around changed:
+    /// an object (shape, image, PDF, container...) was inserted, removed, moved, resized, rotated,
+    /// re-wrapped or moved to another page, a story's own text box was moved or resized, or the
+    /// canvas-wide wrapping default changed. Drawings never wrap text, and typing changes only
+    /// content (handled by the typing path), so neither counts.
+    func storiesAffectedByObstacleChanges(since old: CanvasDocument) -> [UUID] {
+        struct Signature: Equatable { var layout: BlockLayout; var presentation: ObjectPresentation; var parentID: UUID?; var page: UUID? }
+        func signatures(_ document: CanvasDocument) -> [UUID: Signature] {
+            let pages = document.pageAssignments()
+            var result: [UUID: Signature] = [:]
+            for block in document.blocks {
+                switch block.content {
+                case .drawing: continue
+                case .text: if block.parentID != nil || block.textFlowID == nil { continue }  // story fragments: their own box is capacity
+                default: break
+                }
+                result[block.id] = Signature(layout: block.layout, presentation: block.effectivePresentation,
+                                             parentID: block.parentID, page: pages[block.id])
+            }
+            return result
+        }
+        let before = signatures(old), after = signatures(self)
+        let assignments = pageAssignments()
+        var pages: Set<UUID> = []
+        let everything = old.canvas.textAvoidsObjects != canvas.textAvoidsObjects
+        for id in Set(before.keys).union(after.keys) where before[id] != after[id] {
+            if let page = before[id]?.page { pages.insert(page) }
+            if let page = after[id]?.page { pages.insert(page) }
+        }
+        guard everything || !pages.isEmpty else { return [] }
+        var seen: Set<UUID> = [], stories: [UUID] = []
+        for block in blocks where block.parentID == nil {
+            guard case .text = block.content, let story = block.textFlowID else { continue }
+            guard everything || assignments[block.id].map(pages.contains) == true, seen.insert(story).inserted else { continue }
+            stories.append(story)
+        }
+        return stories
+    }
+}

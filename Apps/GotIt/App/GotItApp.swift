@@ -183,8 +183,36 @@ final class AppModel {
 
     func enqueue(_ commands: [DocumentCommand], pageID: UUID, documentID: UUID, historyGroup: String? = nil) {
         guard let document, document.id == documentID else { return }
-        do { enqueue(try document.commands(commands, on: pageID), historyGroup: historyGroup) }
+        do {
+            var all = try document.commands(commands, on: pageID)
+            all += reflowCommands(after: all, in: document)
+            enqueue(all, historyGroup: historyGroup)
+        }
         catch { self.error = String(describing: error) }
+    }
+
+    func enqueueReflowing(_ commands: [DocumentCommand]) {
+        guard let document else { return }
+        enqueue(commands + reflowCommands(after: commands, in: document))
+    }
+
+    /// Moving, resizing, inserting or removing an object that text wraps around redistributes the
+    /// affected stories in the same batch, so one undo restores both the object and the text.
+    /// A story that cannot be laid out keeps its previous text; the edit itself is still applied.
+    private func reflowCommands(after commands: [DocumentCommand], in document: CanvasDocument) -> [DocumentCommand] {
+        guard commands.contains(where: {
+            switch $0 { case .insertBlock, .replaceBlock, .removeSubtree, .setCanvasSettings: return true; default: return false }
+        }), var working = try? CommandEngine.applying(commands, to: document) else { return [] }
+        var extra: [DocumentCommand] = []
+        for story in working.storiesAffectedByObstacleChanges(since: document) {
+            guard let first = working.textFlowFragments(story: story).first else { continue }
+            do {
+                let result = try TextPagination.reflow(first, in: working, selection: NSRange(location: 0, length: 0))
+                working = try CommandEngine.applying(result.commands, to: working)
+                extra += result.commands
+            } catch { self.error = String(describing: error) }
+        }
+        return extra
     }
 
     func editText(_ block: CanvasBlock, group: String?, selection: NSRange) -> TextFlowFocus? {
@@ -345,7 +373,7 @@ struct AppScreen: View {
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityIdentifier("documentOptions")
                     }
                 }
-                .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.enqueue([.setCanvasSettings($0)]) } }
+                .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.enqueueReflowing([.setCanvasSettings($0)]) } }
                 .alert("Equação de uma incógnita", isPresented: $showEquation) {
                     TextField("Ex.: x² - 5x + 6 = 0", text: $equation)
                     Button("Resolver") { solveEquation(document) }

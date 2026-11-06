@@ -9,7 +9,7 @@ final class EditorUITests: XCTestCase {
         app.launch()
         let pages = app.buttons["showPages"]
         let addPage = app.buttons["addPage"]
-        XCTAssertTrue(app.otherElements["pageEditor"].waitForExistence(timeout: 20) || addPage.waitForExistence(timeout: 10) || pages.exists)
+        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas"].firstMatch.waitForExistence(timeout: 20))
         if pages.exists { pages.tap() }
         XCTAssertTrue(addPage.waitForExistence(timeout: 10)); addPage.tap()
         let second = app.buttons["page-2"]
@@ -21,7 +21,11 @@ final class EditorUITests: XCTestCase {
         options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         app.buttons["Tamanho e opções do canvas"].tap()
         let recognize = app.switches["Reconhecer diagramas"]
-        XCTAssertTrue(recognize.waitForExistence(timeout: 10)); recognize.tap()
+        XCTAssertTrue(recognize.waitForExistence(timeout: 10))
+        XCTAssertEqual(recognize.value as? String, "1")
+        recognize.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap()
+        XCTAssertTrue(recognize.waitForExistence(timeout: 5))
+        XCTAssertEqual(recognize.value as? String, "0", "Freehand test requires recognition to be off")
         app.buttons["Aplicar"].tap()
         if app.buttons["showTools"].exists { app.buttons["showTools"].tap() }
         let pen = app.buttons["tool-pen"]

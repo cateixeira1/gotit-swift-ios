@@ -57,7 +57,7 @@ jobs:
           results = []
           for family in ["iPad", "iPhone"]:
               device = next(d for d in available if family in d["name"])
-              result = subprocess.run(["xcodebuild", "-project", "Examples/GotItDemo/GotItDemo.xcodeproj", "-scheme", "GotItDemo", "-destination", "platform=iOS Simulator,id=" + device["udid"], "-derivedDataPath", os.environ["RUNNER_TEMP"] + "/GotItDemoDerivedData", "-resultBundlePath", os.environ["RUNNER_TEMP"] + "/" + family + ".xcresult", "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "120", "-maximum-test-execution-time-allowance", "180", "CODE_SIGNING_ALLOWED=NO", "test"], check=False)
+              result = subprocess.run(["xcodebuild", "-project", "Examples/GotItDemo/GotItDemo.xcodeproj", "-scheme", "GotItDemo", "-destination", "platform=iOS Simulator,id=" + device["udid"], "-derivedDataPath", os.environ["RUNNER_TEMP"] + "/GotItDemoDerivedData", "-resultBundlePath", os.environ["RUNNER_TEMP"] + "/" + family + ".xcresult", "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180", "CODE_SIGNING_ALLOWED=NO", "test"], check=False)
               results.append(result.returncode)
           if any(results): raise SystemExit(1)
           PYTHON

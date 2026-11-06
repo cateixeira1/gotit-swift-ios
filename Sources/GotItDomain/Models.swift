@@ -174,6 +174,10 @@ public struct RichText: Codable, Equatable, Sendable {
 }
 
 public enum ShapeKind: String, Codable, Sendable { case rectangle, ellipse, diamond, triangle, line, arrow }
+public extension ShapeKind {
+    /// Shapes with an inside: usable as image masks and as text-wrap contours.
+    static let closedMasks: [ShapeKind] = [.rectangle, .ellipse, .diamond, .triangle]
+}
 
 public struct Shape: Codable, Equatable, Sendable {
     public var kind: ShapeKind

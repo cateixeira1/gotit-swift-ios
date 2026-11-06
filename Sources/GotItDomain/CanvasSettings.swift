@@ -59,8 +59,13 @@ public struct ObjectPresentation: Codable, Equatable, Sendable {
     public var rotationRadians: Double
     /// Crop in original image coordinates, normalized to 0...1. Original bytes never change.
     public var imageCrop: LogicalRect?
-    public init(wrap: TextWrapMode = .inherit, textPadding: Double = 8, rotationRadians: Double = 0, imageCrop: LogicalRect? = nil) {
-        self.wrap = wrap; self.textPadding = textPadding; self.rotationRadians = rotationRadians; self.imageCrop = imageCrop
+    /// Clips an image or sticker to a closed shape (ellipse, diamond, triangle, rectangle).
+    /// Absent in older documents, which decode as unclipped.
+    public var imageMask: ShapeKind?
+    public init(wrap: TextWrapMode = .inherit, textPadding: Double = 8, rotationRadians: Double = 0,
+                imageCrop: LogicalRect? = nil, imageMask: ShapeKind? = nil) {
+        self.wrap = wrap; self.textPadding = textPadding; self.rotationRadians = rotationRadians
+        self.imageCrop = imageCrop; self.imageMask = imageMask
     }
 }
 

@@ -110,9 +110,9 @@ public enum TextFlowEngine {
             var polygon: [CanvasPoint]
             if mode == .topAndBottom {
                 polygon = corners(.init(x: textFrame.x, y: padded.y, width: textFrame.width, height: padded.height))
-            } else if mode == .contour, case .shape(let shape) = object.content {
+            } else if mode == .contour, let kind = contourKind(of: object) {
                 let local = LogicalRect(x: frame.x - padding, y: frame.y - padding, width: frame.width + 2 * padding, height: frame.height + 2 * padding)
-                switch shape.kind {
+                switch kind {
                 case .ellipse:
                     polygon = (0..<32).map { index in
                         let angle = Double(index) * .pi / 16
@@ -127,6 +127,14 @@ public enum TextFlowEngine {
                 polygon = polygon.map { rotate($0, around: frame.center, angle: presentation.rotationRadians) }
             } else { polygon = corners(padded) }
             return TextExclusion(objectID: object.id, polygon: polygon.map { .init(x: $0.x - textFrame.x, y: $0.y - textFrame.y) })
+        }
+    }
+    /// Shapes wrap by their outline; images wrap by their mask, if they have one.
+    private static func contourKind(of object: CanvasBlock) -> ShapeKind? {
+        switch object.content {
+        case .shape(let shape): return shape.kind
+        case .image, .sticker: return object.effectivePresentation.imageMask
+        default: return nil
         }
     }
     private static func corners(_ rect: LogicalRect) -> [CanvasPoint] {

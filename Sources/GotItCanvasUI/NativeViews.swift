@@ -93,6 +93,15 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
         UIContextMenuConfiguration(actionProvider: { [weak self] _ in self?.onMenu?() })
     }
+    private func maskPath(_ kind: ShapeKind?, in area: CGRect) -> UIBezierPath {
+        switch kind {
+        case .ellipse: return UIBezierPath(ovalIn: area)
+        case .diamond: return polygon([CGPoint(x: area.midX, y: area.minY), .init(x: area.maxX, y: area.midY), .init(x: area.midX, y: area.maxY), .init(x: area.minX, y: area.midY)])
+        case .triangle: return polygon([CGPoint(x: area.midX, y: area.minY), .init(x: area.maxX, y: area.maxY), .init(x: area.minX, y: area.maxY)])
+        default: return UIBezierPath(rect: area)
+        }
+    }
+
     override func draw(_ rect: CGRect) {
         guard let block else { return }
         switch block.content {
@@ -130,7 +139,7 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
                 let crop = block.effectivePresentation.imageCrop ?? .init(x: 0, y: 0, width: 1, height: 1)
                 guard crop.width > 0, crop.height > 0 else { return }
                 UIGraphicsGetCurrentContext()?.saveGState()
-                UIBezierPath(rect: bounds).addClip()
+                maskPath(block.effectivePresentation.imageMask, in: bounds).addClip()
                 asset.draw(in: CGRect(x: -crop.x * bounds.width / crop.width, y: -crop.y * bounds.height / crop.height,
                                       width: bounds.width / crop.width, height: bounds.height / crop.height))
                 UIGraphicsGetCurrentContext()?.restoreGState()

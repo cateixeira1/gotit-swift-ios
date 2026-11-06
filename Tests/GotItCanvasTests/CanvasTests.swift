@@ -245,3 +245,39 @@ private func photo(x: Double = 100, y: Double = 50, width: Double = 200, height:
         document = try CommandEngine.applying([.replaceBlock(next)], to: document)
     }
 }
+
+@Test func maskedImageWrapsTextByItsMaskContour() throws {
+    var document = CanvasDocument(title: "Mask")
+    let hash = String(repeating: "c", count: 64)
+    document.assets.append(Asset(hash: hash, mediaType: "image/png", byteCount: 10))
+    let text = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: 500, height: 700)), content: .text(.init("Texto")))
+    let image = CanvasBlock(order: 1, layout: .init(mode: .absolute, frame: .init(x: 100, y: 100, width: 100, height: 100)),
+                            content: .image(AssetReference(hash: hash)),
+                            presentation: ObjectPresentation(wrap: .contour, textPadding: 0, imageMask: .ellipse))
+    document = try CommandEngine.applying([.insertBlock(text), .insertBlock(image)], to: document)
+    let ellipse = try #require(TextFlowEngine.exclusions(for: text.id, in: document).first)
+    #expect(ellipse.polygon.count == 32)
+    var square = image; square.presentation?.imageMask = nil
+    document = try CommandEngine.applying([.replaceBlock(square)], to: document)
+    #expect(try TextFlowEngine.exclusions(for: text.id, in: document).first?.polygon.count == 4)
+}
+
+@Test func masksAreOnlyClosedShapesOnImages() throws {
+    var document = CanvasDocument(title: "Mask rules")
+    let hash = String(repeating: "c", count: 64)
+    document.assets.append(Asset(hash: hash, mediaType: "image/png", byteCount: 10))
+    let line = CanvasBlock(content: .image(AssetReference(hash: hash)), presentation: ObjectPresentation(imageMask: .line))
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.insertBlock(line)], to: document) }
+    let shape = CanvasBlock(content: .shape(Shape(kind: .rectangle)), presentation: ObjectPresentation(imageMask: .ellipse))
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.insertBlock(shape)], to: document) }
+    for kind in ShapeKind.closedMasks {
+        let ok = CanvasBlock(content: .image(AssetReference(hash: hash)), presentation: ObjectPresentation(imageMask: kind))
+        _ = try CommandEngine.applying([.insertBlock(ok)], to: document)
+    }
+}
+
+@Test func presentationWithoutMaskKeyDecodesAsUnclipped() throws {
+    let legacy = Data(#"{"wrap":"bounds","textPadding":8,"rotationRadians":0}"#.utf8)
+    let decoded = try JSONDecoder().decode(ObjectPresentation.self, from: legacy)
+    #expect(decoded.imageMask == nil && decoded.imageCrop == nil && decoded.wrap == .bounds)
+}

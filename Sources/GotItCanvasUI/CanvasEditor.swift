@@ -718,6 +718,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 })
             }
             actions.append(UIAction(title: "Recorte exato (%)…") { [weak self] _ in self?.crop(block) })
+            let masks: [(String, ShapeKind?)] = [("Original", nil), ("Círculo / elipse", .ellipse), ("Losango", .diamond), ("Triângulo", .triangle)]
+            actions.append(UIMenu(title: "Formato da imagem", image: UIImage(systemName: "circle.dashed"), children: masks.map { name, kind in
+                UIAction(title: name, state: block.effectivePresentation.imageMask == kind ? .on : .off,
+                         handler: update { var p = $0.effectivePresentation; p.imageMask = kind; $0.presentation = p })
+            }))
             actions.append(UIAction(title: "Restaurar recorte", handler: update { var p = $0.effectivePresentation; p.imageCrop = nil; $0.presentation = p }))
         default: break
         }

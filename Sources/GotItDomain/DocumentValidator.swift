@@ -87,6 +87,13 @@ public enum DocumentValidator {
                 default: throw DocumentError.invalid("Crop requires an image or sticker")
                 }
             }
+            if let mask = presentation.imageMask {
+                guard ShapeKind.closedMasks.contains(mask) else { throw DocumentError.invalid("Image mask must be a closed shape") }
+                switch block.content {
+                case .image, .sticker: break
+                default: throw DocumentError.invalid("Mask requires an image or sticker")
+                }
+            }
             switch block.content {
             case .ink(let ink): try validate(ink: ink)
             case .noteReference(let reference):

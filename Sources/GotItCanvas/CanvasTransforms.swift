@@ -8,6 +8,13 @@ public enum CanvasTransforms {
               var root = document.blocks.first(where: { $0.id == id }),
               root.layout.frame.width > 0, root.layout.frame.height > 0 else { throw DocumentError.invalid("Invalid resize") }
         let sx = width / root.layout.frame.width, sy = height / root.layout.frame.height
+        if case .table(let table) = root.content {
+            // Grid sizes have minimums, so the frame follows the scaled grid exactly.
+            let scaled = table.scaled(toWidth: width, height: height)
+            root.content = .table(scaled)
+            root.layout.frame.width = scaled.width; root.layout.frame.height = scaled.height
+            return [.replaceBlock(root)]
+        }
         root.layout.frame.width = width; root.layout.frame.height = height
         var commands: [DocumentCommand] = [.replaceBlock(root)]
         let children = Dictionary(grouping: document.blocks, by: \.parentID)

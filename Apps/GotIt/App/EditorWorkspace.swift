@@ -209,6 +209,7 @@ struct EditorWorkspace: View {
                 Divider()
                 Text("INSERIR").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
                 paletteButton("Texto", "text.badge.plus") { tool = .select; showTools = false; session.perform(.insertText) }
+                paletteButton("Tabela", "tablecells") { tool = .select; showTools = false; session.perform(.insertTable) }
                 paletteButton("Imagem", "photo") { beginImport(sticker: false, pdf: false) }
                 paletteButton("PDF", "doc.richtext") { beginImport(sticker: false, pdf: true) }
                 paletteButton("Sticker", "face.smiling") { beginImport(sticker: true, pdf: false) }

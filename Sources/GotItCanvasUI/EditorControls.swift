@@ -48,7 +48,7 @@ public enum TextEditingAction {
     case bold, italic, underline, strike, font(String), fontSize(CGFloat)
     case alignment(NSTextAlignment), highlight(UIColor?), foreground(UIColor)
     case bulletList, numberedList, removeList, indent(CGFloat), lineSpacing(CGFloat), link, find
-    case insertText, fitPage, zoom(CGFloat), finish
+    case insertText, insertTable, fitPage, zoom(CGFloat), finish
 }
 
 /// Keeps the selected UITextView and its text range alive while native toolbar buttons act on it.

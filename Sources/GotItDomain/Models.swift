@@ -218,6 +218,7 @@ public enum BlockContent: Codable, Equatable, Sendable {
     case sticker(AssetReference)
     case noteReference(NoteReference)
     case ink(InkStroke)
+    case table(CanvasTable)
 
     public var allowsChildren: Bool {
         switch self {

@@ -88,6 +88,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var selectedObjectID: UUID?
     /// Image being cropped with handles; cleared when the selection moves elsewhere.
     private var croppingID: UUID?
+    /// Inline editor for one table cell; lives on the surface, above the table.
+    private var cellEditor: UITextView?
+    private var editingCell: (block: UUID, row: Int, column: Int)?
     private var selectionOverlay: SelectionHandles?
     public var realizedBlockViewCount: Int { blockViews.count }
     public var recycledBlockViewCount: Int { textPool.count + objectPool.count }
@@ -356,6 +359,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private func perform(_ action: TextEditingAction) {
         switch action {
         case .insertText: insertText(at: CGPoint(x: 24, y: max(24, scroll.contentOffset.y / scroll.zoomScale + 24))); return
+        case .insertTable: insertTable(at: CGPoint(x: 24, y: max(24, scroll.contentOffset.y / scroll.zoomScale + 24))); return
         case .fitPage: fitPage(); return
         case .zoom(let factor): scroll.setZoomScale(min(scroll.maximumZoomScale, max(scroll.minimumZoomScale, scroll.zoomScale * factor)), animated: true); return
         case .finish: activeText?.resignFirstResponder(); usingTool = false; saveDrawing(); return
@@ -523,6 +527,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        if textView === cellEditor { return true }
         let now = Date(), id = textIDs[ObjectIdentifier(textView)]
         if typingBlock != id || typingCaret != textView.selectedRange.location || textView.selectedRange.length > 0 ||
            now.timeIntervalSince(typingTime) > 1 || now.timeIntervalSince(typingStarted) > 5 || text.count > 1 {
@@ -535,6 +540,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func textViewDidEndEditing(_ textView: UITextView) {
+        if textView === cellEditor {
+            if activeText === textView { activeText = nil; configuration.session?.hasTextSelection = false }
+            commitCell(); return
+        }
         if activeText === textView { activeText = nil; configuration.session?.hasTextSelection = false }
         typingGroup = nil; typingBlock = nil; typingCaret = nil; pendingTyping = false
     }
@@ -697,8 +706,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     @objc private func selectObject(_ gesture: UITapGestureRecognizer) {
         guard let object = gesture.view as? CanvasObjectView, let id = object.id else { return }
         if croppingID != id { croppingID = nil }
+        let wasSelected = selectedObjectID == id
         selectedObjectID = id
         render()
+        if wasSelected, connectingFrom == nil, case .table = object.block?.content {
+            beginEditingCell(object, at: gesture.location(in: object)); return
+        }
         if let source = connectingFrom {
             connectingFrom = nil
             if source != id { configuration.onCommands([.setRelation(.init(sourceID: source, targetID: id, kind: .connector, style: .init()))]) }
@@ -719,12 +732,104 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         pendingFocusID = block.id
         configuration.onCommands([.insertBlock(block)])
     }
+    private func insertTable(at point: CGPoint) {
+        let size = configuration.document.canvas.size
+        let width = max(120, min(480, size.width - point.x - 24))
+        let table = CanvasTable(rows: 3, columns: 3, width: width)
+        let block = CanvasBlock(order: nextOrder, layout: .init(mode: .absolute,
+            frame: .init(x: point.x, y: point.y, width: table.width, height: table.height)), content: .table(table))
+        selectedObjectID = block.id
+        configuration.onCommands([.insertBlock(block)])
+    }
+
+    /// Second tap on a selected table edits the cell under the finger.
+    private func beginEditingCell(_ object: CanvasObjectView, at point: CGPoint) {
+        guard let id = object.id, let block = configuration.document.blocks.first(where: { $0.id == id }),
+              case .table(let table) = block.content else { return }
+        let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
+        guard let hit = table.cell(at: .init(x: Double(point.x / sx), y: Double(point.y / sy))) else { return }
+        commitCell()
+        let rect = table.frame(row: hit.row, column: hit.column)
+        let editor = UITextView(usingTextLayoutManager: true)
+        editor.delegate = self
+        editor.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.97)
+        editor.layer.borderColor = UIColor.systemBlue.cgColor; editor.layer.borderWidth = 2
+        editor.textContainerInset = UIEdgeInsets(top: 4, left: 2, bottom: 4, right: 2)
+        editor.accessibilityIdentifier = "tableCellEditor"
+        let base = TableRendering.base(header: table.headerRow && hit.row == 0)
+        editor.attributedText = TextBridge.attributed(table.cells[hit.row][hit.column].text, base: base)
+        editor.typingAttributes = TextBridge.attributed(RichText(" "), base: base).attributes(at: 0, effectiveRange: nil)
+        editor.bounds = CGRect(x: 0, y: 0, width: rect.width * sx, height: max(rect.height * sy, 36))
+        editor.center = object.convert(CGPoint(x: (rect.x + rect.width / 2) * sx, y: (rect.y + rect.height / 2) * sy), to: surface)
+        editor.transform = object.transform
+        surface.addSubview(editor)
+        cellEditor = editor; editingCell = (id, hit.row, hit.column)
+        editor.becomeFirstResponder()
+    }
+
+    /// Saves the open cell (if it changed) and grows its row to fit; one undo step per cell edit.
+    private func commitCell() {
+        guard let editor = cellEditor, let cell = editingCell else { return }
+        cellEditor = nil; editingCell = nil
+        let text = TextBridge.richText(editor.attributedText ?? NSAttributedString())
+        let needed = editor.sizeThatFits(CGSize(width: editor.bounds.width, height: .greatestFiniteMagnitude)).height
+        editor.delegate = nil; editor.removeFromSuperview()
+        guard let block = configuration.document.blocks.first(where: { $0.id == cell.block }), case .table(let table) = block.content,
+              table.cells.indices.contains(cell.row), table.cells[cell.row].indices.contains(cell.column) else { return }
+        let old = table.cells[cell.row][cell.column].text
+        guard old != text, !(old.plainText.isEmpty && text.plainText.isEmpty) else { return }
+        do {
+            let updated = try block.updatingTable {
+                try $0.settingText(text, row: cell.row, column: cell.column).fittingRow(cell.row, toContentHeight: Double(needed))
+            }
+            configuration.onCommands([.replaceBlock(updated)])
+        } catch { configuration.onError(error) }
+    }
+
+    private func tableMenu(_ block: CanvasBlock, _ table: CanvasTable) -> [UIMenuElement] {
+        var cell = (row: 0, column: 0)
+        if let object = blockViews[block.id] as? CanvasObjectView, let location = object.menuLocation {
+            let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
+            if let hit = table.cell(at: .init(x: Double(location.x / sx), y: Double(location.y / sy))) { cell = hit }
+        }
+        func edit(_ title: String, _ symbol: String? = nil, destructive: Bool = false, _ change: @escaping (CanvasTable) throws -> CanvasTable) -> UIAction {
+            UIAction(title: title, image: symbol.flatMap { UIImage(systemName: $0) }, attributes: destructive ? .destructive : []) { [weak self] _ in
+                guard let self else { return }
+                do { self.configuration.onCommands([.replaceBlock(try block.updatingTable(change))]) }
+                catch { self.configuration.onError(error) }
+            }
+        }
+        let colors: [(String, String?)] = [("Sem cor", nil), ("Cinza", "#F3F4F6"), ("Amarelo", "#FEF3C7"), ("Verde", "#DCFCE7"), ("Azul", "#DBEAFE"), ("Rosa", "#FCE7F3")]
+        return [UIMenu(title: "Tabela (linha \(cell.row + 1), coluna \(cell.column + 1))", image: UIImage(systemName: "tablecells"), children: [
+            UIAction(title: "Editar célula", image: UIImage(systemName: "pencil")) { [weak self] _ in
+                guard let self, let object = self.blockViews[block.id] as? CanvasObjectView else { return }
+                let f = table.frame(row: cell.row, column: cell.column)
+                let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
+                self.beginEditingCell(object, at: CGPoint(x: (f.x + f.width / 2) * sx, y: (f.y + f.height / 2) * sy))
+            },
+            edit("Inserir linha acima", "arrow.up.to.line") { try $0.insertingRow(at: cell.row) },
+            edit("Inserir linha abaixo", "arrow.down.to.line") { try $0.insertingRow(at: cell.row + 1) },
+            edit("Inserir coluna à esquerda", "arrow.left.to.line") { try $0.insertingColumn(at: cell.column) },
+            edit("Inserir coluna à direita", "arrow.right.to.line") { try $0.insertingColumn(at: cell.column + 1) },
+            edit(table.headerRow ? "Remover cabeçalho" : "Primeira linha como cabeçalho", "rectangle.topthird.inset.filled") { var t = $0; t.headerRow.toggle(); return t },
+            UIMenu(title: "Cor da célula", children: colors.map { name, color in
+                edit(name) { var t = $0; t.cells[cell.row][cell.column].background = color; return t }
+            }),
+            UIMenu(title: "Bordas", children: [("Sem borda", 0.0), ("Fina", 1.0), ("Média", 2.0)].map { name, width in
+                edit(name) { var t = $0; t.borderWidth = width; return t }
+            }),
+            edit("Excluir linha", "minus.square", destructive: true) { try $0.removingRow(at: cell.row) },
+            edit("Excluir coluna", "minus.square", destructive: true) { try $0.removingColumn(at: cell.column) },
+        ])]
+    }
+
     private var nextOrder: Int { (configuration.document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1 }
 
     public func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
         UIContextMenuConfiguration(actionProvider: { [weak self] _ in
             guard let self else { return nil }
-            return UIMenu(children: [UIAction(title: "Texto") { _ in self.insertText(at: location) }] +
+            return UIMenu(children: [UIAction(title: "Texto") { _ in self.insertText(at: location) },
+                                     UIAction(title: "Tabela", image: UIImage(systemName: "tablecells")) { _ in self.insertTable(at: location) }] +
                 [ShapeKind.rectangle, .ellipse, .diamond, .triangle].map { kind in
                     UIAction(title: kind.rawValue) { _ in
                         self.configuration.onCommands(DiagramCommands.insertNode(kind: kind, frame: .init(x: location.x, y: location.y, width: 180, height: 110), order: self.nextOrder))
@@ -748,6 +853,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             })
         ]
         if case .pdf = block.content { actions.insert(UIAction(title: "Abrir PDF") { [weak self] _ in self?.configuration.onOpenPDF(id) }, at: 0) }
+        if case .table(let table) = block.content { actions.insert(contentsOf: tableMenu(block, table), at: 0) }
         if case .shape = block.content {
             actions.append(UIMenu(title: "Preenchimento", children: colors.map { name, color in
                 UIAction(title: name, handler: update { if case .shape(var shape) = $0.content { shape.fill = color; $0.content = .shape(shape) } })

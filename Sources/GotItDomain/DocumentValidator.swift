@@ -113,6 +113,7 @@ public enum DocumentValidator {
                 guard shape.lineWidth.isFinite, shape.lineWidth >= 0 else { throw DocumentError.invalid("Invalid line width") }
                 try validate(color: shape.stroke)
                 if let fill = shape.fill { try validate(color: fill) }
+            case .table(let table): try validate(table: table, frame: block.layout.frame)
             default: break
             }
             if let hash = block.content.assetHash, !hashes.contains(hash) {
@@ -154,6 +155,27 @@ public enum DocumentValidator {
         if let size = style.fontSize, !size.isFinite || size <= 0 { throw DocumentError.invalid("Invalid font size") }
         if let foreground = style.foreground { try validate(color: foreground) }
         if let background = style.background { try validate(color: background) }
+    }
+
+    private static func validate(table: CanvasTable, frame: LogicalRect) throws {
+        guard (1...CanvasTable.maximumRows).contains(table.rowCount), (1...CanvasTable.maximumColumns).contains(table.columnCount),
+              table.cells.count == table.rowCount, table.cells.allSatisfy({ $0.count == table.columnCount }) else {
+            throw DocumentError.invalid("Table grid is inconsistent")
+        }
+        guard table.columnWidths.allSatisfy({ $0.isFinite && $0 >= CanvasTable.minimumColumnWidth }),
+              table.rowHeights.allSatisfy({ $0.isFinite && $0 >= CanvasTable.minimumRowHeight }),
+              table.borderWidth.isFinite, table.borderWidth >= 0 else { throw DocumentError.invalid("Invalid table dimensions") }
+        // The frame mirrors the grid; a mismatch means a writer forgot to update one of them.
+        guard abs(frame.width - table.width) < 0.5, abs(frame.height - table.height) < 0.5 else {
+            throw DocumentError.invalid("Table frame does not match its rows and columns")
+        }
+        try validate(color: table.borderColor)
+        for row in table.cells {
+            for cell in row {
+                if let background = cell.background { try validate(color: background) }
+                for run in cell.text.runs { try validate(style: run.style) }
+            }
+        }
     }
 
     private static func validate(ink: InkStroke) throws {

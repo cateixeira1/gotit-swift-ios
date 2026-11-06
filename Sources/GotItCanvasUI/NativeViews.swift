@@ -69,6 +69,39 @@ enum TextBridge {
     }
 }
 
+/// Draws a table the same way at any frame size: the grid is scaled to the view bounds.
+@MainActor enum TableRendering {
+    static func base(header: Bool) -> BlockStyle { BlockStyle(fontSize: 16, bold: header ? true : nil, foreground: "#111827") }
+
+    static func draw(_ table: CanvasTable, in bounds: CGRect) {
+        let sx = bounds.width / max(1, table.width), sy = bounds.height / max(1, table.height)
+        for row in 0..<table.rowCount {
+            for column in 0..<table.columnCount {
+                let f = table.frame(row: row, column: column)
+                let rect = CGRect(x: f.x * sx, y: f.y * sy, width: f.width * sx, height: f.height * sy)
+                let header = table.headerRow && row == 0
+                if let background = table.cells[row][column].background { UIColor(hex: background).setFill(); UIRectFill(rect) }
+                else if header { UIColor(hex: "#F3F4F6").setFill(); UIRectFill(rect) }
+                let text = TextBridge.attributed(table.cells[row][column].text, base: base(header: header))
+                text.draw(with: rect.insetBy(dx: 6, dy: 4), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], context: nil)
+            }
+        }
+        guard table.borderWidth > 0 else { return }
+        let path = UIBezierPath()
+        var x = 0.0
+        for edge in [0.0] + table.columnWidths {
+            x += edge
+            path.move(to: CGPoint(x: x * sx, y: 0)); path.addLine(to: CGPoint(x: x * sx, y: bounds.height))
+        }
+        var y = 0.0
+        for edge in [0.0] + table.rowHeights {
+            y += edge
+            path.move(to: CGPoint(x: 0, y: y * sy)); path.addLine(to: CGPoint(x: bounds.width, y: y * sy))
+        }
+        UIColor(hex: table.borderColor).setStroke(); path.lineWidth = table.borderWidth; path.stroke()
+    }
+}
+
 extension UIColor {
     convenience init(hex: String) {
         let text = String(hex.dropFirst())
@@ -91,6 +124,9 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
     var asset: UIImage?
     var note: NoteCardPresentation?
     var onMenu: (() -> UIMenu)?
+    /// Where the context menu was invoked, in this view's coordinates (tables use it to
+    /// know which row/column the menu acts on).
+    var menuLocation: CGPoint?
     override init(frame: CGRect) {
         super.init(frame: frame); backgroundColor = .clear
         addInteraction(UIContextMenuInteraction(delegate: self))
@@ -98,7 +134,8 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
     }
     required init?(coder: NSCoder) { fatalError() }
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
-        UIContextMenuConfiguration(actionProvider: { [weak self] _ in self?.onMenu?() })
+        menuLocation = location
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in self?.onMenu?() })
     }
     private func maskPath(_ kind: ShapeKind?, in area: CGRect) -> UIBezierPath {
         switch kind {
@@ -165,6 +202,10 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
         case .audio: placeholder("Áudio")
         case .video: placeholder("Vídeo")
         case .drawing: placeholder("Desenho PencilKit")
+        case .table(let table):
+            TableRendering.draw(table, in: bounds)
+            accessibilityLabel = "Tabela \(table.rowCount) × \(table.columnCount)"
+            accessibilityValue = table.plainText
         case .container, .text: break
         }
     }

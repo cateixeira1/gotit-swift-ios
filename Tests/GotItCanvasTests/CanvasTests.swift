@@ -281,3 +281,15 @@ private func photo(x: Double = 100, y: Double = 50, width: Double = 200, height:
     let decoded = try JSONDecoder().decode(ObjectPresentation.self, from: legacy)
     #expect(decoded.imageMask == nil && decoded.imageCrop == nil && decoded.wrap == .bounds)
 }
+
+@Test func resizingATableKeepsItsGridAndFrameInSync() throws {
+    let grid = CanvasTable(rows: 2, columns: 2, width: 200)
+    var document = CanvasDocument(title: "Tabela")
+    let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: grid.width, height: grid.height)), content: .table(grid))
+    document = try CommandEngine.applying([.insertBlock(block)], to: document)
+    let commands = try CanvasTransforms.resize(block.id, width: 400, height: 144, in: document)
+    let resized = try CommandEngine.applying(commands, to: document)
+    guard case .table(let scaled) = resized.blocks[0].content else { Issue.record("table"); return }
+    #expect(scaled.columnWidths == [200, 200] && scaled.rowHeights == [72, 72])
+    #expect(resized.blocks[0].layout.frame.width == 400)
+}

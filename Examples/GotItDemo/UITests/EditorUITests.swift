@@ -3,6 +3,7 @@ import XCTest
 @MainActor
 final class EditorUITests: XCTestCase {
     func testPagesDrawingAndReopenInAdaptiveEditor() throws {
+        continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--reset-test-data"]
         app.launch()

@@ -54,6 +54,18 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public func updateUIViewController(_ controller: CanvasViewController, context: Context) { controller.configure(self) }
 }
 
+/// Backspace at offset 0 of a continuation fragment never reaches `shouldChangeTextIn`
+/// (there is nothing to delete inside this view), so the story handles it here. This also
+/// covers hardware keyboards. Marked text (IME composition) is never intercepted.
+final class FlowTextView: UITextView {
+    var backspaceAtStart: (() -> Bool)?
+    override func deleteBackward() {
+        if selectedRange.location == 0, selectedRange.length == 0, markedTextRange == nil,
+           backspaceAtStart?() == true { return }
+        super.deleteBackward()
+    }
+}
+
 @MainActor
 public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate {
     private var configuration: CanvasEditor
@@ -442,7 +454,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     private func makeTextView(id: UUID) -> UITextView {
         if let reused = textPool.popLast() { textIDs[ObjectIdentifier(reused)] = id; return reused }
-        let text = UITextView(usingTextLayoutManager: true)
+        let text = FlowTextView(usingTextLayoutManager: true)
+        text.backspaceAtStart = { [weak self, weak text] in self?.backspaceAcrossFragments(text) ?? false }
         text.delegate = self; text.backgroundColor = .clear
         text.textContainerInset = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
         text.isScrollEnabled = true
@@ -463,6 +476,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ]
         bar.sizeToFit(); text.inputAccessoryView = bar
         return text
+    }
+
+    /// Joins a continuation fragment to the previous one: the character before the story break
+    /// is deleted, the text reflows, and the caret lands where that character was.
+    private func backspaceAcrossFragments(_ textView: UITextView?) -> Bool {
+        guard let textView, let id = textIDs[ObjectIdentifier(textView)],
+              let onTextCommands = configuration.onTextCommands,
+              let merge = configuration.document.backspaceAcrossFragments(at: id) else { return false }
+        typingGroup = UUID().uuidString; typingBlock = nil; typingCaret = nil; pendingTyping = false
+        guard let focus = onTextCommands(merge.replacement, typingGroup, NSRange(location: merge.caret, length: 0)) else { return true }
+        configuration.session?.pendingFocus = focus
+        return true
     }
 
     public func textViewDidBeginEditing(_ textView: UITextView) {

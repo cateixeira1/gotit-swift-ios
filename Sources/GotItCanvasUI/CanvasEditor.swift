@@ -62,6 +62,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var strokesAtStart = 0
     private var loadedDrawingHash: String?
     private var fitted = false
+    private var inkToolSignature = ""
     private var blockViews: [UUID: UIView] = [:]
     private var textIDs: [ObjectIdentifier: UUID] = [:]
     private var connectionViews: [UIView] = []
@@ -206,7 +207,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ink.frame = surface.bounds
         ink.contentSize = surface.bounds.size
         ink.isUserInteractionEnabled = configuration.tool.isDrawing
-        ink.tool = configuration.tool.nativeTool(color: configuration.inkColor, width: configuration.inkWidth, vectorEraser: configuration.vectorEraser)
+        let signature = "\(configuration.tool)-\(configuration.inkColor.hex)-\(configuration.inkWidth)-\(configuration.vectorEraser)"
+        if signature != inkToolSignature {
+            ink.tool = configuration.tool.nativeTool(color: configuration.inkColor, width: configuration.inkWidth, vectorEraser: configuration.vectorEraser)
+            inkToolSignature = signature
+        }
         scroll.panGestureRecognizer.minimumNumberOfTouches = configuration.tool.isDrawing ? 2 : 1
         if configuration.tool.isDrawing { activeText?.resignFirstResponder() }
         loadDrawing()

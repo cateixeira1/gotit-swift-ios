@@ -39,7 +39,7 @@ public enum CanvasTool: String, CaseIterable, Identifiable {
         case .pencil: kind = .pencil
         default: kind = .pen
         }
-        let range = PKInkingTool.widthRange(for: kind)
+        let range = kind.validWidthRange
         return PKInkingTool(kind, color: color, width: min(range.upperBound, max(range.lowerBound, width)))
     }
 }

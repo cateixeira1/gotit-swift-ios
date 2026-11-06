@@ -1,9 +1,9 @@
 # Etapa 2 — Canvas Engine e contrato do editor
 
 Requisitos do usuário incorporados em 06/11/2026. Esta etapa foi iniciada após
-o Document Core. O código do motor foi testado em Linux; o adaptador UIKit e o
-aplicativo de demonstração **ainda não foram compilados nem executados em um
-ambiente Apple nesta entrega**. A etapa 2 não está encerrada.
+o Document Core. A base passou no CI Linux/macOS e compilou para iOS Simulator. A evolução
+com páginas, paleta e PencilKit está em [native-editor.md](native-editor.md);
+consulte o workflow do commit atual para testes nativos/UI. A etapa 2 não está encerrada.
 
 ## Requisitos, padrões e rastreabilidade
 
@@ -17,7 +17,7 @@ ambiente Apple nesta entrega**. A etapa 2 não está encerrada.
 | Canvas | A4 por padrão; dimensão livre em px, cm ou in; zoom | Conversões testadas; opções e zoom no código UIKit/SwiftUI |
 | Imagens | Redimensionar, recortar e girar | Frame, recorte normalizado e rotação separados do original; menus de tamanho, recorte numérico e giro de 90°; importação simples no demo |
 | Equações manuscritas | Reconhecer e resolver até segundo grau; permitir desligar | Resolvedor determinístico testado e toggle persistente; reconhecimento matemático da escrita **não integrado**; demo aceita expressão digitada/corrigida |
-| Teia | Canvas com notas escolhidas, prévia, nome, criação, conexões, disposição livre, texto e detalhes | Cards referenciados por ID, cronologia derivada, conexões manuais, posições e texto; demo resolve metadados e prévias textuais |
+| Teia | Canvas com notas escolhidas, prévia, nome, criação, conexões, disposição livre, texto e detalhes | Cards referenciados por ID, cronologia derivada, conexões manuais, posições e texto; demo resolve metadados e miniaturas da primeira página |
 | Entradas da Teia | Botão na nota, na pasta e no retângulo do ícone da nota | Demo tem entrada na nota, no card e na coleção geral; navegação por pastas reais ainda depende do catálogo de pastas |
 
 O que consta como código UIKit não equivale a funcionalidade validada no aparelho.
@@ -102,12 +102,13 @@ Conexões reconhecidas guardam IDs de origem/destino e estilo próprio. Sua rota
 nós se movem. Durante drag, o protótipo atual confirma a geometria no fim do
 gesto; atualização contínua da linha ainda precisa ser afinada no aparelho.
 
-Os pontos originais são preservados no documento. O primeiro capturador usa
-toques coalescidos do UIKit e não guarda pressão, inclinação ou o arquivo
-PencilKit completo. O adaptador PencilKit final deverá guardar `PKDrawing`
-como asset, preservar esses atributos e suportar reconhecimento multitraço,
-agrupamento temporal, desfazer conversão e correção manual. O checkbox já
-desliga o reconhecimento; desenhar continua funcionando.
+O capturador atual usa PencilKit e guarda `PKDrawing` como asset por página,
+preservando pressão e inclinação nos traços livres. A conversão geométrica remove
+o último traço da camada e insere a forma em um único lote reversível; a forma
+conserva seus pontos originais simplificados. Undo restaura o asset anterior.
+Ainda faltam reconhecimento multitraço, agrupamento temporal e correção manual.
+Desligar o reconhecimento mantém a escrita livre. A borracha PencilKit atua na
+camada de tinta; formas reconhecidas são objetos com menu de edição/exclusão.
 
 ## Equações
 
@@ -152,18 +153,18 @@ Entradas finais: botão na nota aberta; botão na pasta; botão no card da nota.
 Todas devem abrir o mesmo seletor para criar/escolher uma Teia e acrescentar
 as notas selecionadas. O demo cria Teias diretamente e tem uma coleção geral;
 **não implementa ainda pastas persistentes nem o seletor de Teias existentes**.
-Prévia atual do demo é textual; a miniatura fiel do canvas deve usar cache
-por `(documentID, revision, size)` no pipeline de derivados.
+As prévias agora usam o renderizador de blocos da primeira página. Cache
+persistente por `(documentID, revision, size)` pertence ao pipeline de derivados.
 
 ## Sequência restante da etapa 2
 
-1. Compilar `GotItCanvasUI` e `GotItDemo` no Xcode e corrigir qualquer erro de
-   SDK; executar cenários de edição, teclado, Pencil e multitouch no iPad.
+1. Acompanhar testes de interface no CI e executar cenários de edição, teclado,
+   Apple Pencil e multitouch em aparelhos físicos.
 2. Concluir seleção e alças de tamanho/recorte, clipping de conteúdo dentro
    das formas, estilos nomeados, tabelas simples e fluxo textual entre áreas.
-3. Integrar PencilKit e reconhecimento multitraço; testar equações manuscritas
+3. Ampliar o reconhecimento para múltiplos traços; testar equações manuscritas
    com corpus real, correção de baixa confiança e preservação do original.
-4. Concluir pastas, seleção de Teias existentes, miniaturas fiéis e navegação.
+4. Concluir pastas, seleção de Teias existentes, cache de miniaturas e navegação.
 5. Virtualizar a criação/reciclagem de views, e não apenas ocultá-las fora da
    viewport; medir documentos grandes e substituir gravações integrais por
    deltas antes de uma experiência de digitação de produção.

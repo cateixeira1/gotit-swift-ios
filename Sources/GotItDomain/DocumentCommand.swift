@@ -1,0 +1,73 @@
+import Foundation
+
+public enum DocumentError: Error, Equatable, Sendable {
+    case invalid(String)
+    case missingBlock(UUID)
+    case missingDocument(UUID)
+    case revisionConflict(expected: Int64, actual: Int64)
+    case nothingToUndo
+    case nothingToRedo
+}
+
+/// The only editing gateway. UI gestures and future AI proposals use the same validation.
+public enum DocumentCommand: Codable, Equatable, Sendable {
+    case rename(String)
+    case setDefaultStyle(BlockStyle)
+    case insertBlock(CanvasBlock)
+    case replaceBlock(CanvasBlock)
+    case removeSubtree(UUID)
+    case registerAsset(Asset)
+    case setRelation(BlockRelation)
+    case removeRelation(UUID)
+}
+
+public enum CommandEngine {
+    /// Applies a batch to a value copy; invalid batches leave the caller's value intact.
+    public static func applying(_ commands: [DocumentCommand], to original: CanvasDocument) throws -> CanvasDocument {
+        guard !commands.isEmpty else { throw DocumentError.invalid("Empty command batch") }
+        var document = original
+        for command in commands {
+            switch command {
+            case .rename(let title): document.title = title
+            case .setDefaultStyle(let style): document.defaultStyle = style
+            case .insertBlock(let block):
+                guard !document.blocks.contains(where: { $0.id == block.id }) else {
+                    throw DocumentError.invalid("Duplicate block ID")
+                }
+                document.blocks.append(block)
+            case .replaceBlock(let block):
+                guard let index = document.blocks.firstIndex(where: { $0.id == block.id }) else {
+                    throw DocumentError.missingBlock(block.id)
+                }
+                document.blocks[index] = block
+            case .removeSubtree(let id):
+                guard document.blocks.contains(where: { $0.id == id }) else { throw DocumentError.missingBlock(id) }
+                var deleted: Set<UUID> = [id]
+                var children: [UUID: [UUID]] = [:]
+                for block in document.blocks {
+                    if let parent = block.parentID { children[parent, default: []].append(block.id) }
+                }
+                var pending = [id]
+                while let parent = pending.popLast() {
+                    for child in children[parent, default: []] where deleted.insert(child).inserted { pending.append(child) }
+                }
+                document.blocks.removeAll { deleted.contains($0.id) }
+                document.relations.removeAll { deleted.contains($0.sourceID) || deleted.contains($0.targetID) }
+            case .registerAsset(let asset):
+                if let existing = document.assets.first(where: { $0.hash == asset.hash }) {
+                    guard existing == asset else { throw DocumentError.invalid("Asset hash already has different metadata") }
+                } else { document.assets.append(asset) }
+            case .setRelation(let relation):
+                document.relations.removeAll { $0.id == relation.id }
+                document.relations.append(relation)
+            case .removeRelation(let id):
+                guard document.relations.contains(where: { $0.id == id }) else {
+                    throw DocumentError.invalid("Missing relation")
+                }
+                document.relations.removeAll { $0.id == id }
+            }
+        }
+        try DocumentValidator.validate(document)
+        return document
+    }
+}

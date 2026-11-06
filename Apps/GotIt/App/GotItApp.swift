@@ -301,6 +301,18 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// Built-in stickers (rendered emoji): no picker, inserted at a fixed spot and selected.
+    func insertSticker(png data: Data, pageID: UUID, documentID: UUID) {
+        do {
+            guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
+            let asset = try storeAsset(data, mediaType: "image/png")
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 40, y: 80, width: 120, height: 120)),
+                                    content: .sticker(.init(hash: asset.hash)), presentation: .init(wrap: .none))
+            enqueue((current.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)],
+                    pageID: pageID, documentID: documentID)
+        } catch { self.error = String(describing: error) }
+    }
+
     func importPDF(_ url: URL, pageID: UUID, documentID: UUID) {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }

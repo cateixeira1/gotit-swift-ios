@@ -293,3 +293,15 @@ private func photo(x: Double = 100, y: Double = 50, width: Double = 200, height:
     #expect(scaled.columnWidths == [200, 200] && scaled.rowHeights == [72, 72])
     #expect(resized.blocks[0].layout.frame.width == 400)
 }
+
+@Test func photosResizeProportionallyFromTheDominantAxis() {
+    let frame = LogicalRect(x: 0, y: 0, width: 200, height: 100)
+    let wider = CanvasTransforms.proportionalSize(from: frame, proposedWidth: 300, proposedHeight: 110)
+    #expect(wider.width == 300 && wider.height == 150)
+    let shorter = CanvasTransforms.proportionalSize(from: frame, proposedWidth: 190, proposedHeight: 50)
+    #expect(shorter.width == 100 && shorter.height == 50)
+    let tiny = CanvasTransforms.proportionalSize(from: frame, proposedWidth: 1, proposedHeight: 1)
+    #expect(tiny.height == 24 && tiny.width == 48)            // ratio 2:1 kept at the minimum
+    #expect(CanvasTransforms.keepsAspectRatio(.image(AssetReference(hash: "x"))))
+    #expect(!CanvasTransforms.keepsAspectRatio(.shape(Shape(kind: .rectangle))))
+}

@@ -70,3 +70,21 @@ public extension CanvasTransforms {
         return result
     }
 }
+
+public extension CanvasTransforms {
+    /// Corner-drag size for content that must not distort (photos, stickers, PDFs): the axis the
+    /// finger moved more, relative to the current size, sets one uniform scale.
+    static func proportionalSize(from frame: LogicalRect, proposedWidth: Double, proposedHeight: Double,
+                                 minimum: Double = 24) -> (width: Double, height: Double) {
+        guard frame.width > 0, frame.height > 0, proposedWidth.isFinite, proposedHeight.isFinite else { return (frame.width, frame.height) }
+        let sx = proposedWidth / frame.width, sy = proposedHeight / frame.height
+        var scale = abs(sx - 1) >= abs(sy - 1) ? sx : sy
+        scale = max(scale, minimum / min(frame.width, frame.height))
+        return (frame.width * scale, frame.height * scale)
+    }
+
+    /// Whether a block's content keeps its aspect ratio when resized with the handles.
+    static func keepsAspectRatio(_ content: BlockContent) -> Bool {
+        switch content { case .image, .sticker, .pdf, .video: true; default: false }
+    }
+}

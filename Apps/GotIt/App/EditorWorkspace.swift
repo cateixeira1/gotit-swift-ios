@@ -9,7 +9,7 @@ struct EditorWorkspace: View {
     let document: CanvasDocument
     @Environment(\.scenePhase) private var scenePhase
     @State private var session = EditorSession()
-    @State private var tool = CanvasTool.select
+    @State private var tool = CanvasTool.pen
     @State private var inkColor = Color.primary
     @State private var inkWidth = 3.0
     @State private var vectorEraser = false
@@ -17,6 +17,7 @@ struct EditorWorkspace: View {
     @State private var showTools = false
     @State private var showPhotos = false
     @State private var showPDF = false
+    @State private var showStickers = false
     @State private var reader: PDFTarget?
     private struct PDFTarget: Identifiable { var id: UUID; var documentID: UUID; var url: URL }
     @State private var photo: PhotosPickerItem?
@@ -52,6 +53,7 @@ struct EditorWorkspace: View {
             NavigationStack { toolsPanel.navigationTitle("Ferramentas").toolbar { Button("Concluir") { showTools = false } } }
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showStickers) { stickerPicker.presentationDetents([.medium, .large]) }
         .sheet(item: $reader) { target in
             PDFReader(url: target.url) { data in try model.savePDF(data, blockID: target.id, documentID: target.documentID) }
         }
@@ -69,7 +71,7 @@ struct EditorWorkspace: View {
             case .failure(let error): model.error = error.localizedDescription
             }
         }
-        .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
+        .onChange(of: document.id) { _, _ in tool = .pen; session.hasTextSelection = false }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.perform(.finish) } }
     }
 
@@ -196,6 +198,46 @@ struct EditorWorkspace: View {
         }.background(Color(uiColor: .secondarySystemBackground))
     }
 
+    private static let stickerEmoji = [
+        "⭐️", "✅", "❗️", "❓", "⚠️", "📌", "📎", "💡", "🔥", "🎯", "🚩", "🛑",
+        "❤️", "👍", "👏", "🎉", "😀", "😂", "😍", "🤔", "🙏", "💪", "👀", "✨",
+        "📅", "⏰", "📝", "📚", "⚖️", "🏥", "💊", "🩺", "📞", "✉️", "💰", "📈",
+        "🏠", "🚗", "✈️", "☕️", "🍰", "🐱", "☀️", "🌧️", "🔒", "🔑", "➡️", "⬇️",
+    ]
+
+    private var stickerPicker: some View {
+        NavigationStack {
+            ScrollView {
+                Button { showStickers = false; beginImport(sticker: true, pdf: false) } label: {
+                    Label("Usar uma imagem da galeria", systemImage: "photo.on.rectangle").frame(maxWidth: .infinity)
+                }.buttonStyle(.bordered).padding(.horizontal).padding(.top, 8)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 56))], spacing: 12) {
+                    ForEach(Self.stickerEmoji, id: \.self) { emoji in
+                        Button {
+                            showStickers = false
+                            if let png = Self.stickerPNG(emoji) { model.insertSticker(png: png, pageID: pageID, documentID: document.id) }
+                        } label: { Text(emoji).font(.system(size: 40)).frame(width: 56, height: 56) }
+                        .accessibilityLabel("Sticker \(emoji)")
+                    }
+                }.padding()
+            }
+            .navigationTitle("Stickers")
+            .toolbar { Button("Fechar") { showStickers = false } }
+        }
+    }
+
+    /// Emoji rendered once to a transparent PNG, stored like any image (hash-addressed).
+    private static func stickerPNG(_ emoji: String) -> Data? {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 2; format.opaque = false
+        let size = CGSize(width: 240, height: 240)
+        let centered = NSMutableParagraphStyle(); centered.alignment = .center
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            (emoji as NSString).draw(in: CGRect(x: 0, y: 12, width: size.width, height: size.height - 12),
+                                     withAttributes: [.font: UIFont.systemFont(ofSize: 180), .paragraphStyle: centered])
+        }
+        return image.pngData()
+    }
+
     private var toolsPanel: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -211,11 +253,11 @@ struct EditorWorkspace: View {
                     .font(.system(size: 10)).disabled(!session.hasTextSelection || tool.isDrawing)
                 Divider()
                 Text("INSERIR").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                paletteButton("Texto", "text.badge.plus") { tool = .select; showTools = false; session.perform(.insertText) }
-                paletteButton("Tabela", "tablecells") { tool = .select; showTools = false; session.perform(.insertTable) }
+                paletteButton("Texto", "text.badge.plus") { showTools = false; session.perform(.insertText) }
+                paletteButton("Tabela", "tablecells") { showTools = false; session.perform(.insertTable) }
                 paletteButton("Imagem", "photo") { beginImport(sticker: false, pdf: false) }
                 paletteButton("PDF", "doc.richtext") { beginImport(sticker: false, pdf: true) }
-                paletteButton("Sticker", "face.smiling") { beginImport(sticker: true, pdf: false) }
+                paletteButton("Sticker", "face.smiling") { session.perform(.finish); showTools = false; showStickers = true }
                 Divider()
                 Text("DESENHAR").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
                 ForEach(CanvasTool.allCases.filter { $0 != .select }) { item in toolButton(item) }
@@ -255,7 +297,7 @@ struct EditorWorkspace: View {
         }.accessibilityLabel("Destacar em \(title)")
     }
     private func beginImport(sticker: Bool, pdf: Bool) {
-        session.perform(.finish); tool = .select; showTools = false
+        session.perform(.finish); showTools = false
         importTarget = .init(documentID: document.id, pageID: pageID, sticker: sticker)
         // A single sheet closes before the system picker is presented.
         Task { @MainActor in

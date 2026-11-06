@@ -82,6 +82,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var usingTool = false
     private var lastDrawingData = PKDrawing().dataRepresentation()
     private var strokesAtStart = 0
+    /// Finger tap over the ink layer: selects objects, places the caret, or starts a text block.
+    private var inkTap: UITapGestureRecognizer?
+    /// Blocks seen in the previous render, to select a freshly inserted image or table.
+    private var knownBlockIDs: Set<UUID>?
+    private var lastTool: CanvasTool?
+    /// Bumped to cancel a delayed save of a tap-sized dot.
+    private var dotSaveGeneration = 0
     private var loadedDrawingHash: String?
     private var fitted = false
     private var inkToolSignature = ""
@@ -144,6 +151,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ink.accessibilityValue = "0 traços"
         ink.accessibilityIdentifier = "drawingCanvas"
         ink.accessibilityLabel = "Desenho da página"
+        let inkTap = UITapGestureRecognizer(target: self, action: #selector(tapInk(_:)))
+        inkTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]   // finger only; Pencil taps stay dots
+        inkTap.cancelsTouchesInView = false; inkTap.delegate = self
+        ink.addGestureRecognizer(inkTap); self.inkTap = inkTap
         bindSession()
         surface.addSubview(ink)
         if embedded {
@@ -187,6 +198,16 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let scaledSize = CGSize(width: size.width * scroll.zoomScale, height: size.height * scroll.zoomScale)
         surface.center = CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2)
         scroll.contentSize = scaledSize
+        if let known = knownBlockIDs {
+            let added = configuration.document.blocks.filter { $0.parentID == nil && !known.contains($0.id) }
+            if added.count == 1, let block = added.first {
+                switch block.content {
+                case .image, .sticker, .pdf, .table: selectedObjectID = block.id; croppingID = nil
+                default: break
+                }
+            }
+        }
+        knownBlockIDs = Set(configuration.document.blocks.map(\.id))
         let visible = scroll.convert(scroll.bounds, to: surface).insetBy(dx: -80, dy: -80)
         let ids = Set(configuration.document.blocks.compactMap { block -> UUID? in
             guard let frame = frames[block.id] else { return nil }
@@ -230,7 +251,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                         textView?.becomeFirstResponder(); textView?.selectedRange = focus.range
                     }
                 }
-                if isNew, richText.plainText.isEmpty, configuration.tool == .select, pendingFocusID == block.id {
+                if isNew, richText.plainText.isEmpty, pendingFocusID == block.id {
+                    pendingFocusID = nil
                     Task { @MainActor [weak textView] in textView?.becomeFirstResponder() }
                 }
             } else {
@@ -239,8 +261,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 object.asset = block.content.assetHash.flatMap(configuration.image)
                 if case .noteReference(let ref) = block.content { object.note = configuration.note(ref.documentID) }
                 if case .sticker = block.content {
-                    object.layer.shadowColor = UIColor.black.cgColor; object.layer.shadowOpacity = 0.24
-                    object.layer.shadowOffset = CGSize(width: 0, height: 4); object.layer.shadowRadius = 5
+                    object.layer.shadowColor = UIColor.black.cgColor; object.layer.shadowOpacity = 0.38
+                    object.layer.shadowOffset = CGSize(width: 0, height: 6); object.layer.shadowRadius = 8
                 } else { object.layer.shadowOpacity = 0 }
                 object.setNeedsDisplay()
                 blockView = object
@@ -285,14 +307,16 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         }
         ink.frame = surface.bounds
         ink.contentSize = surface.bounds.size
-        ink.isUserInteractionEnabled = configuration.tool.isDrawing
+        updateInkInteraction()
         let signature = "\(configuration.tool)-\(configuration.inkColor.hex)-\(configuration.inkWidth)-\(configuration.vectorEraser)"
         if signature != inkToolSignature {
             ink.tool = configuration.tool.nativeTool(color: configuration.inkColor, width: configuration.inkWidth, vectorEraser: configuration.vectorEraser)
             inkToolSignature = signature
         }
         scroll.panGestureRecognizer.minimumNumberOfTouches = configuration.tool.isDrawing ? 2 : 1
-        if configuration.tool.isDrawing { activeText?.resignFirstResponder() }
+        // Only switching to a pen ends typing; re-renders while typing in pen mode must not.
+        if configuration.tool.isDrawing, let previous = lastTool, !previous.isDrawing { activeText?.resignFirstResponder() }
+        lastTool = configuration.tool
         loadDrawing()
         ink.accessibilityValue = "\(ink.drawing.strokes.count) traços"
         ink.accessibilityIdentifier = configuration.pageNumber.map { "drawingCanvas-\($0)" } ?? "drawingCanvas"
@@ -330,8 +354,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             handles.onResize = { [weak self] dx, dy, left, top, ended in
                 guard let self else { return }
                 var rect = block.layout.frame
-                let width = max(24, rect.width + (left ? -dx : dx))
-                let height = max(24, rect.height + (top ? -dy : dy))
+                var width = max(24, rect.width + (left ? -dx : dx))
+                var height = max(24, rect.height + (top ? -dy : dy))
+                if CanvasTransforms.keepsAspectRatio(block.content) {
+                    // Photos, stickers and PDFs scale without distortion; cropping is "Recortar com alças".
+                    let fitted = CanvasTransforms.proportionalSize(from: rect, proposedWidth: width, proposedHeight: height)
+                    width = fitted.width; height = fitted.height
+                }
                 if left { rect.x += rect.width - width }; if top { rect.y += rect.height - height }
                 rect.width = width; rect.height = height
                 if ended {
@@ -352,7 +381,16 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             surface.addSubview(handles); selectionOverlay = handles
             }
         }
+        // Block views are re-ordered by z-index above; the open cell editor must stay on top
+        // or the table drawing hides what is being typed.
+        if let cellEditor { surface.bringSubviewToFront(cellEditor) }
         updateRuler()
+    }
+
+    /// Pens own the page unless the user is typing, editing a cell or has an object selected;
+    /// then touches reach text views, handles and objects (move/resize) instead of drawing.
+    private func updateInkInteraction() {
+        ink.isUserInteractionEnabled = configuration.tool.isDrawing && activeText == nil && cellEditor == nil && selectedObjectID == nil
     }
 
     private func bindSession() {
@@ -443,11 +481,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     public func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         usingTool = false
         // PencilKit can deliver the final drawing change after the tool-end callback.
-        Task { @MainActor [weak self] in await Task.yield(); self?.saveDrawing() }
+        Task { @MainActor [weak self] in await Task.yield(); self?.scheduleSave() }
     }
     public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !applyingDrawing, !usingTool else { return }
-        Task { @MainActor [weak self] in await Task.yield(); self?.saveDrawing() }
+        Task { @MainActor [weak self] in await Task.yield(); self?.scheduleSave() }
     }
     private func saveDrawing() {
         guard !usingTool, !applyingDrawing else { return }
@@ -545,6 +583,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public func textViewDidBeginEditing(_ textView: UITextView) {
         activeText = textView; configuration.session?.hasTextSelection = true
+        updateInkInteraction()
     }
 
     public func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
@@ -561,12 +600,27 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func textViewDidEndEditing(_ textView: UITextView) {
+        defer { updateInkInteraction() }
         if textView === cellEditor {
             if activeText === textView { activeText = nil; configuration.session?.hasTextSelection = false }
             commitCell(); return
         }
         if activeText === textView { activeText = nil; configuration.session?.hasTextSelection = false }
         typingGroup = nil; typingBlock = nil; typingCaret = nil; pendingTyping = false
+        removeIfAbandoned(textView)
+    }
+
+    /// A tap creates a text block; leaving it without typing must not leave an empty box behind.
+    /// Only standalone blocks or a story's only fragment qualify; continuation pages are owned
+    /// by pagination.
+    private func removeIfAbandoned(_ textView: UITextView) {
+        // The view is the truth: the configuration may not yet carry the last keystroke.
+        guard textView.text.isEmpty, textView.markedTextRange == nil, let id = textIDs[ObjectIdentifier(textView)],
+              let block = configuration.document.blocks.first(where: { $0.id == id }), block.parentID == nil,
+              case .text(let rich) = block.content, rich.plainText.isEmpty else { return }
+        let story = block.textFlowID ?? block.id
+        guard story == block.id, !configuration.document.blocks.contains(where: { $0.id != id && $0.textFlowID == story }) else { return }
+        configuration.onCommands([.removeSubtree(id)])
     }
 
     public func textViewDidChange(_ textView: UITextView) {
@@ -725,13 +779,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     @objc private func selectObject(_ gesture: UITapGestureRecognizer) {
-        guard let object = gesture.view as? CanvasObjectView, let id = object.id else { return }
+        guard let object = gesture.view as? CanvasObjectView else { return }
+        handleObjectTap(object, at: gesture.location(in: object))
+    }
+
+    private func handleObjectTap(_ object: CanvasObjectView, at point: CGPoint) {
+        guard let id = object.id else { return }
         if croppingID != id { croppingID = nil }
         let wasSelected = selectedObjectID == id
         selectedObjectID = id
         render()
         if wasSelected, connectingFrom == nil, case .table = object.block?.content {
-            beginEditingCell(object, at: gesture.location(in: object)); return
+            beginEditingCell(object, at: point); return
         }
         if let source = connectingFrom {
             connectingFrom = nil
@@ -741,9 +800,69 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        configuration.tool == .select && touch.view === surface
+        if gestureRecognizer === inkTap { return true }
+        return touch.view === surface && (configuration.tool == .select || !ink.isUserInteractionEnabled)
     }
-    @objc private func tapCanvas(_ gesture: UITapGestureRecognizer) { insertText(at: gesture.location(in: surface)) }
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                                  shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        gestureRecognizer === inkTap   // never delays or blocks PencilKit's own drawing gesture
+    }
+
+    /// Tap on empty page: first ends typing or clears the selection; otherwise starts a text block.
+    @objc private func tapCanvas(_ gesture: UITapGestureRecognizer) {
+        if let cellEditor { cellEditor.resignFirstResponder(); return }
+        if let activeText { activeText.resignFirstResponder(); return }
+        if selectedObjectID != nil { selectedObjectID = nil; croppingID = nil; render(); return }
+        insertText(at: gesture.location(in: surface))
+    }
+
+    /// Finger tap while a pen is active: the same meaning as in selection mode (object, text,
+    /// empty page), so writing never requires switching tools first.
+    @objc private func tapInk(_ gesture: UITapGestureRecognizer) {
+        let point = gesture.location(in: surface)
+        removeTapDots()
+        for view in surface.subviews.reversed() {
+            guard let object = view as? CanvasObjectView, object.id != nil, !object.isHidden else { continue }
+            let local = object.convert(point, from: surface)
+            if object.point(inside: local, with: nil) { handleObjectTap(object, at: local); return }
+        }
+        for view in surface.subviews.reversed() {
+            guard let text = view as? UITextView, text !== cellEditor, textIDs[ObjectIdentifier(text)] != nil else { continue }
+            let local = text.convert(point, from: surface)
+            guard text.point(inside: local, with: nil) else { continue }
+            text.becomeFirstResponder()
+            if let position = text.closestPosition(to: local) { text.selectedTextRange = text.textRange(from: position, to: position) }
+            return
+        }
+        insertText(at: point)
+    }
+
+    /// PencilKit turns a finger tap into a dot; a tap that means "place text" must not leave one.
+    private func removeTapDots() {
+        dotSaveGeneration += 1
+        let now = Date()
+        let kept = ink.drawing.strokes.filter { stroke in
+            let bounds = stroke.renderBounds
+            return !(bounds.width < 12 && bounds.height < 12 && now.timeIntervalSince(stroke.path.creationDate) < 1.5)
+        }
+        guard kept.count != ink.drawing.strokes.count else { return }
+        applyingDrawing = true; ink.drawing = PKDrawing(strokes: kept); applyingDrawing = false
+        saveDrawing()   // no change, and so no history entry, if the dot had not been saved yet
+    }
+
+    /// A dot-sized stroke waits briefly before saving, so a finger tap can claim it as a tap.
+    private func scheduleSave() {
+        dotSaveGeneration += 1
+        let generation = dotSaveGeneration
+        if let last = ink.drawing.strokes.last, last.renderBounds.width < 12, last.renderBounds.height < 12,
+           Date().timeIntervalSince(last.path.creationDate) < 1.5 {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(350))
+                guard let self, self.dotSaveGeneration == generation else { return }
+                self.saveDrawing()
+            }
+        } else { saveDrawing() }
+    }
 
     private func insertText(at point: CGPoint) {
         let size = configuration.document.canvas.size
@@ -769,32 +888,44 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
               case .table(let table) = block.content else { return }
         let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
         guard let hit = table.cell(at: .init(x: Double(point.x / sx), y: Double(point.y / sy))) else { return }
-        commitCell()
         let rect = table.frame(row: hit.row, column: hit.column)
-        let editor = UITextView(usingTextLayoutManager: true)
-        editor.delegate = self
-        editor.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.97)
-        editor.layer.borderColor = UIColor.systemBlue.cgColor; editor.layer.borderWidth = 2
-        editor.textContainerInset = UIEdgeInsets(top: 4, left: 2, bottom: 4, right: 2)
-        editor.accessibilityIdentifier = "tableCellEditor"
+        let editor: UITextView
+        if let existing = cellEditor {
+            // Moving between cells keeps the same first responder: the keyboard stays up.
+            commitCell(keepEditor: true); editor = existing
+        } else {
+            editor = UITextView(usingTextLayoutManager: true)
+            editor.delegate = self
+            editor.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.97)
+            editor.layer.borderColor = UIColor.systemBlue.cgColor; editor.layer.borderWidth = 2
+            editor.textContainerInset = UIEdgeInsets(top: 4, left: 2, bottom: 4, right: 2)
+            editor.accessibilityIdentifier = "tableCellEditor"
+            surface.addSubview(editor)
+        }
         let base = TableRendering.base(header: table.headerRow && hit.row == 0)
         editor.attributedText = TextBridge.attributed(table.cells[hit.row][hit.column].text, base: base)
         editor.typingAttributes = TextBridge.attributed(RichText(" "), base: base).attributes(at: 0, effectiveRange: nil)
+        editor.transform = .identity
         editor.bounds = CGRect(x: 0, y: 0, width: rect.width * sx, height: max(rect.height * sy, 36))
         editor.center = object.convert(CGPoint(x: (rect.x + rect.width / 2) * sx, y: (rect.y + rect.height / 2) * sy), to: surface)
         editor.transform = object.transform
-        surface.addSubview(editor)
         cellEditor = editor; editingCell = (id, hit.row, hit.column)
-        editor.becomeFirstResponder()
+        surface.bringSubviewToFront(editor)
+        if !editor.isFirstResponder { editor.becomeFirstResponder() }
+        editor.selectedRange = NSRange(location: editor.attributedText.length, length: 0)
+        updateInkInteraction()
     }
 
     /// Saves the open cell (if it changed) and grows its row to fit; one undo step per cell edit.
-    private func commitCell() {
+    private func commitCell(keepEditor: Bool = false) {
         guard let editor = cellEditor, let cell = editingCell else { return }
-        cellEditor = nil; editingCell = nil
         let text = TextBridge.richText(editor.attributedText ?? NSAttributedString())
         let needed = editor.sizeThatFits(CGSize(width: editor.bounds.width, height: .greatestFiniteMagnitude)).height
-        editor.delegate = nil; editor.removeFromSuperview()
+        if !keepEditor {
+            cellEditor = nil; editingCell = nil
+            editor.delegate = nil; editor.removeFromSuperview()
+            updateInkInteraction()
+        }
         guard let block = configuration.document.blocks.first(where: { $0.id == cell.block }), case .table(let table) = block.content,
               table.cells.indices.contains(cell.row), table.cells[cell.row].indices.contains(cell.column) else { return }
         let old = table.cells[cell.row][cell.column].text
@@ -852,7 +983,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             return UIMenu(children: [UIAction(title: "Texto") { _ in self.insertText(at: location) },
                                      UIAction(title: "Tabela", image: UIImage(systemName: "tablecells")) { _ in self.insertTable(at: location) }] +
                 [ShapeKind.rectangle, .ellipse, .diamond, .triangle].map { kind in
-                    UIAction(title: kind.rawValue) { _ in
+                    UIAction(title: kind.title) { _ in
                         self.configuration.onCommands(DiagramCommands.insertNode(kind: kind, frame: .init(x: location.x, y: location.y, width: 180, height: 110), order: self.nextOrder))
                     }
                 })
@@ -934,6 +1065,15 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             changed.presentation = p; self?.configuration.onCommands([.replaceBlock(changed)])
         })
         present(alert, animated: true)
+    }
+}
+
+private extension ShapeKind {
+    var title: String {
+        switch self {
+        case .rectangle: "Retângulo"; case .ellipse: "Elipse"; case .diamond: "Losango"
+        case .triangle: "Triângulo"; case .line: "Linha"; case .arrow: "Seta"
+        }
     }
 }
 

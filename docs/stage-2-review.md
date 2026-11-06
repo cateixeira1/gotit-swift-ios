@@ -86,16 +86,21 @@ A próxima entrega deve fechar esses critérios, sem retomar Teia/equações ant
 que o núcleo de edição tenha sido validado.
 
 
-## Continuação: recuperação de gravações
+## Continuação: recuperação de gravações (parcial)
 
-O esquema v6 acrescenta recibos de operações na mesma transação do documento.
-O host grava uma fila em arquivo atômico antes da atualização otimista; ao abrir,
-reexecuta as entradas ainda presentes e reconhece operações já confirmadas pelo
-SQLite. Só remove uma entrada após o commit. Corrupção ou conflito interrompem a
-recuperação e preservam a fila para diagnóstico, sem reset silencioso. Falhas de
-energia do dispositivo e indisponibilidade física do armazenamento ainda exigem
-testes em hardware; a garantia aqui cobre encerramento do processo nos pontos
-entre gravação da fila, commit e remoção da entrada.
+O esquema v6 acrescenta recibos de operações na mesma transação do documento, e
+`PendingEditJournal` oferece uma fila em arquivo atômico, ambos com testes. A
+ligação dessa fila ao host (`GotItApp`) foi **desativada**: com ela, o teste de
+interface de desenho falhou 2 de 2 vezes no iPhone (contador permanece em
+"0 traços"), enquanto o commit anterior passou 3 de 3 e o mesmo código com a
+ligação removida passou na execução 42268105571. A causa exata não foi isolada
+(não há Xcode no ambiente de desenvolvimento); a evidência é correlacional.
+
+Consequência: o critério "persistir fila de comandos pendentes para recuperação
+de encerramento abrupto" continua **aberto**. Cada edição já é confirmada no
+SQLite (WAL) em transação própria; o risco restante é a janela entre a edição
+otimista e o commit. Reintroduzir a ligação somente com um teste de interface
+que reproduza a falha e depois de depurá-la em simulador local.
 
 A estratégia de retomada dos recursos adiados está em [workflow.md](workflow.md).
 Teia entra após catálogo/indexação; equações após estabilização da tinta e

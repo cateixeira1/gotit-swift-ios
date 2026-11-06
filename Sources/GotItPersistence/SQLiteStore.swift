@@ -14,17 +14,20 @@ public struct DocumentSummary: Equatable, Sendable, Identifiable {
 public actor SQLiteStore {
     private let db: SQLiteConnection
     private let historyLimit: Int
+    private let historyByteLimit: Int
     private var cachedDocument: CanvasDocument?
 
     /// Use an app-owned Application Support URL. Parent directory must already exist.
-    public init(url: URL, historyLimit: Int = 50) throws {
-        guard url.isFileURL, !url.path.utf8.contains(0), historyLimit > 0 else {
-            throw DocumentError.invalid("Expected a file URL and positive history limit")
+    /// History keeps at most `historyLimit` groups and about `historyByteLimit` bytes of deltas per document.
+    public init(url: URL, historyLimit: Int = 50, historyByteLimit: Int = 32 * 1024 * 1024) throws {
+        guard url.isFileURL, !url.path.utf8.contains(0), historyLimit > 0, historyByteLimit > 0 else {
+            throw DocumentError.invalid("Expected a file URL and positive history limits")
         }
         let db = try SQLiteConnection(path: url.path)
         try MigrationManager.migrate(db)
         self.db = db
         self.historyLimit = historyLimit
+        self.historyByteLimit = historyByteLimit
     }
 
     public func close() throws { try db.close() }
@@ -71,7 +74,7 @@ public actor SQLiteStore {
             var after = try CommandEngine.applying(commands, to: before)
             try advance(&after, from: before)
             try writeContents(after, previous: before)
-            try HistoryStore.record(db, before: before, after: after, commands: commands, limit: historyLimit, group: historyGroup)
+            try HistoryStore.record(db, before: before, after: after, commands: commands, limit: historyLimit, byteLimit: historyByteLimit, group: historyGroup)
             if let operationID {
                 try db.execute("INSERT INTO edit_receipts VALUES (?, ?, ?, ?)", [.text(operationID.uuidString), .text(documentID.uuidString), .integer(expectedRevision), .blob(try JSONEncoder().encode(commands))])
             }

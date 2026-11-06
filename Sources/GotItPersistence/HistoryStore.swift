@@ -17,7 +17,7 @@ enum HistoryStore {
     }
 
     static func record(_ db: SQLiteConnection, before: CanvasDocument, after: CanvasDocument,
-                       commands: [DocumentCommand], limit: Int, group: String?) throws {
+                       commands: [DocumentCommand], limit: Int, byteLimit: Int = Int.max, group: String?) throws {
         let id = SQLValue.text(before.id.uuidString)
         let position = try cursor(db, id: before.id)
         guard position < Int64.max else { throw DocumentError.invalid("History sequence exhausted") }
@@ -39,6 +39,27 @@ enum HistoryStore {
             .blob(try encoder.encode(group)), .blob(try encoder.encode(inverse)), .blob(try encoder.encode(forward))])
         try db.execute("UPDATE documents SET history_cursor = ? WHERE id = ?", [.integer(sequence), id])
         try db.execute("DELETE FROM history WHERE document_id = ? AND sequence <= ?", [id, .integer(sequence - Int64(limit))])
+        try enforceByteBudget(db, id: id, newest: sequence, byteLimit: byteLimit)
+    }
+
+    /// Drops the oldest entries until the retained deltas fit in `byteLimit`. The newest entry is
+    /// always kept, even when it alone exceeds the budget: the last edit must stay undoable.
+    /// Large PencilKit snapshots therefore shorten the undo depth instead of growing the database.
+    static func enforceByteBudget(_ db: SQLiteConnection, id: SQLValue, newest: Int64, byteLimit: Int) throws {
+        guard byteLimit < Int.max else { return }
+        let rows = try db.execute("""
+            SELECT sequence, length(commands) + length(before_snapshot) + length(after_snapshot)
+            FROM history WHERE document_id = ? ORDER BY sequence DESC
+            """, [id])
+        var total = 0
+        for row in rows {
+            guard let sequence = row[0].int, let size = row[1].int else { continue }
+            total += Int(size)
+            if total > byteLimit && sequence < newest {
+                try db.execute("DELETE FROM history WHERE document_id = ? AND sequence <= ?", [id, .integer(sequence)])
+                return
+            }
+        }
     }
 
     static func restore(_ db: SQLiteConnection, document: CanvasDocument, undo: Bool) throws -> CanvasDocument {

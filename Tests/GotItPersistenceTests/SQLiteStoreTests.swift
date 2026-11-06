@@ -186,6 +186,45 @@ private func multimediaDocument() -> CanvasDocument {
     try await store.close()
 }
 
+@Test func historyByteBudgetDropsOldestEntriesButKeepsTheNewestUndoable() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url, historyLimit: 50, historyByteLimit: 6_000)
+    let document = try await store.create(CanvasDocument(title: "Bytes"))
+    var revision: Int64 = 0
+    for index in 0..<8 {
+        let block = CanvasBlock(order: index, content: .text(RichText(String(repeating: "x", count: 1_000))))
+        revision = try await store.execute([.insertBlock(block)], documentID: document.id, expectedRevision: revision).revision
+    }
+    let retained = try await store.historyState(documentID: document.id).retainedEntries
+    #expect(retained >= 1 && retained < 8)
+    // Every retained step is still undoable, newest first, and the floor is a real earlier state.
+    var current = revision, steps = 0
+    while true {
+        do { current = try await store.undo(documentID: document.id, expectedRevision: current).revision; steps += 1 }
+        catch DocumentError.nothingToUndo { break }
+    }
+    #expect(steps == retained)
+    try await store.close()
+}
+
+@Test func historyByteBudgetNeverDropsTheLastEditEvenWhenItAloneExceedsTheBudget() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url, historyLimit: 50, historyByteLimit: 500)
+    let document = try await store.create(CanvasDocument(title: "Big"))
+    let big = CanvasBlock(content: .text(RichText(String(repeating: "y", count: 20_000))))
+    let edited = try await store.execute([.insertBlock(big)], documentID: document.id, expectedRevision: 0)
+    #expect(try await store.historyState(documentID: document.id).retainedEntries == 1)
+    let undone = try await store.undo(documentID: document.id, expectedRevision: edited.revision)
+    #expect(undone.blocks.isEmpty)
+    #expect(try await store.redo(documentID: document.id, expectedRevision: undone.revision).blocks.count == 1)
+    try await store.close()
+}
+
+@Test func nonPositiveHistoryByteBudgetIsRejected() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    #expect(throws: DocumentError.self) { try SQLiteStore(url: fixture.url, historyByteLimit: 0) }
+}
+
 @Test func documentsAndTheirHistoriesRemainIsolated() async throws {
     let fixture = try DatabaseFixture(); defer { fixture.clean() }
     let store = try SQLiteStore(url: fixture.url)

@@ -99,11 +99,15 @@ e ampliação do reconhecimento permanecem congelados.
   parágrafos da seleção; "Atualizar estilo pela seleção" muda todas as ocorrências
   num único desfazer e preserva formatação manual. Os trechos guardam atributos
   concretos e só uma etiqueta do estilo.
-- **Tabelas**: ainda não implementadas.
+- **Tabelas simples** (9ddeaca, testes nativos ebdc226): células com texto rico,
+  inserir/excluir linhas e colunas, linha de cabeçalho, cor de célula e espessura
+  da borda; segundo toque edita a célula e a linha cresce para caber o texto.
+  O quadro do bloco sempre corresponde à grade (validado). Sem mesclagem nem
+  fórmulas, por decisão; ambos podem entrar como campos opcionais.
 
-Verificação desta continuação: 83 testes do núcleo em Swift 6.0.3/Linux
+Verificação desta continuação: 92 testes do núcleo e 7 nativos em Swift 6.0.3/Linux
 (toolchain oficial de swift.org) e CI completo aprovado em
-https://github.com/cateixeira1/gotit-swift-ios/actions/runs/42279707397
+https://github.com/cateixeira1/gotit-swift-ios/actions/runs/42298240690
 
 A próxima entrega deve fechar esses critérios, sem retomar Teia/equações antes
 que o núcleo de edição tenha sido validado.

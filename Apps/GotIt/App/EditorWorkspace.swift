@@ -18,6 +18,7 @@ struct EditorWorkspace: View {
     @State private var showPhotos = false
     @State private var showPDF = false
     @State private var showStickers = false
+    @State private var pageScrollRequest = 0
     @State private var reader: PDFTarget?
     private struct PDFTarget: Identifiable { var id: UUID; var documentID: UUID; var url: URL }
     @State private var photo: PhotosPickerItem?
@@ -77,7 +78,7 @@ struct EditorWorkspace: View {
 
     private var canvas: some View {
         PagedCanvasEditor(pages: document.pages.map { pageEditor($0.id) }, tool: tool, session: session,
-                          focusPageID: pageID, onVisiblePage: { model.selectedPageID = $0 })
+                          focusPageID: pageID, scrollRequest: pageScrollRequest, onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
     }
@@ -169,7 +170,7 @@ struct EditorWorkspace: View {
                 HStack {
                     Text("Páginas").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Spacer()
-                    Button { session.perform(.finish); model.addPage() } label: { Image(systemName: "plus") }
+                    Button { session.perform(.finish); model.addPage(); pageScrollRequest += 1 } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Adicionar página").accessibilityIdentifier("addPage")
                         .frame(minWidth: 32, minHeight: 36)
                 }
@@ -178,6 +179,7 @@ struct EditorWorkspace: View {
                         Button {
                             session.perform(.finish)
                             model.selectedPageID = item.id
+                            pageScrollRequest += 1
                             showPages = false
                         } label: {
                             VStack(spacing: 7) {

@@ -13,13 +13,15 @@ public struct PagedCanvasEditor: UIViewControllerRepresentable {
     public var session: EditorSession?
     /// Page the host considers current (selected in the page list, or where focus moved).
     public var focusPageID: UUID?
-    /// Reports the page under the middle of the viewport while scrolling.
+    /// Reports the page under the middle of the viewport while the user scrolls.
     public var onVisiblePage: (UUID) -> Void
+    /// Changing this asks to show `focusPageID` even if it was already the focus (page list taps).
+    public var scrollRequest: Int
 
     public init(pages: [CanvasEditor], tool: CanvasTool, session: EditorSession?, focusPageID: UUID?,
-                onVisiblePage: @escaping (UUID) -> Void) {
+                scrollRequest: Int = 0, onVisiblePage: @escaping (UUID) -> Void) {
         self.pages = pages; self.tool = tool; self.session = session
-        self.focusPageID = focusPageID; self.onVisiblePage = onVisiblePage
+        self.focusPageID = focusPageID; self.scrollRequest = scrollRequest; self.onVisiblePage = onVisiblePage
     }
     public func makeUIViewController(context: Context) -> PagedCanvasViewController { PagedCanvasViewController(configuration: self) }
     public func updateUIViewController(_ controller: PagedCanvasViewController, context: Context) { controller.configure(self) }
@@ -36,7 +38,10 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
     private var order: [UUID] = []
     private var fitted = false
     private var lastFocus: UUID?
+    private var lastScrollRequest = 0
     private var lastReportedPage: UUID?
+    /// While the app itself scrolls to a page, intermediate positions are not "the user's page".
+    private var scrollingToPage = false
     private let gap: CGFloat = 20
 
     init(configuration: PagedCanvasEditor) { self.configuration = configuration; super.init(nibName: nil, bundle: nil) }
@@ -63,21 +68,29 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         super.viewDidLayoutSubviews()
         ruler.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 28)
         scroll.frame = CGRect(x: 0, y: 28, width: view.bounds.width, height: max(0, view.bounds.height - 28))
-        if !fitted, scroll.bounds.width > 0, !order.isEmpty { fitted = true; fitWidth() }
+        if !fitted, scroll.bounds.width > 0, !order.isEmpty {
+            fitted = true; fitWidth()
+            if let focus = configuration.focusPageID, focus != order.first { scrollToPageIfHidden(focus, animated: false) }
+        }
         realizeVisiblePages(); updateRuler()
     }
 
     public func viewForZooming(in scrollView: UIScrollView) -> UIView? { content }
     public func scrollViewDidZoom(_ scrollView: UIScrollView) { realizeVisiblePages(); updateRuler() }
     public func scrollViewDidScroll(_ scrollView: UIScrollView) { realizeVisiblePages(); updateRuler(); reportVisiblePage() }
+    public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { scrollingToPage = false; reportVisiblePage() }
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { scrollingToPage = false }
 
     func configure(_ value: PagedCanvasEditor) {
         configuration = value
         bindSession()
         guard isViewLoaded else { return }
         layoutPages()
-        if let focus = value.focusPageID, focus != lastFocus {
-            lastFocus = focus
+        // A new focus, or an explicit request (tap on a page in the list), shows that page.
+        // scrollToPageIfHidden does nothing when the page is already on screen, so focus changes
+        // that come from the user's own scrolling never move the view.
+        if let focus = value.focusPageID, focus != lastFocus || value.scrollRequest != lastScrollRequest {
+            lastFocus = focus; lastScrollRequest = value.scrollRequest
             scrollToPageIfHidden(focus)
         }
     }
@@ -150,22 +163,29 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         scroll.contentOffset = .zero
     }
 
-    private func scrollToPageIfHidden(_ id: UUID) {
-        guard let frame = frames[id] else { return }
+    private func scrollToPageIfHidden(_ id: UUID, animated: Bool = true) {
+        guard let frame = frames[id], scroll.bounds.height > 0 else { return }
         let visible = scroll.convert(scroll.bounds, to: content)
         // Already showing a good part of the page: leave the user's position alone.
-        if visible.intersection(frame).height >= min(frame.height, visible.height) * 0.3 { return }
-        let target = CGRect(x: frame.minX, y: frame.minY - gap, width: frame.width, height: min(frame.height, visible.height))
-        scroll.scrollRectToVisible(content.convert(target, to: scroll), animated: true)
+        if visible.intersection(frame).height >= min(frame.height, visible.height) * 0.5 { return }
+        // Page top just below the top edge of the viewport.
+        let zoom = scroll.zoomScale
+        let maxY = max(0, scroll.contentSize.height - scroll.bounds.height)
+        let offset = CGPoint(x: scroll.contentOffset.x, y: min(maxY, max(0, (frame.minY - gap / 2) * zoom)))
+        lastReportedPage = id
+        scrollingToPage = animated
+        scroll.setContentOffset(offset, animated: animated)
+        if !animated { realizeVisiblePages() }
     }
 
     private func reportVisiblePage() {
+        guard !scrollingToPage else { return }
         let visible = scroll.convert(scroll.bounds, to: content)
         let middle = CGPoint(x: visible.midX, y: visible.midY)
         guard let id = order.first(where: { frames[$0].map { $0.minY - gap / 2 <= middle.y && middle.y <= $0.maxY + gap / 2 } ?? false }),
               id != lastReportedPage else { return }
         lastReportedPage = id
-        if id != configuration.focusPageID { lastFocus = id; configuration.onVisiblePage(id) }
+        if id != configuration.focusPageID { lastFocus = id; configuration.onVisiblePage(id) }   // no scroll back: same page
     }
 
     private var currentPageID: UUID? {

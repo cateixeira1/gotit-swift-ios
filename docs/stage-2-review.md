@@ -57,20 +57,17 @@ e ampliação do reconhecimento permanecem congelados.
   assets permanecem somente enquanto o estado atual/histórico precisa deles.
 - Migração de snapshots v1/v2/v3 para deltas, rollback de falhas e concorrência
   entre conexões continuam cobertos. O esquema passa a v5.
-- Foram acrescentados testes Apple de paginação, criação de views limitada à
-  viewport e navegação/busca nas páginas 2 e 3 do PDF. **Não executados aqui**:
-  este ambiente não tem SDK Apple/Xcode. O workflow passa a compilar também
-  o aplicativo para Mac Catalyst. Compilação UIKit/SwiftUI e testes de simulador
-  do código desta revisão ainda precisam passar.
-- A análise sintática dos arquivos Swift também passou; isso não substitui a
-  checagem de tipos com os frameworks Apple.
-- O envio ao GitHub foi bloqueado pela revisão automática de aprovação por
-  publicar código em repositório público sem autorização explícita. O remoto
-  permanece no commit auditado. Nenhum CI novo foi disparado.
+- CI do commit `693d1785ce2bb991d20e100dcc258ec828d1aadd` aprovado:
+  https://github.com/cateixeira1/gotit-swift-ios/actions/runs/42255842252
+- 51 testes do núcleo em Linux/macOS; compilação iOS e Mac Catalyst aprovadas.
+- Em cada simulador (iPad e iPhone): 5 testes nativos e 1 teste de interface
+  passaram, incluindo paginação, limite de views, PDF multipágina e desenho/reabertura.
+- Publicação autorizada pelo usuário e realizada na branch do PR #1.
+  O bloqueio anterior de aprovação foi resolvido. A etapa permanece aberta
+  pelos critérios funcionais abaixo; aprovação do CI não equivale a conclusão.
 
 ## Critérios que impedem o encerramento
 
-- Compilar a interface e executar os testes nativos/UI desta revisão.
 - Validar transferência do cursor, IME, teclado e desfazer após reflow no iPad e
   iPhone. Seleção única entre fragmentos de páginas e backspace na fronteira
   ainda precisam de implementação; não afirmar equivalência completa com Word.
@@ -87,3 +84,4 @@ e ampliação do reconhecimento permanecem congelados.
 
 A próxima entrega deve fechar esses critérios, sem retomar Teia/equações antes
 que o núcleo de edição tenha sido validado.
+

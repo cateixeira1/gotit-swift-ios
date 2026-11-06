@@ -9,7 +9,9 @@ O SQLite do sistema é acessado pelo módulo C `CSQLite`, sem pacotes externos.
 `CanvasDocument` guarda identidade, revisão, datas e estilo padrão.
 `CanvasBlock` guarda identidade, pai, ordem entre irmãos, layout, estilo e
 conteúdo tipado. A hierarquia admite múltiplos blocos raiz; apenas containers
-podem ter filhos. A ordem deve ser única entre irmãos, mas pode ter intervalos.
+podiam ter filhos na versão 1. A versão 2 também admite formas fechadas como
+pais, para texto e imagens em diagramas. A ordem deve ser única entre irmãos,
+mas pode ter intervalos.
 Reordenações são lotes de comandos, validados após a aplicação completa.
 
 Os modos `flow`, `absolute` e `anchored` preservam a proposta de canvas híbrido.
@@ -65,7 +67,11 @@ na etapa 3. Metadados podem existir sem referência ativa; coleta de assets
 deverá considerar também o histórico antes de apagar qualquer arquivo.
 
 A migração inicial é um recurso SQL versionado e transacional, com
-`PRAGMA user_version = 1`. Versões futuras são recusadas sem reset do banco.
+`PRAGMA user_version = 1`. A versão atual é 2: acrescenta metadados do canvas,
+preferências, Teias, tinta e novos estilos/conteúdos; payloads antigos e snapshots
+recebem os padrões ao decodificar. O incremento impede que o writer da versão 1
+abra e regrave uma base com campos que ele não conhece. Versões futuras são
+recusadas sem reset do banco.
 Não existe fallback que apague uma base que falhou ao abrir ou decodificar.
 Alterações de formato e enum cases persistidos exigirão migração explícita.
 
@@ -92,7 +98,8 @@ o histórico para deltas com checkpoints e limite por bytes. O contrato público
 foi isolado para permitir essa evolução.
 
 Não há ainda FTS5, R-Tree, sqlite-vec, compressão, OCR, transcrição, recuperação
-de arquivos de mídia, criptografia de banco ou UI. Busca e motores locais
+de arquivos de mídia ou criptografia de banco. A UI inicial está descrita em
+[stage-2-canvas.md](stage-2-canvas.md). Busca e motores locais
 (incluindo as opções discutidas de embeddings/Core ML/LiteRT) serão avaliados
 nas respectivas etapas; nenhuma dependência de IA foi fixada nesta base.
 

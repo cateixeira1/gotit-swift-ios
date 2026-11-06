@@ -218,7 +218,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 1)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 2)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -237,4 +237,55 @@ private func multimediaDocument() -> CanvasDocument {
     #expect(try await store.load(original.id) == original)
     try await store.close()
     await #expect(throws: PersistenceError.closed) { try await store.load(original.id) }
+}
+
+@Test func stageTwoMetadataAndTeiaRoundTripWithUndo() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    var web = multimediaDocument(); web.kind = .web
+    web.blocks[0].style = .init(underline: true, strikethrough: true, baseline: .superscript, link: "https://example.com", paragraph: .init(lineSpacing: 4, headIndent: 18, list: .numbered))
+    web.blocks[2].presentation = .init(wrap: .contour, rotationRadians: .pi / 4, imageCrop: .init(x: 0.1, y: 0.2, width: 0.5, height: 0.6))
+    web.blocks.append(.init(order: 8, content: .noteReference(.init(documentID: UUID()))))
+    web.blocks.append(.init(order: 9, content: .sticker(.init(hash: web.assets[0].hash))))
+    web.blocks.append(.init(order: 10, content: .ink(.init(points: [.init(x: 0, y: 0), .init(x: 10, y: 10)]))))
+    web.relations[0].style = .init(color: "#FFAA00", width: 3, routing: .orthogonal)
+    try await store.create(web)
+    var settings = web.canvas
+    settings.size = try .init(width: 1200, height: 900, unit: .pixels)
+    settings.recognizeDiagrams = false; settings.solveEquations = false
+    let modified = try await store.execute([.setCanvasSettings(settings)], documentID: web.id, expectedRevision: 0)
+    try await store.close()
+    let reopened = try SQLiteStore(url: fixture.url)
+    #expect(try await reopened.load(web.id) == modified)
+    let undone = try await reopened.undo(documentID: web.id, expectedRevision: 1)
+    #expect(undone.canvas == web.canvas)
+    #expect(undone.blocks == web.blocks)
+    try await reopened.close()
+}
+
+@Test func migratesVersionOneDocumentsAndHistoryWithoutLoss() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let original = try await store.create(multimediaDocument())
+    try await store.execute([.rename("After")], documentID: original.id, expectedRevision: 0)
+    try await store.close()
+    let db = try SQLiteConnection(path: fixture.url.path)
+    func legacy(_ data: Data) throws -> Data {
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "kind"); object.removeValue(forKey: "canvas")
+        return try JSONSerialization.data(withJSONObject: object)
+    }
+    let metadata = try #require(db.execute("SELECT metadata FROM documents").first?.first?.data)
+    try db.execute("UPDATE documents SET metadata = ?", [.blob(try legacy(metadata))])
+    let snapshots = try #require(db.execute("SELECT before_snapshot, after_snapshot FROM history").first)
+    try db.execute("UPDATE history SET before_snapshot = ?, after_snapshot = ?", [.blob(try legacy(#require(snapshots[0].data))), .blob(try legacy(#require(snapshots[1].data)))])
+    try db.execute("PRAGMA user_version = 1"); try db.close()
+    let reopened = try SQLiteStore(url: fixture.url)
+    let loaded = try await reopened.load(original.id)
+    #expect(loaded.canvas == .init())
+    #expect(loaded.kind == .note)
+    let undone = try await reopened.undo(documentID: original.id, expectedRevision: 1)
+    #expect(undone.blocks == original.blocks)
+    #expect(undone.title == original.title)
+    try await reopened.close()
 }

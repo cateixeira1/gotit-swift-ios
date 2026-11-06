@@ -10,8 +10,10 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
     public var blocks: [CanvasBlock]
     public var assets: [Asset]
     public var relations: [BlockRelation]
+    public var kind: DocumentKind
+    public var canvas: CanvasSettings
 
-    public init(id: UUID = UUID(), title: String, defaultStyle: BlockStyle = .init(), now: Date = Date()) {
+    public init(id: UUID = UUID(), title: String, defaultStyle: BlockStyle = .init(), now: Date = Date(), kind: DocumentKind = .note, canvas: CanvasSettings = .init()) {
         self.id = id
         self.title = title
         self.revision = 0
@@ -21,6 +23,27 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
         self.blocks = []
         self.assets = []
         self.relations = []
+        self.kind = kind
+        self.canvas = canvas
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, revision, createdAt, updatedAt, defaultStyle, blocks, assets, relations, kind, canvas
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        revision = try c.decode(Int64.self, forKey: .revision)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        defaultStyle = try c.decode(BlockStyle.self, forKey: .defaultStyle)
+        blocks = try c.decode([CanvasBlock].self, forKey: .blocks)
+        assets = try c.decode([Asset].self, forKey: .assets)
+        relations = try c.decode([BlockRelation].self, forKey: .relations)
+        kind = try c.decodeIfPresent(DocumentKind.self, forKey: .kind) ?? .note
+        canvas = try c.decodeIfPresent(CanvasSettings.self, forKey: .canvas) ?? .init()
     }
 
     public func children(of parentID: UUID? = nil) -> [CanvasBlock] {
@@ -51,15 +74,18 @@ public struct CanvasBlock: Codable, Equatable, Sendable, Identifiable {
     public var layout: BlockLayout
     public var style: BlockStyle
     public var content: BlockContent
+    public var presentation: ObjectPresentation?
+    public var effectivePresentation: ObjectPresentation { presentation ?? .init() }
 
     public init(id: UUID = UUID(), parentID: UUID? = nil, order: Int = 0,
-                layout: BlockLayout = .init(), style: BlockStyle = .init(), content: BlockContent) {
+                layout: BlockLayout = .init(), style: BlockStyle = .init(), content: BlockContent, presentation: ObjectPresentation? = nil) {
         self.id = id
         self.parentID = parentID
         self.order = order
         self.layout = layout
         self.style = style
         self.content = content
+        self.presentation = presentation
     }
 }
 
@@ -99,19 +125,29 @@ public struct BlockStyle: Codable, Equatable, Sendable {
     public var foreground: String?
     public var background: String?
     public var alignment: TextAlignment?
+    public var underline: Bool?
+    public var strikethrough: Bool?
+    public var baseline: TextBaseline?
+    public var link: String?
+    public var paragraph: ParagraphFormat?
 
     public init(fontName: String? = nil, fontSize: Double? = nil, bold: Bool? = nil,
                 italic: Bool? = nil, foreground: String? = nil, background: String? = nil,
-                alignment: TextAlignment? = nil) {
+                alignment: TextAlignment? = nil, underline: Bool? = nil, strikethrough: Bool? = nil,
+                baseline: TextBaseline? = nil, link: String? = nil, paragraph: ParagraphFormat? = nil) {
         self.fontName = fontName; self.fontSize = fontSize; self.bold = bold; self.italic = italic
         self.foreground = foreground; self.background = background; self.alignment = alignment
+        self.underline = underline; self.strikethrough = strikethrough; self.baseline = baseline; self.link = link
+        self.paragraph = paragraph
     }
 
     public func merging(_ overrides: BlockStyle) -> BlockStyle {
         BlockStyle(fontName: overrides.fontName ?? fontName, fontSize: overrides.fontSize ?? fontSize,
                    bold: overrides.bold ?? bold, italic: overrides.italic ?? italic,
                    foreground: overrides.foreground ?? foreground, background: overrides.background ?? background,
-                   alignment: overrides.alignment ?? alignment)
+                   alignment: overrides.alignment ?? alignment, underline: overrides.underline ?? underline,
+                   strikethrough: overrides.strikethrough ?? strikethrough,
+                   baseline: overrides.baseline ?? baseline, link: overrides.link ?? link, paragraph: overrides.paragraph ?? paragraph)
     }
 }
 
@@ -128,15 +164,17 @@ public struct RichText: Codable, Equatable, Sendable {
     public var plainText: String { runs.map(\.text).joined() }
 }
 
-public enum ShapeKind: String, Codable, Sendable { case rectangle, ellipse, line, arrow }
+public enum ShapeKind: String, Codable, Sendable { case rectangle, ellipse, diamond, triangle, line, arrow }
 
 public struct Shape: Codable, Equatable, Sendable {
     public var kind: ShapeKind
     public var stroke: String
     public var fill: String?
     public var lineWidth: Double
-    public init(kind: ShapeKind, stroke: String = "#000000", fill: String? = nil, lineWidth: Double = 1) {
+    public var originalStroke: InkStroke?
+    public init(kind: ShapeKind, stroke: String = "#000000", fill: String? = nil, lineWidth: Double = 1, originalStroke: InkStroke? = nil) {
         self.kind = kind; self.stroke = stroke; self.fill = fill; self.lineWidth = lineWidth
+        self.originalStroke = originalStroke
     }
 }
 
@@ -155,10 +193,21 @@ public enum BlockContent: Codable, Equatable, Sendable {
     case audio(AssetReference)
     case video(AssetReference)
     case shape(Shape)
+    case sticker(AssetReference)
+    case noteReference(NoteReference)
+    case ink(InkStroke)
+
+    public var allowsChildren: Bool {
+        switch self {
+        case .container: true
+        case .shape(let shape): shape.kind != .line && shape.kind != .arrow
+        default: false
+        }
+    }
 
     public var assetHash: String? {
         switch self {
-        case .image(let ref), .drawing(let ref), .pdf(let ref), .audio(let ref), .video(let ref): ref.hash
+        case .image(let ref), .drawing(let ref), .pdf(let ref), .audio(let ref), .video(let ref), .sticker(let ref): ref.hash
         default: nil
         }
     }
@@ -192,7 +241,11 @@ public struct BlockRelation: Codable, Equatable, Sendable, Identifiable {
     public var sourceID: UUID
     public var targetID: UUID
     public var kind: RelationKind
-    public init(id: UUID = UUID(), sourceID: UUID, targetID: UUID, kind: RelationKind) {
+    public var style: ConnectorStyle?
+    public var originalStroke: InkStroke?
+    public init(id: UUID = UUID(), sourceID: UUID, targetID: UUID, kind: RelationKind, style: ConnectorStyle? = nil, originalStroke: InkStroke? = nil) {
         self.id = id; self.sourceID = sourceID; self.targetID = targetID; self.kind = kind
+        self.style = style
+        self.originalStroke = originalStroke
     }
 }

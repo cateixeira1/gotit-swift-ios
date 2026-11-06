@@ -6,6 +6,8 @@ public struct DocumentSummary: Equatable, Sendable, Identifiable {
     public let title: String
     public let revision: Int64
     public let updatedAt: Date
+    public let createdAt: Date
+    public let kind: DocumentKind
 }
 
 /// Offline document repository. No async suspension occurs inside a database transaction.
@@ -45,7 +47,7 @@ public actor SQLiteStore {
     public func listDocuments() throws -> [DocumentSummary] {
         try db.execute("SELECT metadata FROM documents ORDER BY id").map { row in
             let document: CanvasDocument = try decode(row[0])
-            return DocumentSummary(id: document.id, title: document.title, revision: document.revision, updatedAt: document.updatedAt)
+            return DocumentSummary(id: document.id, title: document.title, revision: document.revision, updatedAt: document.updatedAt, createdAt: document.createdAt, kind: document.kind)
         }.sorted { $0.updatedAt == $1.updatedAt ? $0.id.uuidString < $1.id.uuidString : $0.updatedAt > $1.updatedAt }
     }
 

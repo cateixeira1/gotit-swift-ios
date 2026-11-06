@@ -3,8 +3,11 @@
 Execute `swift test` na raiz. A suíte usa bancos temporários reais e fixtures
 independentes; não usa um mock para os testes de persistência.
 
-Validação local em 6 de novembro de 2026: build e **24 testes passaram** com
-Swift 6.0.3 em Linux. O teste de dimensões inválidas executa três entradas.
+Validação local em 6 de novembro de 2026: a base inicial passou em 24 testes;
+a extensão da etapa 2 passou em **43 testes** com Swift 6.0.3 em Linux.
+Há também entradas parametrizadas para dimensões e expressões matemáticas.
+O código UIKit fica fora da compilação Linux; a análise sintática separada
+não substitui a compilação contra os SDKs Apple nem testes visuais.
 O workflow `.github/workflows/swift.yml` registra as verificações Apple/Linux
 de cada commit; consulte seu resultado antes de integrar a branch.
 
@@ -23,6 +26,10 @@ de cada commit; consulte seu resultado antes de integrar a branch.
 - Migração idempotente, rollback de migração e recusa de esquema futuro.
 - IDs duplicados, ordens inválidas, órfãos, ciclos pai/âncora, geometria e
   estilos inválidos; validação iterativa de árvore com 5.000 containers.
+- Migração v1→v2 preservando conteúdo e histórico; persistência de Teias,
+  preferências, recorte, rotação, estilos de parágrafo e tinta.
+- A4 e unidades, zoom, posicionamento, contorno, redimensionamento proporcional,
+  reconhecimento geométrico, cronologia independente de posição e equações.
 
 ## Critérios ainda necessários antes de encerrar a etapa 1 para produção
 

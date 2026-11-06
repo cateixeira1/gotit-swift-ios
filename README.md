@@ -1,11 +1,12 @@
 # Got It!
 
 Aplicativo de notas para iPhone e iPad com canvas modular híbrido e IA local.
-Este repositório começa pelo **Document Core**, a etapa 1 do plano do projeto.
+Este repositório inclui o **Document Core** e o início do **Canvas Engine**.
 
 O pacote já oferece modelos de documentos e blocos, estilos herdados, texto por
 runs, comandos validados, persistência SQLite e undo/redo persistente. Ainda não
-há aplicativo instalável, interface de canvas ou modelo de IA integrado.
+há versão de produção ou modelo de IA integrado. A etapa 2 acrescenta o motor
+de canvas testável e um adaptador/interface nativa cujo build Apple está pendente.
 
 ## Executar
 
@@ -19,7 +20,12 @@ swift test
 ```
 
 No Xcode, abra `Package.swift`. Os produtos são `GotItDomain` e
-`GotItPersistence`. O workflow testa Linux/macOS e compila para iOS Simulator.
+`GotItPersistence`, `GotItCanvas` e `GotItCanvasUI`. O workflow está configurado
+para testar Linux/macOS e compilar o adaptador/demo para iOS Simulator.
+
+A demonstração está em [Examples/GotItDemo](Examples/GotItDemo/README.md).
+O código UIKit não é compilado no Linux: o sucesso dos testes locais não prova
+que a interface já foi validada no Xcode.
 
 ## Exemplo
 
@@ -59,7 +65,7 @@ repita automaticamente um comando sobre uma versão que o usuário não viu.
 | Etapa | Entrega | Situação |
 | --- | --- | --- |
 | 1 — Document Core | SQLite, blocos, estilos, comandos, undo/redo e persistência verificável | Primeira implementação neste repositório |
-| 2 — Canvas Engine | Flow com Spatial Containers, seleção, gestos, virtualização, TextKit 2 | Planejada |
+| 2 — Canvas Engine | A4/customizado, contorno de texto, diagramas, Teia, gestos e TextKit 2 | Motor inicial implementado; UI e recursos restantes em validação/desenvolvimento |
 | 3 — Multimídia e armazenamento | Importação, arquivos por hash, derivados, compressão e limpeza segura | Planejada |
 | 4 — Semantic Memory | Indexação, busca textual/espacial e embeddings locais | Planejada |
 | 5 — Local Intelligence | Inferência local e propostas de operações validadas | Planejada |
@@ -70,6 +76,7 @@ desenhos livres e formas, suporte previsto a todas as mídias.
 
 - [Arquitetura, limites e decisões](docs/document-core.md)
 - [Validação e próximos critérios da etapa 1](docs/validation.md)
+- [Requisitos e implementação da etapa 2](docs/stage-2-canvas.md)
 
 ## Licença
 

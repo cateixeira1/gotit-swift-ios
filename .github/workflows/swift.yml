@@ -32,7 +32,18 @@ jobs:
         run: swift test
       - name: Build for iOS Simulator
         run: >-
-          xcodebuild -scheme GotItPersistence
+          xcodebuild -scheme GotItCanvasUI
           -destination 'generic/platform=iOS Simulator'
           -derivedDataPath "$RUNNER_TEMP/GotItDerivedData"
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Generate demo project
+        run: |
+          brew install xcodegen
+          cd Examples/GotItDemo
+          xcodegen generate
+      - name: Build demo for iOS Simulator
+        run: >-
+          xcodebuild -project Examples/GotItDemo/GotItDemo.xcodeproj
+          -scheme GotItDemo -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/GotItDemoDerivedData"
           CODE_SIGNING_ALLOWED=NO build

@@ -1,0 +1,36 @@
+name: GotItDemo
+options:
+  bundleIdPrefix: com.gotit.prototype
+  deploymentTarget:
+    iOS: '18.0'
+packages:
+  GotIt:
+    path: ../..
+targets:
+  GotItDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    settings:
+      base:
+        SWIFT_VERSION: '6.0'
+        TARGETED_DEVICE_FAMILY: '1,2'
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.gotit.prototype.demo
+    dependencies:
+      - package: GotIt
+        product: GotItDomain
+      - package: GotIt
+        product: GotItPersistence
+      - package: GotIt
+        product: GotItCanvas
+      - package: GotIt
+        product: GotItCanvasUI
+schemes:
+  GotItDemo:
+    build:
+      targets:
+        GotItDemo: all

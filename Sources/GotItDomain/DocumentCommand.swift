@@ -13,6 +13,7 @@ public enum DocumentError: Error, Equatable, Sendable {
 public enum DocumentCommand: Codable, Equatable, Sendable {
     case rename(String)
     case setDefaultStyle(BlockStyle)
+    case setCanvasSettings(CanvasSettings)
     case insertBlock(CanvasBlock)
     case replaceBlock(CanvasBlock)
     case removeSubtree(UUID)
@@ -30,6 +31,7 @@ public enum CommandEngine {
             switch command {
             case .rename(let title): document.title = title
             case .setDefaultStyle(let style): document.defaultStyle = style
+            case .setCanvasSettings(let settings): document.canvas = settings
             case .insertBlock(let block):
                 guard !document.blocks.contains(where: { $0.id == block.id }) else {
                     throw DocumentError.invalid("Duplicate block ID")

@@ -89,10 +89,19 @@ e ampliação do reconhecimento permanecem congelados.
   Deltas de traços PencilKit (em vez de snapshot por gesto) continuam pendentes.
 - Persistir fila de comandos pendentes para recuperação de encerramento abrupto:
   reaberto (ver abaixo).
-- Demais critérios anteriores não congelados: tabelas/estilos nomeados, recorte
-  com alças e clipping de imagens dentro de formas.
+- **Recorte com alças** (efef958): "Recortar com alças" usa os quatro cantos para
+  aparar ou revelar a imagem sem mover nem reescalar os pixels visíveis, nunca
+  além do original; o diálogo numérico continua como "Recorte exato (%)".
+- **Imagem dentro de forma** (a5711b2): `imageMask` recorta imagem/adesivo em
+  elipse, losango ou triângulo; o contorno de texto segue a máscara.
+- **Estilos nomeados** (c2dee63): Título, Subtítulo, Título 1, Título 2, Corpo e
+  Citação, com redefinição por nota e estilos próprios. Aplicar age sobre os
+  parágrafos da seleção; "Atualizar estilo pela seleção" muda todas as ocorrências
+  num único desfazer e preserva formatação manual. Os trechos guardam atributos
+  concretos e só uma etiqueta do estilo.
+- **Tabelas**: ainda não implementadas.
 
-Verificação desta continuação: 68 testes do núcleo em Swift 6.0.3/Linux
+Verificação desta continuação: 83 testes do núcleo em Swift 6.0.3/Linux
 (toolchain oficial de swift.org) e CI completo aprovado em
 https://github.com/cateixeira1/gotit-swift-ios/actions/runs/42279707397
 

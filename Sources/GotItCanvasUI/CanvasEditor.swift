@@ -86,6 +86,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var textPool: [UITextView] = []
     private var objectPool: [CanvasObjectView] = []
     private var selectedObjectID: UUID?
+    /// Image being cropped with handles; cleared when the selection moves elsewhere.
+    private var croppingID: UUID?
     private var selectionOverlay: SelectionHandles?
     public var realizedBlockViewCount: Int { blockViews.count }
     public var recycledBlockViewCount: Int { textPool.count + objectPool.count }
@@ -278,6 +280,31 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
            let block = configuration.document.blocks.first(where: { $0.id == id }) {
             let handles = SelectionHandles(frame: object.bounds)
             handles.center = object.center; handles.transform = object.transform
+            if croppingID == id, let objectView = object as? CanvasObjectView {
+                handles.cropping = true
+                let originCenter = object.center
+                handles.onResize = { [weak self, weak objectView] dx, dy, left, top, ended in
+                    guard let self, let objectView else { return }
+                    do {
+                        let cropped = try CanvasTransforms.cropByDraggingCorner(block, left: left, top: top, dx: dx, dy: dy)
+                        if ended {
+                            if cropped != block { self.configuration.onCommands([.replaceBlock(cropped)]) } else { self.render() }
+                            return
+                        }
+                        // Live preview in the object's own (possibly rotated) axes.
+                        let old = block.layout.frame, new = cropped.layout.frame
+                        let shift = CGPoint(x: new.x + new.width / 2 - (old.x + old.width / 2),
+                                            y: new.y + new.height / 2 - (old.y + old.height / 2))
+                            .applying(CGAffineTransform(rotationAngle: block.effectivePresentation.rotationRadians))
+                        objectView.block = cropped
+                        objectView.bounds.size = CGSize(width: new.width, height: new.height)
+                        objectView.center = CGPoint(x: originCenter.x + shift.x, y: originCenter.y + shift.y)
+                        objectView.setNeedsDisplay()
+                        handles.bounds.size = objectView.bounds.size; handles.center = objectView.center; handles.setNeedsLayout()
+                    } catch { self.configuration.onError(error) }
+                }
+                surface.addSubview(handles); selectionOverlay = handles
+            } else {
             handles.onResize = { [weak self] dx, dy, left, top, ended in
                 guard let self else { return }
                 var rect = block.layout.frame
@@ -301,6 +328,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 }
             }
             surface.addSubview(handles); selectionOverlay = handles
+            }
         }
         updateRuler()
     }
@@ -618,6 +646,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     @objc private func selectObject(_ gesture: UITapGestureRecognizer) {
         guard let object = gesture.view as? CanvasObjectView, let id = object.id else { return }
+        if croppingID != id { croppingID = nil }
         selectedObjectID = id
         render()
         if let source = connectingFrom {
@@ -679,7 +708,16 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         }
         switch block.content {
         case .image, .sticker:
-            actions.append(UIAction(title: "Recortar imagem…") { [weak self] _ in self?.crop(block) })
+            if croppingID == id {
+                actions.append(UIAction(title: "Concluir recorte", image: UIImage(systemName: "checkmark")) { [weak self] _ in
+                    self?.croppingID = nil; self?.render()
+                })
+            } else {
+                actions.append(UIAction(title: "Recortar com alças", image: UIImage(systemName: "crop")) { [weak self] _ in
+                    self?.croppingID = id; self?.selectedObjectID = id; self?.render()
+                })
+            }
+            actions.append(UIAction(title: "Recorte exato (%)…") { [weak self] _ in self?.crop(block) })
             actions.append(UIAction(title: "Restaurar recorte", handler: update { var p = $0.effectivePresentation; p.imageCrop = nil; $0.presentation = p }))
         default: break
         }

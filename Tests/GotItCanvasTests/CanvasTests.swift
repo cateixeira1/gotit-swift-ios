@@ -187,3 +187,61 @@ func unsupportedMathRequiresCorrection(_ expression: String) {
     #expect(frames[shape.id]?.y == 10)
     #expect(try TextFlowEngine.exclusions(for: text.id, in: document).isEmpty)
 }
+
+private func photo(x: Double = 100, y: Double = 50, width: Double = 200, height: Double = 100, crop: LogicalRect? = nil) -> CanvasBlock {
+    CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: x, y: y, width: width, height: height)),
+                content: .image(AssetReference(hash: String(repeating: "b", count: 64))),
+                presentation: ObjectPresentation(imageCrop: crop))
+}
+
+@Test func croppingFromTopLeftTrimsFrameWithoutMovingVisiblePixels() throws {
+    let cropped = try CanvasTransforms.cropByDraggingCorner(photo(), left: true, top: true, dx: 50, dy: 20)
+    #expect(cropped.layout.frame == LogicalRect(x: 150, y: 70, width: 150, height: 80))
+    let crop = try #require(cropped.effectivePresentation.imageCrop)
+    #expect(abs(crop.x - 0.25) < 1e-12 && abs(crop.y - 0.2) < 1e-12)
+    #expect(abs(crop.width - 0.75) < 1e-12 && abs(crop.height - 0.8) < 1e-12)
+    // Same display scale: full image is still 200 x 100 points.
+    #expect(abs(cropped.layout.frame.width / crop.width - 200) < 1e-9)
+    #expect(abs(cropped.layout.frame.height / crop.height - 100) < 1e-9)
+}
+
+@Test func croppingFromBottomRightKeepsOrigin() throws {
+    let cropped = try CanvasTransforms.cropByDraggingCorner(photo(), left: false, top: false, dx: -40, dy: -30)
+    #expect(cropped.layout.frame == LogicalRect(x: 100, y: 50, width: 160, height: 70))
+    let crop = try #require(cropped.effectivePresentation.imageCrop)
+    #expect(crop.x == 0 && crop.y == 0)
+    #expect(abs(crop.width - 0.8) < 1e-12 && abs(crop.height - 0.7) < 1e-12)
+}
+
+@Test func draggingOutwardRevealsCroppedContentButNotBeyondTheImage() throws {
+    // Visible window shows the middle half horizontally: full image is 400 points wide.
+    let start = photo(crop: LogicalRect(x: 0.25, y: 0, width: 0.5, height: 1))
+    let partly = try CanvasTransforms.cropByDraggingCorner(start, left: true, top: false, dx: -50, dy: 0)
+    #expect(partly.layout.frame.x == 50 && partly.layout.frame.width == 250)
+    let full = try CanvasTransforms.cropByDraggingCorner(partly, left: true, top: false, dx: -10_000, dy: 0)
+    #expect(full.layout.frame.x == 0 && full.layout.frame.width == 300)   // image origin at x = 0
+    let restored = try CanvasTransforms.cropByDraggingCorner(full, left: false, top: false, dx: 10_000, dy: 0)
+    #expect(restored.layout.frame.width == 400)
+    #expect(restored.effectivePresentation.imageCrop == nil)              // whole image: no crop stored
+}
+
+@Test func cropNeverCollapsesBelowMinimumAndRejectsNonImages() throws {
+    let tiny = try CanvasTransforms.cropByDraggingCorner(photo(), left: true, top: true, dx: 10_000, dy: 10_000)
+    #expect(tiny.layout.frame.width == 24 && tiny.layout.frame.height == 24)
+    #expect(tiny.layout.frame.x == 276 && tiny.layout.frame.y == 126)     // right/bottom edges stay put
+    let box = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: 50, height: 50)), content: .shape(Shape(kind: .rectangle)))
+    #expect(throws: DocumentError.self) { try CanvasTransforms.cropByDraggingCorner(box, left: true, top: true, dx: 1, dy: 1) }
+    #expect(throws: DocumentError.self) { try CanvasTransforms.cropByDraggingCorner(photo(), left: true, top: true, dx: .nan, dy: 0) }
+}
+
+@Test func croppedImagePassesDocumentValidation() throws {
+    var document = CanvasDocument(title: "Crop")
+    document.assets.append(Asset(hash: String(repeating: "b", count: 64), mediaType: "image/png", byteCount: 10))
+    let image = photo()
+    document = try CommandEngine.applying([.insertBlock(image)], to: document)
+    for (left, top, dx, dy) in [(true, true, 37.3, 11.1), (false, false, -80.0, 5.0), (true, false, -500.0, 0.0), (false, true, 999.0, -999.0)] {
+        let current = try #require(document.blocks.first(where: { $0.id == image.id }))
+        let next = try CanvasTransforms.cropByDraggingCorner(current, left: left, top: top, dx: dx, dy: dy)
+        document = try CommandEngine.applying([.replaceBlock(next)], to: document)
+    }
+}

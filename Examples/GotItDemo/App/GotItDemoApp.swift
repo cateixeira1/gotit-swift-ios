@@ -233,25 +233,26 @@ final class DemoModel {
 struct DemoScreen: View {
     @Bindable var model: DemoModel
     @State private var visibility = NavigationSplitViewVisibility.detailOnly
+    @State private var preferredColumn = NavigationSplitViewColumn.detail
     @State private var showPage = false
     @State private var equation = "x² - 5x + 6 = 0"
     @State private var showEquation = false
     var body: some View {
-        NavigationSplitView(columnVisibility: $visibility) {
+        NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $preferredColumn) {
             List {
                 Section {
-                    Button("Nova nota", systemImage: "plus") { Task { await model.createNote() } }
-                    Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb() } }
+                    Button("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
+                    Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
                     ForEach(model.summaries) { summary in
                         VStack(alignment: .leading) {
-                            Button { Task { await model.open(summary.id) } } label: {
+                            Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
                                 VStack(alignment: .leading) {
                                     if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
                                     Text(summary.title).font(.headline)
                                     Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
-                            if summary.kind == .note { Button("Teia") { Task { await model.createWeb(including: summary.id) } }.font(.caption) }
+                            if summary.kind == .note { Button("Teia") { Task { await model.createWeb(including: summary.id); preferredColumn = .detail } }.font(.caption) }
                         }
                     }
                 } header: { Text("Todas as notas e Teias") }
@@ -265,6 +266,7 @@ struct DemoScreen: View {
 
                 }
                 .navigationTitle(document.title)
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         Button { Task { await model.history(undo: true) } } label: { Image(systemName: "arrow.uturn.backward") }.disabled(model.isSaving)
@@ -276,7 +278,7 @@ struct DemoScreen: View {
                                 Menu("Adicionar nota à Teia") { ForEach(model.summaries.filter { $0.kind == .note }) { summary in Button(summary.title) { model.addNote(summary) } } }
                             }
                             if document.canvas.solveEquations { Button("Resolver equação digitada") { showEquation = true } }
-                        } label: { Image(systemName: "ellipsis.circle") }
+                        } label: { Image(systemName: "ellipsis.circle") }.accessibilityIdentifier("documentOptions")
                     }
                 }
                 .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.enqueue([.setCanvasSettings($0)]) } }

@@ -124,8 +124,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let page = configuration.document.canvas.size
         let size = CGSize(width: page.width, height: page.height)
         surface.bounds = CGRect(origin: .zero, size: size)
-        surface.frame.size = CGSize(width: size.width * scroll.zoomScale, height: size.height * scroll.zoomScale)
-        scroll.contentSize = surface.frame.size
+        // Bounds changes preserve UIView.center; a zero-size view otherwise starts at
+        // (-width/2, -height/2). Keep the zoomed page anchored at the content origin.
+        let scaledSize = CGSize(width: size.width * scroll.zoomScale, height: size.height * scroll.zoomScale)
+        surface.center = CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2)
+        scroll.contentSize = scaledSize
         let ids = Set(configuration.document.blocks.map(\.id))
         for id in Array(blockViews.keys) where !ids.contains(id) {
             if let view = blockViews.removeValue(forKey: id) { textIDs.removeValue(forKey: ObjectIdentifier(view)); view.removeFromSuperview() }

@@ -2,7 +2,7 @@ import XCTest
 
 @MainActor
 final class EditorUITests: XCTestCase {
-    func testPagesToolsAndTextInAdaptiveEditor() throws {
+    func testPagesDrawingAndReopenInAdaptiveEditor() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--reset-test-data"]
         app.launch()
@@ -13,12 +13,21 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(addPage.waitForExistence(timeout: 10)); addPage.tap()
         let second = app.buttons["page-2"]
         XCTAssertTrue(second.waitForExistence(timeout: 10)); second.tap()
+        app.buttons["documentOptions"].tap()
+        app.buttons["Tamanho e opções do canvas"].tap()
+        let recognize = app.switches["Reconhecer diagramas"]
+        XCTAssertTrue(recognize.waitForExistence(timeout: 10)); recognize.tap()
+        app.buttons["Aplicar"].tap()
         if app.buttons["showTools"].exists { app.buttons["showTools"].tap() }
         let pen = app.buttons["tool-pen"]
         XCTAssertTrue(pen.waitForExistence(timeout: 10)); pen.tap()
         let drawing = app.descendants(matching: .any)["drawingCanvas"].firstMatch
         XCTAssertTrue(drawing.waitForExistence(timeout: 10))
-        drawing.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.3)).tap()
+        XCTAssertGreaterThanOrEqual(drawing.frame.minX, 0)
+        XCTAssertGreaterThanOrEqual(drawing.frame.minY, 0)
+        let start = drawing.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.25))
+        let end = drawing.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.35))
+        start.press(forDuration: 0.1, thenDragTo: end)
         let ink = NSPredicate(format: "value != %@", "0 traços")
         expectation(for: ink, evaluatedWith: drawing)
         waitForExpectations(timeout: 10)

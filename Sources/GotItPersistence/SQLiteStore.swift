@@ -14,6 +14,7 @@ public struct DocumentSummary: Equatable, Sendable, Identifiable {
 public actor SQLiteStore {
     private let db: SQLiteConnection
     private let historyLimit: Int
+    private var cachedDocument: CanvasDocument?
 
     /// Use an app-owned Application Support URL. Parent directory must already exist.
     public init(url: URL, historyLimit: Int = 50) throws {
@@ -30,6 +31,7 @@ public actor SQLiteStore {
 
     @discardableResult
     public func create(_ document: CanvasDocument) throws -> CanvasDocument {
+        cachedDocument = nil
         guard document.revision == 0 else { throw DocumentError.invalid("New documents start at revision zero") }
         try DocumentValidator.validate(document)
         return try db.transaction {
@@ -41,7 +43,9 @@ public actor SQLiteStore {
     }
 
     public func load(_ id: UUID) throws -> CanvasDocument {
-        try db.transaction(write: false) { try readDocument(id) }
+        let document = try db.transaction(write: false) { try readDocument(id) }
+        cachedDocument = document
+        return document
     }
 
     public func listDocuments() throws -> [DocumentSummary] {
@@ -53,16 +57,18 @@ public actor SQLiteStore {
 
     /// The revision is checked while holding SQLite's write lock, including across connections.
     @discardableResult
-    public func execute(_ commands: [DocumentCommand], documentID: UUID, expectedRevision: Int64) throws -> CanvasDocument {
-        try db.transaction {
+    public func execute(_ commands: [DocumentCommand], documentID: UUID, expectedRevision: Int64, historyGroup: String? = nil) throws -> CanvasDocument {
+        let saved = try db.transaction {
             let before = try readDocument(documentID)
             try checkRevision(before, expected: expectedRevision)
             var after = try CommandEngine.applying(commands, to: before)
             try advance(&after, from: before)
-            try writeContents(after)
-            try HistoryStore.record(db, before: before, after: after, commands: commands, limit: historyLimit)
+            try writeContents(after, previous: before)
+            try HistoryStore.record(db, before: before, after: after, commands: commands, limit: historyLimit, group: historyGroup)
             return after
         }
+        cachedDocument = saved
+        return saved
     }
 
     @discardableResult
@@ -79,22 +85,50 @@ public actor SQLiteStore {
         try db.transaction(write: false) { try HistoryStore.state(db, id: documentID) }
     }
 
+    /// Run while the asset writer is idle. Both sides of retained undo/redo are roots.
+    public func retainedAssetHashes() throws -> Set<String> {
+        try db.transaction(write: false) {
+            var hashes: Set<String> = []
+            func retain(_ d: CanvasDocument) {
+                for asset in d.assets { hashes.insert(asset.hash); hashes.formUnion(asset.derivatives.map(\.hash)) }
+            }
+            for summary in try listDocuments() {
+                let current = try readDocument(summary.id)
+                retain(current)
+                let cursor = try HistoryStore.cursor(db, id: summary.id)
+                let rows = try db.execute("SELECT sequence, before_snapshot, after_snapshot FROM history WHERE document_id = ? ORDER BY sequence", [.text(summary.id.uuidString)])
+                var state = current
+                for row in rows.reversed() where (row[0].int ?? 0) <= cursor {
+                    guard let data = row[1].data else { throw PersistenceError.corruptData("Missing inverse delta") }
+                    state = try JSONDecoder().decode(DocumentDelta.self, from: data).applying(to: state); retain(state)
+                }
+                state = current
+                for row in rows where (row[0].int ?? 0) > cursor {
+                    guard let data = row[2].data else { throw PersistenceError.corruptData("Missing forward delta") }
+                    state = try JSONDecoder().decode(DocumentDelta.self, from: data).applying(to: state); retain(state)
+                }
+            }
+            return hashes
+        }
+    }
+
     /// Explicit permanent deletion, including its history. Ordinary block deletion is undoable.
     public func deleteDocument(_ id: UUID, expectedRevision: Int64) throws {
         try db.transaction {
             try checkRevision(readDocument(id), expected: expectedRevision)
             try db.execute("DELETE FROM documents WHERE id = ?", [.text(id.uuidString)])
         }
+        if cachedDocument?.id == id { cachedDocument = nil }
     }
 
     private func restore(_ id: UUID, expectedRevision: Int64, undo: Bool) throws -> CanvasDocument {
         try db.transaction {
             let before = try readDocument(id)
             try checkRevision(before, expected: expectedRevision)
-            var restored = try HistoryStore.restore(db, id: id, undo: undo)
+            var restored = try HistoryStore.restore(db, document: before, undo: undo)
             try advance(&restored, from: before)
             try DocumentValidator.validate(restored)
-            try writeContents(restored)
+            try writeContents(restored, previous: before)
             return restored
         }
     }
@@ -130,6 +164,13 @@ public actor SQLiteStore {
         }
         var document: CanvasDocument = try decode(row[0])
         guard document.id == id else { throw PersistenceError.corruptData("Document ID mismatch") }
+        // Read the revision while holding SQLite's transaction lock: another connection
+        // invalidates this single-document cache by committing a new revision.
+        if let cachedDocument, cachedDocument.id == id, cachedDocument.revision == document.revision {
+            var cachedHeader = cachedDocument
+            cachedHeader.blocks = []; cachedHeader.assets = []; cachedHeader.relations = []
+            if cachedHeader == document { return cachedDocument }
+        }
         let textRows = try db.execute("SELECT block_id, content FROM text_contents WHERE document_id = ?", [key])
         var texts: [String: RichText] = [:]
         for row in textRows {
@@ -168,19 +209,29 @@ public actor SQLiteStore {
         return document
     }
 
-    /// First implementation rewrites a document's rows inside one transaction.
-    /// Keep this private so differential writes can replace it without changing the editor API.
-    private func writeContents(_ document: CanvasDocument) throws {
+    /// Upsert only changed rows; never delete/reinsert unrelated blocks on typing.
+    private func writeContents(_ document: CanvasDocument, previous: CanvasDocument? = nil) throws {
         let key = SQLValue.text(document.id.uuidString)
         let encoder = JSONEncoder()
         try db.execute("UPDATE documents SET metadata = ? WHERE id = ?", [.blob(try metadata(document)), key])
-        try db.execute("DELETE FROM block_relations WHERE document_id = ?", [key])
-        try db.execute("DELETE FROM blocks WHERE document_id = ?", [key])
-        try db.execute("DELETE FROM assets WHERE document_id = ?", [key])
+        let oldBlocks = Dictionary(uniqueKeysWithValues: (previous?.blocks ?? []).enumerated().map { ($0.element.id, ($0.offset, $0.element)) })
+        let oldAssets = Dictionary(uniqueKeysWithValues: (previous?.assets ?? []).enumerated().map { ($0.element.hash, ($0.offset, $0.element)) })
+        let oldRelations = Dictionary(uniqueKeysWithValues: (previous?.relations ?? []).enumerated().map { ($0.element.id, ($0.offset, $0.element)) })
+        for old in previous?.relations ?? [] where !document.relations.contains(where: { $0.id == old.id }) {
+            try db.execute("DELETE FROM block_relations WHERE document_id = ? AND id = ?", [key, .text(old.id.uuidString)])
+        }
+        for old in previous?.blocks ?? [] where !document.blocks.contains(where: { $0.id == old.id }) {
+            try db.execute("DELETE FROM blocks WHERE document_id = ? AND id = ?", [key, .text(old.id.uuidString)])
+        }
+        for old in previous?.assets ?? [] where !document.assets.contains(where: { $0.hash == old.hash }) {
+            try db.execute("DELETE FROM assets WHERE document_id = ? AND hash = ?", [key, .text(old.hash)])
+        }
         for (ordinal, asset) in document.assets.enumerated() {
+            if let old = oldAssets[asset.hash], old.0 == ordinal, old.1 == asset { continue }
+            try db.execute("DELETE FROM asset_derivatives WHERE document_id = ? AND asset_hash = ?", [key, .text(asset.hash)])
             var header = asset
             header.derivatives = []
-            try db.execute("INSERT INTO assets VALUES (?, ?, ?, ?)",
+            try db.execute("INSERT INTO assets VALUES (?, ?, ?, ?) ON CONFLICT(document_id, hash) DO UPDATE SET ordinal=excluded.ordinal, metadata=excluded.metadata",
                            [key, .text(asset.hash), .integer(Int64(ordinal)), .blob(try encoder.encode(header))])
             for (index, derivative) in asset.derivatives.enumerated() {
                 try db.execute("INSERT INTO asset_derivatives VALUES (?, ?, ?, ?, ?)",
@@ -188,20 +239,23 @@ public actor SQLiteStore {
             }
         }
         for (ordinal, block) in document.blocks.enumerated() {
+            if let old = oldBlocks[block.id], old.0 == ordinal, old.1 == block { continue }
             var header = block
             if case .text = block.content { header.content = .text(RichText(runs: [])) }
-            try db.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?)", [key, .text(block.id.uuidString),
+            try db.execute("INSERT INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, id) DO UPDATE SET parent_id=excluded.parent_id, anchor_id=excluded.anchor_id, asset_hash=excluded.asset_hash, ordinal=excluded.ordinal, metadata=excluded.metadata", [key, .text(block.id.uuidString),
                 block.parentID.map { .text($0.uuidString) } ?? .null,
                 block.layout.anchorID.map { .text($0.uuidString) } ?? .null,
                 block.content.assetHash.map { .text($0) } ?? .null,
                 .integer(Int64(ordinal)), .blob(try encoder.encode(header))])
+            try db.execute("DELETE FROM text_contents WHERE document_id = ? AND block_id = ?", [key, .text(block.id.uuidString)])
             if case .text(let text) = block.content {
                 try db.execute("INSERT INTO text_contents VALUES (?, ?, ?)",
                                [key, .text(block.id.uuidString), .blob(try encoder.encode(text))])
             }
         }
         for (ordinal, relation) in document.relations.enumerated() {
-            try db.execute("INSERT INTO block_relations VALUES (?, ?, ?, ?, ?, ?)", [key, .text(relation.id.uuidString),
+            if let old = oldRelations[relation.id], old.0 == ordinal, old.1 == relation { continue }
+            try db.execute("INSERT INTO block_relations VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, id) DO UPDATE SET source_id=excluded.source_id, target_id=excluded.target_id, ordinal=excluded.ordinal, metadata=excluded.metadata", [key, .text(relation.id.uuidString),
                 .text(relation.sourceID.uuidString), .text(relation.targetID.uuidString),
                 .integer(Int64(ordinal)), .blob(try encoder.encode(relation))])
         }

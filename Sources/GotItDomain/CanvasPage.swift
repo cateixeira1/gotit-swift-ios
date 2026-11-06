@@ -4,7 +4,8 @@ import Foundation
 public struct CanvasPage: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var title: String
-    public init(id: UUID = UUID(), title: String) { self.id = id; self.title = title }
+    public var textFlowID: UUID?
+    public init(id: UUID = UUID(), title: String, textFlowID: UUID? = nil) { self.id = id; self.title = title; self.textFlowID = textFlowID }
 }
 
 public extension CanvasDocument {

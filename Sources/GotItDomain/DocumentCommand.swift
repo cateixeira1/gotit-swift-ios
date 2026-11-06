@@ -15,10 +15,13 @@ public enum DocumentCommand: Codable, Equatable, Sendable {
     case setDefaultStyle(BlockStyle)
     case setCanvasSettings(CanvasSettings)
     case appendPage(CanvasPage)
+    case insertPage(CanvasPage, after: UUID)
+    case removePage(UUID)
     case insertBlock(CanvasBlock)
     case replaceBlock(CanvasBlock)
     case removeSubtree(UUID)
     case registerAsset(Asset)
+    case unregisterAsset(String)
     case setRelation(BlockRelation)
     case removeRelation(UUID)
 }
@@ -34,6 +37,12 @@ public enum CommandEngine {
             case .setDefaultStyle(let style): document.defaultStyle = style
             case .setCanvasSettings(let settings): document.canvas = settings
             case .appendPage(let page): document.pages.append(page)
+            case .insertPage(let page, let previous):
+                guard let index = document.pages.firstIndex(where: { $0.id == previous }) else { throw DocumentError.invalid("Missing previous page") }
+                document.pages.insert(page, at: index + 1)
+            case .removePage(let id):
+                guard document.pages.count > 1, !document.blocks.contains(where: { document.pageID(for: $0.id) == id }) else { throw DocumentError.invalid("Page is not empty") }
+                document.pages.removeAll { $0.id == id }
             case .insertBlock(let block):
                 guard !document.blocks.contains(where: { $0.id == block.id }) else {
                     throw DocumentError.invalid("Duplicate block ID")
@@ -61,6 +70,9 @@ public enum CommandEngine {
                 if let existing = document.assets.first(where: { $0.hash == asset.hash }) {
                     guard existing == asset else { throw DocumentError.invalid("Asset hash already has different metadata") }
                 } else { document.assets.append(asset) }
+            case .unregisterAsset(let hash):
+                guard !document.blocks.contains(where: { $0.content.assetHash == hash }) else { throw DocumentError.invalid("Asset is still in use") }
+                document.assets.removeAll { $0.hash == hash }
             case .setRelation(let relation):
                 document.relations.removeAll { $0.id == relation.id }
                 document.relations.append(relation)

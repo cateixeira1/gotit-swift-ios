@@ -55,6 +55,7 @@ public enum TextEditingAction {
 @Observable @MainActor
 public final class EditorSession {
     public var hasTextSelection = false
+    public var pendingFocus: TextFlowFocus?
     @ObservationIgnored var handler: ((TextEditingAction) -> Void)?
     public init() {}
     public func perform(_ action: TextEditingAction) { handler?(action) }

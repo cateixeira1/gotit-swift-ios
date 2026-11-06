@@ -74,6 +74,8 @@ public struct CanvasBlock: Codable, Equatable, Sendable, Identifiable {
     public var parentID: UUID?
     /// Nil inherits the parent page, or the first page for legacy root blocks.
     public var pageID: UUID?
+    /// Fragments with the same ID form one continuous text story, ordered by page.
+    public var textFlowID: UUID?
     /// Sibling ordering; gaps are allowed. A batch can reorder several blocks atomically.
     public var order: Int
     public var layout: BlockLayout
@@ -83,10 +85,11 @@ public struct CanvasBlock: Codable, Equatable, Sendable, Identifiable {
     public var effectivePresentation: ObjectPresentation { presentation ?? .init() }
 
     public init(id: UUID = UUID(), parentID: UUID? = nil, order: Int = 0,
-                layout: BlockLayout = .init(), style: BlockStyle = .init(), content: BlockContent, presentation: ObjectPresentation? = nil, pageID: UUID? = nil) {
+                layout: BlockLayout = .init(), style: BlockStyle = .init(), content: BlockContent, presentation: ObjectPresentation? = nil, pageID: UUID? = nil, textFlowID: UUID? = nil) {
         self.id = id
         self.parentID = parentID
         self.pageID = pageID
+        self.textFlowID = textFlowID
         self.order = order
         self.layout = layout
         self.style = style

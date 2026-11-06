@@ -1,7 +1,9 @@
 # Got It!
 
 Aplicativo de notas para iPhone e iPad com canvas modular híbrido e IA local.
-Este repositório inclui o **Document Core** e o início do **Canvas Engine**.
+Este repositório inclui o **Document Core**, o **Canvas Engine** em desenvolvimento e o alvo **GotItApp**.
+
+**A etapa 2 permanece aberta.** Consulte [a revisão de prioridades e validação](docs/stage-2-review.md).
 
 O pacote já oferece modelos de documentos e blocos, estilos herdados, texto por
 runs, comandos validados, persistência SQLite e undo/redo persistente. Ainda não
@@ -22,9 +24,9 @@ swift test
 
 No Xcode, abra `Package.swift`. Os produtos são `GotItDomain` e
 `GotItPersistence`, `GotItCanvas` e `GotItCanvasUI`. O workflow está configurado
-para testar Linux/macOS e compilar o adaptador/demo para iOS Simulator.
+para testar Linux/macOS e compilar o adaptador/aplicativo para iOS Simulator.
 
-A demonstração está em [Examples/GotItDemo](Examples/GotItDemo/README.md).
+O aplicativo está em [Apps/GotIt](Apps/GotIt/README.md), com configuração iPhone/iPad e Mac Catalyst.
 O código UIKit não é compilado no Linux: o sucesso dos testes locais não prova
 que a interface já foi validada no Xcode.
 

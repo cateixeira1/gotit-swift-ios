@@ -17,35 +17,45 @@ enum HistoryStore {
     }
 
     static func record(_ db: SQLiteConnection, before: CanvasDocument, after: CanvasDocument,
-                       commands: [DocumentCommand], limit: Int) throws {
+                       commands: [DocumentCommand], limit: Int, group: String?) throws {
         let id = SQLValue.text(before.id.uuidString)
         let position = try cursor(db, id: before.id)
         guard position < Int64.max else { throw DocumentError.invalid("History sequence exhausted") }
-        let sequence = position + 1
-        try db.execute("DELETE FROM history WHERE document_id = ? AND sequence > ?", [id, .integer(position)])
-        let encoder = JSONEncoder()
+        let encoder = JSONEncoder(), decoder = JSONDecoder()
+        var inverse = try DocumentDelta.between(after, before)
+        var forward = try DocumentDelta.between(before, after)
+        let nextExists = try db.execute("SELECT sequence FROM history WHERE document_id = ? AND sequence > ?", [id, .integer(position)]).first != nil
+        var sequence = position + 1
+        if let group, !nextExists,
+           let row = try db.execute("SELECT commands, before_snapshot, after_snapshot FROM history WHERE document_id = ? AND sequence = ?", [id, .integer(position)]).first,
+           let metadata = row[0].data, (try? decoder.decode(String.self, from: metadata)) == group,
+           let oldInverse = row[1].data, let oldForward = row[2].data {
+            inverse.edits += try decoder.decode(DocumentDelta.self, from: oldInverse).edits
+            forward.edits = try decoder.decode(DocumentDelta.self, from: oldForward).edits + forward.edits
+            sequence = position
+        }
+        try db.execute("DELETE FROM history WHERE document_id = ? AND sequence >= ?", [id, .integer(sequence)])
         try db.execute("INSERT INTO history VALUES (?, ?, ?, ?, ?)", [id, .integer(sequence),
-            .blob(try encoder.encode(commands)), .blob(try encoder.encode(before)), .blob(try encoder.encode(after))])
+            .blob(try encoder.encode(group)), .blob(try encoder.encode(inverse)), .blob(try encoder.encode(forward))])
         try db.execute("UPDATE documents SET history_cursor = ? WHERE id = ?", [.integer(sequence), id])
         try db.execute("DELETE FROM history WHERE document_id = ? AND sequence <= ?", [id, .integer(sequence - Int64(limit))])
     }
 
-    static func restore(_ db: SQLiteConnection, id: UUID, undo: Bool) throws -> CanvasDocument {
+    static func restore(_ db: SQLiteConnection, document: CanvasDocument, undo: Bool) throws -> CanvasDocument {
+        let id = document.id
         let position = try cursor(db, id: id)
-        let sql = undo
-            ? "SELECT sequence, before_snapshot FROM history WHERE document_id = ? AND sequence = ?"
-            : "SELECT sequence, after_snapshot FROM history WHERE document_id = ? AND sequence = ?"
+        let column = undo ? "before_snapshot" : "after_snapshot"
         if !undo && position == Int64.max { throw DocumentError.nothingToRedo }
         let target = undo ? position : position + 1
-        guard let row = try db.execute(sql, [.text(id.uuidString), .integer(target)]).first else {
+        guard let row = try db.execute("SELECT \(column) FROM history WHERE document_id = ? AND sequence = ?",
+                                      [.text(id.uuidString), .integer(target)]).first else {
             throw undo ? DocumentError.nothingToUndo : DocumentError.nothingToRedo
         }
-        guard let sequence = row[0].int, let data = row[1].data else { throw PersistenceError.corruptData("Invalid history row") }
-        let snapshot = try JSONDecoder().decode(CanvasDocument.self, from: data)
-        guard snapshot.id == id else { throw PersistenceError.corruptData("Snapshot document ID mismatch") }
+        guard let data = row[0].data else { throw PersistenceError.corruptData("Invalid history row") }
+        let restored = try JSONDecoder().decode(DocumentDelta.self, from: data).applying(to: document)
         try db.execute("UPDATE documents SET history_cursor = ? WHERE id = ?",
-                       [.integer(undo ? sequence - 1 : sequence), .text(id.uuidString)])
-        return snapshot
+                       [.integer(undo ? target - 1 : target), .text(id.uuidString)])
+        return restored
     }
 
     static func state(_ db: SQLiteConnection, id: UUID) throws -> HistoryState {

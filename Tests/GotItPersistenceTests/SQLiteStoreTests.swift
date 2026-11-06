@@ -134,12 +134,12 @@ private func multimediaDocument() -> CanvasDocument {
     try await store.close()
 }
 
-@Test func sqlFailureAfterDeletesRollsBackAllRowsAndHistory() async throws {
+@Test func sqlFailureRollsBackRowsAndHistory() async throws {
     let fixture = try DatabaseFixture(); defer { fixture.clean() }
     let store = try SQLiteStore(url: fixture.url)
     let original = try await store.create(multimediaDocument())
     let fault = try SQLiteConnection(path: fixture.url.path)
-    try fault.script("CREATE TRIGGER fail_write BEFORE INSERT ON blocks BEGIN SELECT RAISE(ABORT, 'injected disk write failure'); END;")
+    try fault.script("CREATE TRIGGER fail_write BEFORE UPDATE ON documents BEGIN SELECT RAISE(ABORT, 'injected disk write failure'); END;")
     await #expect(throws: PersistenceError.self) {
         try await store.execute([.rename("Must roll back")], documentID: original.id, expectedRevision: 0)
     }
@@ -159,7 +159,7 @@ private func multimediaDocument() -> CanvasDocument {
     let original = try await store.create(multimediaDocument())
     let edited = try await store.execute([.rename("B")], documentID: original.id, expectedRevision: 0)
     let fault = try SQLiteConnection(path: fixture.url.path)
-    try fault.script("CREATE TRIGGER fail_undo BEFORE INSERT ON blocks BEGIN SELECT RAISE(ABORT, 'injected'); END;")
+    try fault.script("CREATE TRIGGER fail_undo BEFORE UPDATE ON documents BEGIN SELECT RAISE(ABORT, 'injected'); END;")
     await #expect(throws: PersistenceError.self) { try await store.undo(documentID: original.id, expectedRevision: 1) }
     try fault.script("DROP TRIGGER fail_undo;")
     try fault.close()
@@ -218,7 +218,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 3)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 5)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -263,7 +263,7 @@ private func multimediaDocument() -> CanvasDocument {
     try await reopened.close()
 }
 
-@Test(arguments: [1, 2]) func migratesLegacyDocumentsAndHistoryWithoutLoss(version: Int) async throws {
+@Test(arguments: [1, 2, 3]) func migratesLegacyDocumentsAndHistoryWithoutLoss(version: Int) async throws {
     let fixture = try DatabaseFixture(); defer { fixture.clean() }
     let store = try SQLiteStore(url: fixture.url)
     let original = try await store.create(multimediaDocument())
@@ -278,8 +278,8 @@ private func multimediaDocument() -> CanvasDocument {
     }
     let metadata = try #require(db.execute("SELECT metadata FROM documents").first?.first?.data)
     try db.execute("UPDATE documents SET metadata = ?", [.blob(try legacy(metadata))])
-    let snapshots = try #require(db.execute("SELECT before_snapshot, after_snapshot FROM history").first)
-    try db.execute("UPDATE history SET before_snapshot = ?, after_snapshot = ?", [.blob(try legacy(#require(snapshots[0].data))), .blob(try legacy(#require(snapshots[1].data)))])
+    var after = original; after.title = "After"; after.revision = 1
+    try db.execute("UPDATE history SET before_snapshot = ?, after_snapshot = ?", [.blob(try legacy(JSONEncoder().encode(original))), .blob(try legacy(JSONEncoder().encode(after)))])
     try db.execute("PRAGMA user_version = \(version)"); try db.close()
     let reopened = try SQLiteStore(url: fixture.url)
     let loaded = try await reopened.load(original.id)
@@ -310,4 +310,75 @@ private func multimediaDocument() -> CanvasDocument {
     #expect(redone.pages == saved.pages)
     #expect(redone.blocks == saved.blocks)
     try await reopened.close()
+}
+
+@Test func groupedTypingUsesDeltasAndLeavesUnrelatedRowsUntouched() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    var note = CanvasDocument(title: "Large")
+    let large = CanvasBlock(order: 1, content: .text(.init(String(repeating: "unchanged", count: 100_000))))
+    var text = CanvasBlock(content: .text(.init("")))
+    note.blocks = [text, large]
+    note = try await store.create(note)
+    let db = try SQLiteConnection(path: fixture.url.path)
+    try db.script("CREATE TABLE touched(id TEXT); CREATE TRIGGER block_updated AFTER UPDATE ON blocks BEGIN INSERT INTO touched VALUES (new.id); END;")
+    for i in 1...80 {
+        text.content = .text(.init(String(repeating: "é👨‍👩‍👧‍👦", count: i)))
+        note = try await store.execute([.replaceBlock(text)], documentID: note.id, expectedRevision: note.revision, historyGroup: "typing")
+    }
+    #expect(try await store.historyState(documentID: note.id).retainedEntries == 1)
+    #expect(try db.execute("SELECT id FROM touched WHERE id = ?", [.text(large.id.uuidString)]).isEmpty)
+    let size = try #require(db.execute("SELECT length(before_snapshot) + length(after_snapshot) FROM history").first?.first?.int)
+    #expect(size < 80_000)
+    try await store.close(); try db.close()
+    let reopened = try SQLiteStore(url: fixture.url)
+    let undone = try await reopened.undo(documentID: note.id, expectedRevision: note.revision)
+    #expect(undone.blocks[0].content == .text(.init("")))
+    let redone = try await reopened.redo(documentID: note.id, expectedRevision: undone.revision)
+    #expect(redone.blocks == note.blocks)
+    let branched = try await reopened.undo(documentID: note.id, expectedRevision: redone.revision)
+    text.content = .text(.init("branch"))
+    let replacement = try await reopened.execute([.replaceBlock(text)], documentID: note.id, expectedRevision: branched.revision, historyGroup: "typing")
+    #expect(try await reopened.historyState(documentID: note.id).canRedo == false)
+    #expect(try await reopened.undo(documentID: note.id, expectedRevision: replacement.revision).blocks[0].content == .text(.init("")))
+    try await reopened.close()
+}
+
+@Test func drawingAssetsRemainReachableOnlyWhileUndoOrRedoNeedsThem() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url, historyLimit: 2)
+    var note = try await store.create(.init(title: "Ink"))
+    var block = CanvasBlock(content: .drawing(.init(hash: String(repeating: "a", count: 64))))
+    var hashes: [String] = []
+    for letter in ["a", "b", "c", "d"] {
+        let hash = String(repeating: letter, count: 64); hashes.append(hash)
+        block.content = .drawing(.init(hash: hash))
+        var commands: [DocumentCommand] = [.registerAsset(.init(hash: hash, mediaType: "application/x-pencilkit", byteCount: 100))]
+        commands.append(note.blocks.isEmpty ? .insertBlock(block) : .replaceBlock(block))
+        if hashes.count > 1 { commands.append(.unregisterAsset(hashes[hashes.count - 2])) }
+        note = try await store.execute(commands, documentID: note.id, expectedRevision: note.revision)
+    }
+    #expect(note.assets.count == 1)
+    #expect(try await store.retainedAssetHashes() == Set(hashes.dropFirst()))
+    note = try await store.undo(documentID: note.id, expectedRevision: note.revision)
+    #expect(try await store.retainedAssetHashes() == Set(hashes.dropFirst()))
+    note = try await store.execute([.rename("branch")], documentID: note.id, expectedRevision: note.revision)
+    #expect(try await store.retainedAssetHashes() == Set(hashes[1...2]))
+    try await store.close()
+}
+
+@Test func deltasPreserveLargeIntegerMetadataAndFormatting() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    var original = CanvasDocument(title: "Precision")
+    let asset = Asset(hash: String(repeating: "a", count: 64), mediaType: "application/octet-stream", byteCount: Int64.max)
+    var block = CanvasBlock(content: .text(.init(runs: [TextRun("e\u{301} 👩🏽‍💻", style: .init(fontSize: 17.25, bold: true))])))
+    original.assets = [asset]; original.blocks = [block]
+    try await store.create(original)
+    block.style = .init(italic: true)
+    let edited = try await store.execute([.replaceBlock(block)], documentID: original.id, expectedRevision: 0)
+    let undone = try await store.undo(documentID: original.id, expectedRevision: edited.revision)
+    #expect(undone.assets == original.assets)
+    #expect(undone.blocks == original.blocks)
+    try await store.close()
 }

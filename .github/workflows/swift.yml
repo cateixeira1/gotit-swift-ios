@@ -39,13 +39,19 @@ jobs:
       - name: Generate demo project
         run: |
           brew install xcodegen
-          cd Examples/GotItDemo
+          cd Apps/GotIt
           xcodegen generate
       - name: Build demo for iOS Simulator
         run: >-
-          xcodebuild -project Examples/GotItDemo/GotItDemo.xcodeproj
-          -scheme GotItDemo -destination 'generic/platform=iOS Simulator'
-          -derivedDataPath "$RUNNER_TEMP/GotItDemoDerivedData"
+          xcodebuild -project Apps/GotIt/GotItApp.xcodeproj
+          -scheme GotItApp -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/GotItAppDerivedData"
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Build app for Mac Catalyst
+        run: >-
+          xcodebuild -project Apps/GotIt/GotItApp.xcodeproj
+          -scheme GotItApp -destination 'generic/platform=macOS,variant=Mac Catalyst'
+          -derivedDataPath "$RUNNER_TEMP/GotItCatalystDerivedData"
           CODE_SIGNING_ALLOWED=NO build
       - name: Test native editor on iPad and iPhone
         timeout-minutes: 15
@@ -57,7 +63,7 @@ jobs:
           results = []
           for family in ["iPad", "iPhone"]:
               device = next(d for d in available if family in d["name"])
-              result = subprocess.run(["xcodebuild", "-project", "Examples/GotItDemo/GotItDemo.xcodeproj", "-scheme", "GotItDemo", "-destination", "platform=iOS Simulator,id=" + device["udid"], "-derivedDataPath", os.environ["RUNNER_TEMP"] + "/GotItDemoDerivedData", "-resultBundlePath", os.environ["RUNNER_TEMP"] + "/" + family + ".xcresult", "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180", "CODE_SIGNING_ALLOWED=NO", "test"], check=False)
+              result = subprocess.run(["xcodebuild", "-project", "Apps/GotIt/GotItApp.xcodeproj", "-scheme", "GotItApp", "-destination", "platform=iOS Simulator,id=" + device["udid"], "-derivedDataPath", os.environ["RUNNER_TEMP"] + "/GotItAppDerivedData", "-resultBundlePath", os.environ["RUNNER_TEMP"] + "/" + family + ".xcresult", "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180", "CODE_SIGNING_ALLOWED=NO", "test"], check=False)
               results.append(result.returncode)
           if any(results): raise SystemExit(1)
           PYTHON

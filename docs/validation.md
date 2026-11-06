@@ -1,3 +1,5 @@
+> Histórico da entrega anterior. O status atual, as mudanças e os limites desta revisão estão em [stage-2-review.md](stage-2-review.md). Teia e equações estão congeladas.
+
 # Validação da primeira implementação
 
 Execute `swift test` na raiz. A suíte usa bancos temporários reais e fixtures

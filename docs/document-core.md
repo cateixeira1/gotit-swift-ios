@@ -56,7 +56,7 @@ suas propostas.
 | `assets` | Registro de metadados por hash SHA-256 e documento |
 | `asset_derivatives` | Metadados de derivados por função, como thumbnail |
 | `block_relations` | Relações com endpoints no mesmo documento |
-| `history` | Comandos e snapshots anterior/posterior por transação |
+| `history` | Grupo e deltas inverso/direto por transação |
 
 Campos de conteúdo usam JSON em BLOBs; identidades e relacionamentos têm
 colunas SQL e foreign keys compostas. Texto não é duplicado entre `blocks` e
@@ -66,14 +66,11 @@ hash real dos arquivos ainda não são verificados: os arquivos serão geridos
 na etapa 3. Metadados podem existir sem referência ativa; coleta de assets
 deverá considerar também o histórico antes de apagar qualquer arquivo.
 
-A migração inicial é um recurso SQL versionado e transacional, com
-`PRAGMA user_version = 1`. A versão atual é 2: acrescenta metadados do canvas,
-preferências, Teias, tinta e novos estilos/conteúdos; payloads antigos e snapshots
-recebem os padrões ao decodificar. O incremento impede que o writer da versão 1
-abra e regrave uma base com campos que ele não conhece. Versões futuras são
-recusadas sem reset do banco.
-Não existe fallback que apague uma base que falhou ao abrir ou decodificar.
-Alterações de formato e enum cases persistidos exigirão migração explícita.
+O esquema atual é v5: v3 introduziu páginas; v4 converte snapshots antigos em
+deltas dentro de uma transação; v5 identifica histórias e páginas de continuação.
+Os nomes físicos `before_snapshot`/`after_snapshot` são mantidos por compatibilidade
+SQL, mas desde v4 contêm deltas, não documentos. Writers antigos recusam a base.
+Uma falha de migração não apaga os dados.
 
 Foreign keys ficam ligadas em cada conexão. WAL e `synchronous=FULL` são
 configurados para as gravações; o timeout de lock é de 5 segundos.
@@ -81,21 +78,16 @@ Essas opções não substituem backups, proteção dos arquivos ou testes no apa
 Nunca copie apenas o arquivo `.sqlite` de um banco aberto em WAL para backup;
 uma futura API deverá usar o mecanismo de backup do SQLite ou equivalente.
 
-## Histórico e limites desta primeira implementação
+## Histórico e limites
 
-O histórico persiste snapshots completos de metadados/texto, sem bytes de mídia.
-O limite padrão é de 50 lotes por documento, configurável ao abrir o store.
-Após undo, uma edição nova descarta o ramo redo; o limite de retenção define
-até onde o usuário pode desfazer. A retenção é por quantidade, não por bytes;
-diminuir o limite produz limpeza na próxima edição.
+O histórico persiste deltas inversos e diretos, com splices de caracteres para
+texto. Retém até 50 grupos; a UI agrupa digitação consecutiva. Redo é descartado
+quando uma nova edição cria um ramo. Gravação atualiza somente linhas modificadas;
+blocos inalterados não são serializados para construir os deltas. O editor ainda
+percorre valores em memória e o histórico não tem orçamento de bytes.
 
-Para tornar a atomicidade verificável nesta base, a gravação reescreve os rows
-do documento dentro da transação. Isso custa O(n) por edição e snapshots também
-podem crescer com notas extensas. **Ainda não é a estratégia final de memória
-e armazenamento do produto.** Antes de integrar edição a cada tecla, medir
-notas grandes, agrupar gestos/digitação, usar gravações diferenciais e evoluir
-o histórico para deltas com checkpoints e limite por bytes. O contrato público
-foi isolado para permitir essa evolução.
+A coleta física de assets usa todos os estados retidos, não apenas blocos visíveis.
+Detalhes, migração, validação e limitações em [stage-2-review.md](stage-2-review.md).
 
 Não há ainda FTS5, R-Tree, sqlite-vec, compressão, OCR, transcrição, recuperação
 de arquivos de mídia ou criptografia de banco. A UI inicial está descrita em

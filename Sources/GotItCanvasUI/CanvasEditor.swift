@@ -27,7 +27,9 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onDrawing: (Data, [DocumentCommand]) -> Void
     public var image: (String) -> UIImage?
     public var note: (UUID) -> NoteCardPresentation?
+    public var onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)?
     public var onCommands: ([DocumentCommand]) -> Void
+    public var onOpenPDF: (UUID) -> Void
     public var onOpenNote: (UUID) -> Void
     public var onError: (Error) -> Void
 
@@ -37,10 +39,14 @@ public struct CanvasEditor: UIViewControllerRepresentable {
                 onDrawing: @escaping (Data, [DocumentCommand]) -> Void = { _, _ in },
                 image: @escaping (String) -> UIImage? = { _ in nil },
                 note: @escaping (UUID) -> NoteCardPresentation? = { _ in nil },
+                onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)? = nil,
                 onCommands: @escaping ([DocumentCommand]) -> Void,
+                onOpenPDF: @escaping (UUID) -> Void = { _ in },
                 onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in }) {
         self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
         self.drawingData = drawingData; self.onDrawing = onDrawing
+        self.onOpenPDF = onOpenPDF
+        self.onTextCommands = onTextCommands
         self.document = document; self.tool = tool; self.image = image; self.note = note
         self.onCommands = onCommands; self.onOpenNote = onOpenNote; self.onError = onError
     }
@@ -63,6 +69,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var loadedDrawingHash: String?
     private var fitted = false
     private var inkToolSignature = ""
+    private var pendingFocusID: UUID?
+    private var rendering = false
+    private var textPool: [UITextView] = []
+    private var objectPool: [CanvasObjectView] = []
+    private var selectedObjectID: UUID?
+    private var selectionOverlay: SelectionHandles?
+    public var realizedBlockViewCount: Int { blockViews.count }
+    public var recycledBlockViewCount: Int { textPool.count + objectPool.count }
     private var blockViews: [UUID: UIView] = [:]
     private var textIDs: [ObjectIdentifier: UUID] = [:]
     private var connectionViews: [UIView] = []
@@ -70,6 +84,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var connectingFrom: UUID?
     private var movingID: UUID?
     private var moveOrigin = CGPoint.zero
+    private var typingGroup: String?
+    private var typingBlock: UUID?
+    private var typingCaret: Int?
+    private var typingTime = Date.distantPast
+    private var typingStarted = Date.distantPast
+    private var pendingTyping = false
 
     init(configuration: CanvasEditor) { self.configuration = configuration; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError("Use CanvasEditor") }
@@ -119,6 +139,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     private func render() {
+        guard !rendering else { return }
+        rendering = true
+        defer { rendering = false }
         do { frames = try CanvasLayoutEngine.frames(in: configuration.document) }
         catch { configuration.onError(error); return }
         let page = configuration.document.canvas.size
@@ -129,13 +152,19 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let scaledSize = CGSize(width: size.width * scroll.zoomScale, height: size.height * scroll.zoomScale)
         surface.center = CGPoint(x: scaledSize.width / 2, y: scaledSize.height / 2)
         scroll.contentSize = scaledSize
-        let ids = Set(configuration.document.blocks.map(\.id))
+        let visible = scroll.convert(scroll.bounds, to: surface).insetBy(dx: -80, dy: -80)
+        let ids = Set(configuration.document.blocks.compactMap { block -> UUID? in
+            guard let frame = frames[block.id] else { return nil }
+            let bounds = CanvasLayoutEngine.rotatedBounds(frame, radians: block.effectivePresentation.rotationRadians)
+            let rect = CGRect(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height)
+            return rect.intersects(visible) || blockViews[block.id]?.isFirstResponder == true || movingID == block.id || selectedObjectID == block.id || configuration.session?.pendingFocus?.blockID == block.id ? block.id : nil
+        })
         for id in Array(blockViews.keys) where !ids.contains(id) {
-            if let view = blockViews.removeValue(forKey: id) { textIDs.removeValue(forKey: ObjectIdentifier(view)); view.removeFromSuperview() }
+            recycle(id)
         }
         for block in configuration.document.blocks.sorted(by: { $0.layout.zIndex < $1.layout.zIndex }) {
             if case .drawing = block.content { continue }
-            guard let logical = frames[block.id] else { continue }
+            guard ids.contains(block.id), let logical = frames[block.id] else { continue }
             let blockView: UIView
             if case .text(let richText) = block.content {
                 let isNew = blockViews[block.id] == nil
@@ -144,7 +173,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     let style = (try? configuration.document.resolvedStyle(for: block.id)) ?? .init()
                     textView.typingAttributes = [.font: UIFont.systemFont(ofSize: style.fontSize ?? 18), .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
                 }
-                if !textView.isFirstResponder { textView.attributedText = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init()) }
+                let rendered = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init())
+                if textView.markedTextRange == nil, !rendered.isEqual(to: textView.attributedText ?? NSAttributedString(string: "")) {
+                    let selection = textView.selectedRange
+                    textView.attributedText = rendered
+                    let location = min(selection.location, rendered.length)
+                    textView.selectedRange = NSRange(location: location, length: min(selection.length, rendered.length - location))
+                }
                 textView.textContainer.exclusionPaths = ((try? TextFlowEngine.exclusions(for: block.id, in: configuration.document)) ?? []).map {
                     let path = UIBezierPath()
                     for (index, point) in $0.polygon.enumerated() {
@@ -154,7 +189,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     path.close(); return path
                 }
                 blockView = textView
-                if isNew, richText.plainText.isEmpty, configuration.tool == .select {
+                if let focus = configuration.session?.pendingFocus, focus.blockID == block.id {
+                    configuration.session?.pendingFocus = nil
+                    Task { @MainActor [weak textView] in
+                        textView?.becomeFirstResponder(); textView?.selectedRange = focus.range
+                    }
+                }
+                if isNew, richText.plainText.isEmpty, configuration.tool == .select, pendingFocusID == block.id {
                     Task { @MainActor [weak textView] in textView?.becomeFirstResponder() }
                 }
             } else {
@@ -220,7 +261,35 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         loadDrawing()
         ink.accessibilityValue = "\(ink.drawing.strokes.count) traços"
         surface.bringSubviewToFront(ink)
-        updateVisibility()
+        selectionOverlay?.removeFromSuperview(); selectionOverlay = nil
+        if configuration.tool == .select, let id = selectedObjectID, let object = blockViews[id],
+           let block = configuration.document.blocks.first(where: { $0.id == id }) {
+            let handles = SelectionHandles(frame: object.bounds)
+            handles.center = object.center; handles.transform = object.transform
+            handles.onResize = { [weak self] dx, dy, left, top, ended in
+                guard let self else { return }
+                var rect = block.layout.frame
+                let width = max(24, rect.width + (left ? -dx : dx))
+                let height = max(24, rect.height + (top ? -dy : dy))
+                if left { rect.x += rect.width - width }; if top { rect.y += rect.height - height }
+                rect.width = width; rect.height = height
+                if ended {
+                    do {
+                        var commands = try CanvasTransforms.resize(id, width: width, height: height, in: self.configuration.document)
+                        commands = commands.map { command in
+                            if case .replaceBlock(var changed) = command, changed.id == id {
+                                changed.layout.frame.x = rect.x; changed.layout.frame.y = rect.y; return .replaceBlock(changed)
+                            }; return command
+                        }
+                        self.configuration.onCommands(commands)
+                    } catch { self.configuration.onError(error) }
+                } else {
+                    object.bounds.size = CGSize(width: width, height: height)
+                    handles.bounds.size = object.bounds.size; handles.setNeedsLayout()
+                }
+            }
+            surface.addSubview(handles); selectionOverlay = handles
+        }
         updateRuler()
     }
 
@@ -350,13 +419,29 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         configuration.onDrawing(bytes, commands)
     }
 
+    /// Views outside the overscan are detached and reset. Focus/IME and active drags stay pinned.
+    private func recycle(_ id: UUID) {
+        guard let view = blockViews.removeValue(forKey: id) else { return }
+        view.removeFromSuperview(); view.transform = .identity
+        textIDs.removeValue(forKey: ObjectIdentifier(view))
+        if let text = view as? UITextView {
+            text.attributedText = nil; text.textContainer.exclusionPaths = []; text.typingAttributes = [:]
+            text.undoManager?.removeAllActions()
+            if textPool.count < 12 { textPool.append(text) }
+        } else if let object = view as? CanvasObjectView {
+            object.id = nil; object.block = nil; object.asset = nil; object.note = nil; object.onMenu = nil
+            object.layer.shadowOpacity = 0
+            if objectPool.count < 24 { objectPool.append(object) }
+        }
+    }
+
     private func updateVisibility() {
-        guard isViewLoaded, scroll.zoomScale > 0 else { return }
-        let visible = scroll.convert(scroll.bounds, to: surface).insetBy(dx: -80, dy: -80)
-        for item in blockViews.values { item.isHidden = !item.frame.intersects(visible) && !item.isFirstResponder }
+        guard isViewLoaded, scroll.zoomScale > 0, !rendering else { return }
+        render()
     }
 
     private func makeTextView(id: UUID) -> UITextView {
+        if let reused = textPool.popLast() { textIDs[ObjectIdentifier(reused)] = id; return reused }
         let text = UITextView(usingTextLayoutManager: true)
         text.delegate = self; text.backgroundColor = .clear
         text.textContainerInset = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
@@ -384,10 +469,38 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         activeText = textView; configuration.session?.hasTextSelection = true
     }
 
+    public func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
+        let now = Date(), id = textIDs[ObjectIdentifier(textView)]
+        if typingBlock != id || typingCaret != textView.selectedRange.location || textView.selectedRange.length > 0 ||
+           now.timeIntervalSince(typingTime) > 1 || now.timeIntervalSince(typingStarted) > 5 || text.count > 1 {
+            typingGroup = UUID().uuidString; typingStarted = now
+        }
+        typingBlock = id; typingTime = now
+        typingCaret = range.location + (text as NSString).length
+        pendingTyping = true
+        return true
+    }
+
+    public func textViewDidEndEditing(_ textView: UITextView) {
+        if activeText === textView { activeText = nil; configuration.session?.hasTextSelection = false }
+        typingGroup = nil; typingBlock = nil; typingCaret = nil; pendingTyping = false
+    }
+
     public func textViewDidChange(_ textView: UITextView) {
         guard let id = textIDs[ObjectIdentifier(textView)], var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
         block.content = .text(TextBridge.richText(textView.attributedText))
-        configuration.onCommands([.replaceBlock(block)])
+        let group = pendingTyping ? typingGroup : nil
+        pendingTyping = false
+        guard textView.markedTextRange == nil else { return } // Do not split an IME composition.
+        if let onTextCommands = configuration.onTextCommands {
+            if let focus = onTextCommands(block, group, textView.selectedRange) {
+                if focus.blockID == id {
+                    textView.attributedText = TextBridge.attributed(focus.text, base: (try? configuration.document.resolvedStyle(for: id)) ?? .init())
+                    textView.selectedRange = focus.range
+                } else { configuration.session?.pendingFocus = focus }
+            }
+        }
+        else { configuration.onCommands([.replaceBlock(block)]) }
     }
 
     private func format(_ text: UITextView, key: NSAttributedString.Key, value: Any) {
@@ -445,9 +558,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     private func makeObjectView(id: UUID) -> CanvasObjectView {
-        let object = CanvasObjectView()
+        let reused = objectPool.popLast()
+        let object = reused ?? CanvasObjectView()
         object.id = id
-        object.onMenu = { [weak self] in self?.objectMenu(id) ?? UIMenu(children: []) }
+        object.onMenu = { [weak self, weak object] in
+            guard let id = object?.id else { return UIMenu(children: []) }
+            return self?.objectMenu(id) ?? UIMenu(children: [])
+        }
+        if reused != nil { return object }
         let pan = UIPanGestureRecognizer(target: self, action: #selector(moveObject(_:)))
         object.addGestureRecognizer(pan)
         let tap = UITapGestureRecognizer(target: self, action: #selector(selectObject(_:)))
@@ -475,10 +593,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     @objc private func selectObject(_ gesture: UITapGestureRecognizer) {
         guard let object = gesture.view as? CanvasObjectView, let id = object.id else { return }
+        selectedObjectID = id
+        render()
         if let source = connectingFrom {
             connectingFrom = nil
             if source != id { configuration.onCommands([.setRelation(.init(sourceID: source, targetID: id, kind: .connector, style: .init()))]) }
-        } else if case .noteReference(let ref) = object.block?.content { configuration.onOpenNote(ref.documentID) }
+        } else if case .pdf = object.block?.content { configuration.onOpenPDF(id) }
+        else if case .noteReference(let ref) = object.block?.content { configuration.onOpenNote(ref.documentID) }
     }
 
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -489,7 +610,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private func insertText(at point: CGPoint) {
         let size = configuration.document.canvas.size
         let frame = LogicalRect(x: point.x, y: point.y, width: max(80, size.width - point.x - 24), height: max(80, size.height - point.y - 24))
-        configuration.onCommands([.insertBlock(.init(order: nextOrder, layout: .init(mode: .absolute, frame: frame), content: .text(RichText(""))))])
+        var block = CanvasBlock(order: nextOrder, layout: .init(mode: .absolute, frame: frame), content: .text(RichText("")))
+        if configuration.document.kind == .note { block.textFlowID = block.id }
+        pendingFocusID = block.id
+        configuration.onCommands([.insertBlock(block)])
     }
     private var nextOrder: Int { (configuration.document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1 }
 
@@ -519,6 +643,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 UIAction(title: mode.title, handler: update { var p = $0.effectivePresentation; p.wrap = mode; $0.presentation = p })
             })
         ]
+        if case .pdf = block.content { actions.insert(UIAction(title: "Abrir PDF") { [weak self] _ in self?.configuration.onOpenPDF(id) }, at: 0) }
         if case .shape = block.content {
             actions.append(UIMenu(title: "Preenchimento", children: colors.map { name, color in
                 UIAction(title: name, handler: update { if case .shape(var shape) = $0.content { shape.fill = color; $0.content = .shape(shape) } })

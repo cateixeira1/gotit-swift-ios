@@ -1,3 +1,5 @@
+> Histórico da entrega anterior. O status atual, as mudanças e os limites desta revisão estão em [stage-2-review.md](stage-2-review.md). Teia e equações estão congeladas.
+
 # Etapa 2 — Canvas Engine e contrato do editor
 
 Requisitos do usuário incorporados em 06/11/2026. Esta etapa foi iniciada após

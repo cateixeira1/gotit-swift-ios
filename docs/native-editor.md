@@ -1,3 +1,5 @@
+> Histórico da entrega anterior. O status atual, as mudanças e os limites desta revisão estão em [stage-2-review.md](stage-2-review.md). Teia e equações estão congeladas.
+
 # Editor nativo: páginas e ferramentas
 
 A interface do protótipo usa SwiftUI, UIKit/TextKit e PencilKit, com SF Symbols,

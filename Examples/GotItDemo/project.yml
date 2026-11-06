@@ -29,8 +29,36 @@ targets:
         product: GotItCanvas
       - package: GotIt
         product: GotItCanvasUI
+  GotItDemoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    settings:
+      base:
+        SWIFT_VERSION: '6.0'
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: GotItDemo
+      - package: GotIt
+        product: GotItDomain
+      - package: GotIt
+        product: GotItCanvasUI
+  GotItDemoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    settings:
+      base:
+        SWIFT_VERSION: '6.0'
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: GotItDemo
 schemes:
   GotItDemo:
     build:
       targets:
         GotItDemo: all
+    test:
+      targets:
+        - GotItDemoTests
+        - GotItDemoUITests

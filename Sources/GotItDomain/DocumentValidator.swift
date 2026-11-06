@@ -7,6 +7,19 @@ public enum DocumentValidator {
               document.updatedAt.timeIntervalSinceReferenceDate.isFinite else {
             throw DocumentError.invalid("Invalid document metadata")
         }
+        guard !document.pages.isEmpty, Set(document.pages.map(\.id)).count == document.pages.count else {
+            throw DocumentError.invalid("A document needs unique pages")
+        }
+        let membership = document.pageAssignments()
+        let pageIDs = Set(document.pages.map(\.id))
+        for block in document.blocks {
+            guard let page = membership[block.id], pageIDs.contains(page) else {
+                throw DocumentError.invalid("Missing page or parent cycle")
+            }
+            for dependency in [block.parentID, block.layout.anchorID].compactMap({ $0 }) {
+                guard membership[dependency] == page else { throw DocumentError.invalid("Cross-page parent or anchor") }
+            }
+        }
         try validate(style: document.defaultStyle)
         try document.canvas.size.validate()
         guard document.canvas.pixelsPerInch.isFinite, document.canvas.pixelsPerInch > 0 else {
@@ -29,7 +42,7 @@ public enum DocumentValidator {
             }
         }
         var previousFlow: [UUID: UUID] = [:]
-        for siblings in Dictionary(grouping: document.blocks, by: \.parentID).values {
+        for siblings in Dictionary(grouping: document.blocks, by: { ($0.parentID.map { "parent:\($0)" }) ?? "page:\(membership[$0.id]?.uuidString ?? "missing")" }).values {
             let flow = siblings.filter { $0.layout.mode == .flow }.sorted { $0.order < $1.order }
             for index in flow.indices.dropFirst() { previousFlow[flow[index].id] = flow[index - 1].id }
         }
@@ -106,6 +119,7 @@ public enum DocumentValidator {
             throw DocumentError.invalid("Duplicate relation ID")
         }
         for relation in document.relations {
+            guard membership[relation.sourceID] == membership[relation.targetID] else { throw DocumentError.invalid("Cross-page relation") }
             if let ink = relation.originalStroke { try validate(ink: ink) }
             if let style = relation.style {
                 try validate(color: style.color)

@@ -12,6 +12,7 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
     public var relations: [BlockRelation]
     public var kind: DocumentKind
     public var canvas: CanvasSettings
+    public var pages: [CanvasPage]
 
     public init(id: UUID = UUID(), title: String, defaultStyle: BlockStyle = .init(), now: Date = Date(), kind: DocumentKind = .note, canvas: CanvasSettings = .init()) {
         self.id = id
@@ -25,10 +26,11 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
         self.relations = []
         self.kind = kind
         self.canvas = canvas
+        self.pages = [CanvasPage(id: id, title: "Página 1")]
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, revision, createdAt, updatedAt, defaultStyle, blocks, assets, relations, kind, canvas
+        case id, title, revision, createdAt, updatedAt, defaultStyle, blocks, assets, relations, kind, canvas, pages
     }
 
     public init(from decoder: Decoder) throws {
@@ -44,6 +46,7 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
         relations = try c.decode([BlockRelation].self, forKey: .relations)
         kind = try c.decodeIfPresent(DocumentKind.self, forKey: .kind) ?? .note
         canvas = try c.decodeIfPresent(CanvasSettings.self, forKey: .canvas) ?? .init()
+        pages = try c.decodeIfPresent([CanvasPage].self, forKey: .pages) ?? [CanvasPage(id: id, title: "Página 1")]
     }
 
     public func children(of parentID: UUID? = nil) -> [CanvasBlock] {
@@ -69,6 +72,8 @@ public struct CanvasDocument: Codable, Equatable, Sendable, Identifiable {
 public struct CanvasBlock: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var parentID: UUID?
+    /// Nil inherits the parent page, or the first page for legacy root blocks.
+    public var pageID: UUID?
     /// Sibling ordering; gaps are allowed. A batch can reorder several blocks atomically.
     public var order: Int
     public var layout: BlockLayout
@@ -78,9 +83,10 @@ public struct CanvasBlock: Codable, Equatable, Sendable, Identifiable {
     public var effectivePresentation: ObjectPresentation { presentation ?? .init() }
 
     public init(id: UUID = UUID(), parentID: UUID? = nil, order: Int = 0,
-                layout: BlockLayout = .init(), style: BlockStyle = .init(), content: BlockContent, presentation: ObjectPresentation? = nil) {
+                layout: BlockLayout = .init(), style: BlockStyle = .init(), content: BlockContent, presentation: ObjectPresentation? = nil, pageID: UUID? = nil) {
         self.id = id
         self.parentID = parentID
+        self.pageID = pageID
         self.order = order
         self.layout = layout
         self.style = style

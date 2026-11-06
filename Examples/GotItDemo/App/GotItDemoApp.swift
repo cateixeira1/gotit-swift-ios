@@ -2,6 +2,9 @@ import SwiftUI
 import PhotosUI
 import CryptoKit
 import ImageIO
+import PencilKit
+import PDFKit
+import UniformTypeIdentifiers
 import GotItDomain
 import GotItPersistence
 import GotItCanvas
@@ -16,6 +19,7 @@ struct GotItDemoApp: App {
 @Observable @MainActor
 final class DemoModel {
     var document: CanvasDocument?
+    var selectedPageID: UUID?
     var summaries: [DocumentSummary] = []
     var noteMetadata: [UUID: NoteCardPresentation] = [:]
     var error: String?
@@ -29,7 +33,13 @@ final class DemoModel {
     func start() async {
         guard store == nil else { return }
         do {
-            let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("GotItDemo")
+            var root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("GotItDemo")
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+                root = root.deletingLastPathComponent().appendingPathComponent("GotItUITests")
+                if ProcessInfo.processInfo.arguments.contains("--reset-test-data"), FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+            }
+            #endif
             try FileManager.default.createDirectory(at: root.appendingPathComponent("assets"), withIntermediateDirectories: true)
             directory = root
             store = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
@@ -42,6 +52,7 @@ final class DemoModel {
     func refresh() async throws {
         guard let store else { return }
         summaries = try await store.listDocuments()
+        if let document, !document.pages.contains(where: { $0.id == selectedPageID }) { selectedPageID = document.pages.first?.id }
         for summary in summaries where summary.kind == .note {
             let note = try await store.load(summary.id)
             noteMetadata[summary.id] = .init(title: summary.title, createdAt: summary.createdAt, preview: preview(note))
@@ -50,7 +61,7 @@ final class DemoModel {
 
     func open(_ id: UUID) async {
         guard !isSaving, let store else { return }
-        do { document = try await store.load(id) }
+        do { document = try await store.load(id); selectedPageID = document?.pages.first?.id }
         catch { self.error = String(describing: error) }
     }
 
@@ -123,47 +134,110 @@ final class DemoModel {
 
     func image(_ hash: String) -> UIImage? {
         if let cached = images[hash] { return cached }
+        if let bytes = assetData(hash), let pdf = PDFDocument(data: bytes), let page = pdf.page(at: 0) {
+            let image = page.thumbnail(of: CGSize(width: 600, height: 850), for: .mediaBox)
+            images[hash] = image; return image
+        }
         guard let url = directory?.appendingPathComponent("assets").appendingPathComponent(hash),
               let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 2048, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
         let image = UIImage(cgImage: thumbnail); images[hash] = image; return image
     }
 
-    func importImage(_ item: PhotosPickerItem) async {
-        guard let directory, let document else { return }
+    var activePageID: UUID? { document?.pages.first(where: { $0.id == selectedPageID })?.id ?? document?.pages.first?.id }
+
+    func addPage() {
+        guard let document else { return }
+        let page = CanvasPage(title: "Página \(document.pages.count + 1)")
+        enqueue([.appendPage(page)])
+        if self.document?.pages.contains(where: { $0.id == page.id }) == true { selectedPageID = page.id }
+    }
+
+    func enqueue(_ commands: [DocumentCommand], pageID: UUID, documentID: UUID) {
+        guard let document, document.id == documentID else { return }
+        do { enqueue(try document.commands(commands, on: pageID)) }
+        catch { self.error = String(describing: error) }
+    }
+
+    func assetData(_ hash: String) -> Data? {
+        guard let directory else { return nil }
+        return try? Data(contentsOf: directory.appendingPathComponent("assets").appendingPathComponent(hash))
+    }
+
+    private func storeAsset(_ data: Data, mediaType: String) throws -> Asset {
+        guard let directory else { throw DocumentError.invalid("Storage unavailable") }
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let destination = directory.appendingPathComponent("assets").appendingPathComponent(hash)
+        if !FileManager.default.fileExists(atPath: destination.path) { try data.write(to: destination, options: .atomic) }
+        return Asset(hash: hash, mediaType: mediaType, byteCount: Int64(data.count))
+    }
+
+    func saveDrawing(_ data: Data, extra: [DocumentCommand], pageID: UUID, documentID: UUID) {
+        guard let document, document.id == documentID, !writeFailed else { return }
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else { throw DocumentError.invalid("Could not load image") }
-            guard let current = self.document, current.id == document.id else { return }
-            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            let destination = directory.appendingPathComponent("assets").appendingPathComponent(hash)
-            if !FileManager.default.fileExists(atPath: destination.path) { try data.write(to: destination, options: .atomic) }
-            let metadata = Asset(hash: hash, mediaType: item.supportedContentTypes.first?.preferredMIMEType ?? "application/octet-stream", byteCount: Int64(data.count))
-            let order = (current.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
-            let decoded = image(hash)
-            let aspect = Double((decoded?.size.height ?? 200) / max(1, decoded?.size.width ?? 240))
-            let block = CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(x: 100, y: 150, width: 240, height: 240 * aspect)), content: .image(.init(hash: hash)))
-            enqueue((current.assets.contains(where: { $0.hash == hash }) ? [] : [.registerAsset(metadata)]) + [.insertBlock(block)])
+            let drawing = try PKDrawing(data: data)
+            let existing = document.blocks.first { block in
+                if case .drawing = block.content { return document.pageID(for: block.id) == pageID }; return false
+            }
+            var commands = extra
+            if drawing.strokes.isEmpty {
+                if let existing { commands.append(.removeSubtree(existing.id)) }
+            } else {
+                let asset = try storeAsset(data, mediaType: "application/x-pencilkit")
+                if !document.assets.contains(where: { $0.hash == asset.hash }) { commands.append(.registerAsset(asset)) }
+                var block = existing ?? CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: document.canvas.size.width, height: document.canvas.size.height), zIndex: 1000), content: .drawing(.init(hash: asset.hash)), presentation: .init(wrap: .none))
+                block.content = .drawing(.init(hash: asset.hash))
+                commands.append(existing == nil ? .insertBlock(block) : .replaceBlock(block))
+            }
+            enqueue(commands, pageID: pageID, documentID: documentID)
         } catch { self.error = String(describing: error) }
     }
 
+    func importImage(_ item: PhotosPickerItem, sticker: Bool, pageID: UUID, documentID: UUID) async {
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self),
+                  CGImageSourceCreateWithData(data as CFData, nil) != nil else { throw DocumentError.invalid("Could not load image") }
+            guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
+            let asset = try storeAsset(data, mediaType: item.supportedContentTypes.first?.preferredMIMEType ?? "application/octet-stream")
+            let decoded = image(asset.hash)
+            let aspect = Double((decoded?.size.height ?? 200) / max(1, decoded?.size.width ?? 240))
+            let width = min(240, current.canvas.size.width * 0.6)
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 80, width: width, height: width * aspect)), content: sticker ? .sticker(.init(hash: asset.hash)) : .image(.init(hash: asset.hash)))
+            enqueue((current.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
+        } catch { self.error = String(describing: error) }
+    }
+
+    func importPDF(_ url: URL, pageID: UUID, documentID: UUID) {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        do {
+            guard let document, document.id == documentID else { return }
+            let data = try Data(contentsOf: url)
+            guard let pdf = PDFDocument(data: data), pdf.pageCount > 0, !pdf.isLocked else { throw DocumentError.invalid("PDF vazio, protegido ou inválido") }
+            let asset = try storeAsset(data, mediaType: "application/pdf")
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 80, width: 240, height: 340)), content: .pdf(.init(hash: asset.hash, caption: url.lastPathComponent)))
+            enqueue((document.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
+        } catch { self.error = String(describing: error) }
+    }
+
+    func pagePreview(_ page: CanvasDocument) -> UIImage {
+        PagePreview.image(document: page, asset: image, drawingData: assetData)
+    }
+
     private func preview(_ note: CanvasDocument) -> UIImage {
-        let text = note.blocks.compactMap { block -> String? in if case .text(let text) = block.content { text.plainText } else { nil } }.joined(separator: "\n")
-        return UIGraphicsImageRenderer(size: CGSize(width: 240, height: 130)).image { ctx in
-            UIColor.white.setFill(); ctx.fill(CGRect(x: 0, y: 0, width: 240, height: 130))
-            (text as NSString).draw(in: CGRect(x: 10, y: 10, width: 220, height: 110), withAttributes: [.font: UIFont.systemFont(ofSize: 12), .foregroundColor: UIColor.black])
-        }
+        let first = note.pages.first.flatMap { try? note.pageDocument($0.id) } ?? note
+        return PagePreview.image(document: first, width: 120, asset: image, drawingData: assetData)
     }
 }
 
 struct DemoScreen: View {
     @Bindable var model: DemoModel
-    @State private var tool = CanvasTool.select
+    @State private var visibility = NavigationSplitViewVisibility.detailOnly
     @State private var showPage = false
     @State private var equation = "x² - 5x + 6 = 0"
     @State private var showEquation = false
-    @State private var photo: PhotosPickerItem?
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $visibility) {
             List {
                 Section {
                     Button("Nova nota", systemImage: "plus") { Task { await model.createNote() } }
@@ -187,9 +261,8 @@ struct DemoScreen: View {
             if let document = model.document {
                 VStack(spacing: 0) {
                     if model.writeFailed { Text("Alterações não estão sendo salvas").foregroundStyle(.red).padding(8) }
-                    CanvasEditor(document: document, tool: tool, image: model.image,
-                        note: { model.noteMetadata[$0] }, onCommands: model.enqueue,
-                        onOpenNote: { id in Task { await model.open(id) } }, onError: { model.error = String(describing: $0) })
+                    EditorWorkspace(model: model, document: document)
+
                 }
                 .navigationTitle(document.title)
                 .toolbar {
@@ -197,9 +270,7 @@ struct DemoScreen: View {
                         Button { Task { await model.history(undo: true) } } label: { Image(systemName: "arrow.uturn.backward") }.disabled(model.isSaving)
                         Button { Task { await model.history(undo: false) } } label: { Image(systemName: "arrow.uturn.forward") }.disabled(model.isSaving)
                         Menu {
-                            Picker("Ferramenta", selection: $tool) { Text("Selecionar / texto").tag(CanvasTool.select); Text("Desenhar").tag(CanvasTool.draw) }
                             Button("Tamanho e opções do canvas") { showPage = true }
-                            PhotosPicker(selection: $photo, matching: .images) { Text("Adicionar imagem") }
                             if document.kind == .note { Button("Teia desta nota") { Task { await model.createWeb(including: document.id) } } }
                             else {
                                 Menu("Adicionar nota à Teia") { ForEach(model.summaries.filter { $0.kind == .note }) { summary in Button(summary.title) { model.addNote(summary) } } }
@@ -216,7 +287,6 @@ struct DemoScreen: View {
                 } message: { Text("Nesta demonstração, digite ou corrija a expressão. O reconhecimento de equações manuscritas ainda não está conectado.") }
             } else { ContentUnavailableView("Got It!", systemImage: "note.text", description: Text("Crie ou selecione uma nota.")) }
         }
-        .onChange(of: photo) { _, item in if let item { Task { await model.importImage(item) }; photo = nil } }
         .alert("Aviso", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -231,7 +301,7 @@ struct DemoScreen: View {
             case .allRealNumbers: output = "Todo número real é solução"
             }
             let order = (document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
-            model.enqueue([.insertBlock(.init(order: order, layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 400, height: 100)), content: .text(.init("\(equation)\n\(output)"))))])
+            model.enqueue([.insertBlock(.init(order: order, layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 400, height: 100)), content: .text(.init("\(equation)\n\(output)"))))], pageID: model.activePageID ?? document.id, documentID: document.id)
         } catch { model.error = "Expressão não suportada ou ambígua. \(error)" }
     }
 }

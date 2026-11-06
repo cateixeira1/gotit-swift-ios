@@ -30,7 +30,8 @@ public enum CanvasLayoutEngine {
         try DocumentValidator.validate(document)
         let blocks = Dictionary(uniqueKeysWithValues: document.blocks.map { ($0.id, $0) })
         var previousFlow: [UUID: UUID] = [:]
-        let groups = Dictionary(grouping: document.blocks, by: \.parentID)
+        let membership = document.pageAssignments()
+        let groups = Dictionary(grouping: document.blocks, by: { ($0.parentID.map { "parent:\($0)" }) ?? "page:\(membership[$0.id]?.uuidString ?? "missing")" })
         for siblings in groups.values {
             let flow = siblings.filter { $0.layout.mode == .flow }.sorted { $0.order < $1.order }
             for index in flow.indices.dropFirst() { previousFlow[flow[index].id] = flow[index - 1].id }
@@ -92,7 +93,9 @@ public enum TextFlowEngine {
         var ancestors: Set<UUID> = []
         var current = text.parentID
         while let id = current { ancestors.insert(id); current = byID[id]?.parentID }
+        let membership = document.pageAssignments()
         return document.blocks.compactMap { object in
+            if membership[object.id] != membership[textID] { return nil }
             if object.id == textID || ancestors.contains(object.id) { return nil }
             switch object.content { case .text, .container: return nil; default: break }
             guard let frame = frames[object.id] else { return nil }

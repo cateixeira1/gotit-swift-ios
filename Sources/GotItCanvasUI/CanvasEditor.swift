@@ -1,10 +1,10 @@
 #if canImport(UIKit)
 import SwiftUI
 import UIKit
+import PencilKit
 import GotItDomain
 import GotItCanvas
 
-public enum CanvasTool: String, CaseIterable { case select, draw }
 
 public struct NoteCardPresentation {
     public var title: String
@@ -19,17 +19,28 @@ public struct NoteCardPresentation {
 public struct CanvasEditor: UIViewControllerRepresentable {
     public var document: CanvasDocument
     public var tool: CanvasTool
+    public var session: EditorSession?
+    public var inkColor: UIColor
+    public var inkWidth: CGFloat
+    public var vectorEraser: Bool
+    public var drawingData: (String) -> Data?
+    public var onDrawing: (Data, [DocumentCommand]) -> Void
     public var image: (String) -> UIImage?
     public var note: (UUID) -> NoteCardPresentation?
     public var onCommands: ([DocumentCommand]) -> Void
     public var onOpenNote: (UUID) -> Void
     public var onError: (Error) -> Void
 
-    public init(document: CanvasDocument, tool: CanvasTool = .select,
+    @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
+                inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
+                drawingData: @escaping (String) -> Data? = { _ in nil },
+                onDrawing: @escaping (Data, [DocumentCommand]) -> Void = { _, _ in },
                 image: @escaping (String) -> UIImage? = { _ in nil },
                 note: @escaping (UUID) -> NoteCardPresentation? = { _ in nil },
                 onCommands: @escaping ([DocumentCommand]) -> Void,
                 onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in }) {
+        self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
+        self.drawingData = drawingData; self.onDrawing = onDrawing
         self.document = document; self.tool = tool; self.image = image; self.note = note
         self.onCommands = onCommands; self.onOpenNote = onOpenNote; self.onError = onError
     }
@@ -38,11 +49,19 @@ public struct CanvasEditor: UIViewControllerRepresentable {
 }
 
 @MainActor
-public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate {
+public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate {
     private var configuration: CanvasEditor
     private let scroll = UIScrollView()
     private let surface = UIView()
-    private let ink = StrokeInputView()
+    private let ink = PKCanvasView()
+    private let ruler = PageRuler()
+    private weak var activeText: UITextView?
+    private var applyingDrawing = false
+    private var usingTool = false
+    private var lastDrawingData = PKDrawing().dataRepresentation()
+    private var strokesAtStart = 0
+    private var loadedDrawingHash: String?
+    private var fitted = false
     private var blockViews: [UUID: UIView] = [:]
     private var textIDs: [ObjectIdentifier: UUID] = [:]
     private var connectionViews: [UIView] = []
@@ -69,25 +88,32 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapCanvas(_:)))
         tap.delegate = self; tap.cancelsTouchesInView = false
         surface.addGestureRecognizer(tap)
-        ink.onStroke = { [weak self] points in
-            guard let self else { return }
-            do { self.configuration.onCommands(try DiagramCommands.insertStroke(points, in: self.configuration.document)) }
-            catch { self.configuration.onError(error) }
-        }
+        view.addSubview(ruler)
+        ink.delegate = self; ink.backgroundColor = .clear; ink.isOpaque = false
+        ink.isScrollEnabled = false; ink.drawingPolicy = .anyInput
+        ink.isAccessibilityElement = true
+        ink.accessibilityValue = "0 traços"
+        ink.accessibilityIdentifier = "drawingCanvas"
+        ink.accessibilityLabel = "Desenho da página"
+        bindSession()
         surface.addSubview(ink)
         render()
     }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        scroll.frame = view.bounds
+        ruler.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 28)
+        scroll.frame = CGRect(x: 0, y: 28, width: view.bounds.width, height: max(0, view.bounds.height - 28))
+        if !fitted, scroll.bounds.width > 0 { fitted = true; fitPage() }
+        updateRuler()
     }
     public func viewForZooming(in scrollView: UIScrollView) -> UIView? { surface }
-    public func scrollViewDidZoom(_ scrollView: UIScrollView) { updateVisibility() }
-    public func scrollViewDidScroll(_ scrollView: UIScrollView) { updateVisibility() }
+    public func scrollViewDidZoom(_ scrollView: UIScrollView) { updateVisibility(); updateRuler() }
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) { updateVisibility(); updateRuler() }
 
     func configure(_ value: CanvasEditor) {
         configuration = value
+        bindSession()
         if isViewLoaded { render() }
     }
 
@@ -104,6 +130,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             if let view = blockViews.removeValue(forKey: id) { textIDs.removeValue(forKey: ObjectIdentifier(view)); view.removeFromSuperview() }
         }
         for block in configuration.document.blocks.sorted(by: { $0.layout.zIndex < $1.layout.zIndex }) {
+            if case .drawing = block.content { continue }
             guard let logical = frames[block.id] else { continue }
             let blockView: UIView
             if case .text(let richText) = block.content {
@@ -131,6 +158,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 object.block = block
                 object.asset = block.content.assetHash.flatMap(configuration.image)
                 if case .noteReference(let ref) = block.content { object.note = configuration.note(ref.documentID) }
+                if case .sticker = block.content {
+                    object.layer.shadowColor = UIColor.black.cgColor; object.layer.shadowOpacity = 0.24
+                    object.layer.shadowOffset = CGSize(width: 0, height: 4); object.layer.shadowRadius = 5
+                } else { object.layer.shadowOpacity = 0 }
                 object.setNeedsDisplay()
                 blockView = object
             }
@@ -173,10 +204,142 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             surface.addSubview(connection); connectionViews.append(connection)
         }
         ink.frame = surface.bounds
-        ink.isUserInteractionEnabled = configuration.tool == .draw
-        ink.isHidden = configuration.tool != .draw
+        ink.contentSize = surface.bounds.size
+        ink.isUserInteractionEnabled = configuration.tool.isDrawing
+        ink.tool = configuration.tool.nativeTool(color: configuration.inkColor, width: configuration.inkWidth, vectorEraser: configuration.vectorEraser)
+        scroll.panGestureRecognizer.minimumNumberOfTouches = configuration.tool.isDrawing ? 2 : 1
+        if configuration.tool.isDrawing { activeText?.resignFirstResponder() }
+        loadDrawing()
+        ink.accessibilityValue = "\(ink.drawing.strokes.count) traços"
         surface.bringSubviewToFront(ink)
         updateVisibility()
+        updateRuler()
+    }
+
+    private func bindSession() {
+        configuration.session?.handler = { [weak self] action in self?.perform(action) }
+    }
+
+    private func fitPage() {
+        let width = configuration.document.canvas.size.width
+        scroll.setZoomScale(min(1, max(scroll.minimumZoomScale, (scroll.bounds.width - 24) / max(1, width))), animated: false)
+        scroll.contentOffset = .zero
+    }
+
+    private func updateRuler() {
+        ruler.zoom = scroll.zoomScale; ruler.offset = scroll.contentOffset.x
+        switch configuration.document.canvas.displayUnit {
+        case .centimeters: ruler.pointsPerUnit = 72 / 2.54; ruler.unitName = "cm"
+        case .inches: ruler.pointsPerUnit = 72; ruler.unitName = "in"
+        case .pixels: ruler.pointsPerUnit = 72 / configuration.document.canvas.pixelsPerInch; ruler.unitName = "px"
+        }
+        ruler.setNeedsDisplay()
+    }
+
+    private func perform(_ action: TextEditingAction) {
+        switch action {
+        case .insertText: insertText(at: CGPoint(x: 24, y: max(24, scroll.contentOffset.y / scroll.zoomScale + 24))); return
+        case .fitPage: fitPage(); return
+        case .zoom(let factor): scroll.setZoomScale(min(scroll.maximumZoomScale, max(scroll.minimumZoomScale, scroll.zoomScale * factor)), animated: true); return
+        case .finish: activeText?.resignFirstResponder(); usingTool = false; saveDrawing(); return
+        default: break
+        }
+        guard let text = activeText, text.superview != nil else { return }
+        switch action {
+        case .bold: text.toggleBoldface(nil); textViewDidChange(text)
+        case .italic: text.toggleItalics(nil); textViewDidChange(text)
+        case .underline: toggle(text, key: .underlineStyle)
+        case .strike: toggle(text, key: .strikethroughStyle)
+        case .font(let name):
+            let size = (text.typingAttributes[.font] as? UIFont)?.pointSize ?? 18
+            format(text, key: .font, value: name == "Sistema" ? UIFont.systemFont(ofSize: size) : (UIFont(name: name, size: size) ?? UIFont.systemFont(ofSize: size)))
+        case .fontSize(let size):
+            let font = (text.typingAttributes[.font] as? UIFont) ?? UIFont.systemFont(ofSize: size)
+            format(text, key: .font, value: font.withSize(size))
+        case .alignment(let value): paragraph(text) { $0.alignment = value }
+        case .highlight(let value):
+            if let value { format(text, key: .backgroundColor, value: value) }
+            else { text.typingAttributes.removeValue(forKey: .backgroundColor); if text.selectedRange.length > 0 { text.textStorage.removeAttribute(.backgroundColor, range: text.selectedRange); textViewDidChange(text) } }
+        case .foreground(let value): format(text, key: .foregroundColor, value: value)
+        case .bulletList: paragraph(text) { $0.textLists = [NSTextList(markerFormat: .disc, options: 0)] }
+        case .numberedList: paragraph(text) { $0.textLists = [NSTextList(markerFormat: .decimal, options: 0)] }
+        case .removeList: paragraph(text) { $0.textLists = [] }
+        case .indent(let delta): paragraph(text) { $0.headIndent = max(0, $0.headIndent + delta); $0.firstLineHeadIndent = max(0, $0.firstLineHeadIndent + delta) }
+        case .lineSpacing(let value): paragraph(text) { $0.lineSpacing = value }
+        case .link: insertLink(text)
+        case .find: text.findInteraction?.presentFindNavigator(showingReplace: true)
+        default: break
+        }
+    }
+
+    private func toggle(_ text: UITextView, key: NSAttributedString.Key) {
+        let current = text.selectedRange.length > 0 ? text.textStorage.attribute(key, at: text.selectedRange.location, effectiveRange: nil) : text.typingAttributes[key]
+        format(text, key: key, value: (current as? Int ?? 0) == 0 ? NSUnderlineStyle.single.rawValue : 0)
+    }
+
+    private func loadDrawing() {
+        guard !usingTool else { return }
+        let hash = configuration.document.blocks.compactMap { block -> String? in
+            if case .drawing(let ref) = block.content { return ref.hash }; return nil
+        }.first
+        guard hash != loadedDrawingHash else { return }
+        do {
+            let data: Data
+            if let hash {
+                guard let bytes = configuration.drawingData(hash) else { throw DocumentError.invalid("Desenho indisponível") }
+                data = bytes
+            } else { data = PKDrawing().dataRepresentation() }
+            let drawing = try PKDrawing(data: data)
+            applyingDrawing = true; ink.drawing = drawing; applyingDrawing = false
+            loadedDrawingHash = hash; lastDrawingData = data
+        } catch { configuration.onError(error) }
+    }
+
+    public func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        usingTool = true; strokesAtStart = canvasView.drawing.strokes.count
+    }
+    public func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        usingTool = false
+        // PencilKit can deliver the final drawing change after the tool-end callback.
+        Task { @MainActor [weak self] in await Task.yield(); self?.saveDrawing() }
+    }
+    public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        guard !applyingDrawing, !usingTool else { return }
+        Task { @MainActor [weak self] in await Task.yield(); self?.saveDrawing() }
+    }
+    private func saveDrawing() {
+        guard !usingTool, !applyingDrawing else { return }
+        var drawing = ink.drawing
+        guard drawing.dataRepresentation() != lastDrawingData else { return }
+        var commands: [DocumentCommand] = []
+        if configuration.tool != .eraser, configuration.document.canvas.recognizeDiagrams,
+           drawing.strokes.count == strokesAtStart + 1, let stroke = drawing.strokes.last {
+            let points = stroke.path.map { point -> CanvasPoint in
+                let location = point.location.applying(stroke.transform)
+                return .init(x: location.x, y: location.y)
+            }
+            if DiagramRecognizer.recognize(points) != nil {
+                do {
+                    commands = try DiagramCommands.insertStroke(points, in: configuration.document).map { command in
+                        if case .insertBlock(var block) = command, case .shape(var shape) = block.content {
+                            shape.stroke = configuration.inkColor.hex; shape.lineWidth = configuration.inkWidth
+                            block.content = .shape(shape); return .insertBlock(block)
+                        }
+                        if case .setRelation(var relation) = command {
+                            relation.style = .init(color: configuration.inkColor.hex, width: configuration.inkWidth)
+                            return .setRelation(relation)
+                        }
+                        return command
+                    }
+                    drawing = PKDrawing(strokes: Array(drawing.strokes.dropLast()))
+                    applyingDrawing = true; ink.drawing = drawing; applyingDrawing = false
+                } catch { configuration.onError(error); return }
+            }
+        }
+        let bytes = drawing.dataRepresentation()
+        ink.accessibilityValue = "\(drawing.strokes.count) traços"
+        lastDrawingData = bytes
+        configuration.onDrawing(bytes, commands)
     }
 
     private func updateVisibility() {
@@ -207,6 +370,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ]
         bar.sizeToFit(); text.inputAccessoryView = bar
         return text
+    }
+
+    public func textViewDidBeginEditing(_ textView: UITextView) {
+        activeText = textView; configuration.session?.hasTextSelection = true
     }
 
     public func textViewDidChange(_ textView: UITextView) {

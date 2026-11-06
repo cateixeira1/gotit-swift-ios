@@ -6,7 +6,8 @@ Este repositório inclui o **Document Core** e o início do **Canvas Engine**.
 O pacote já oferece modelos de documentos e blocos, estilos herdados, texto por
 runs, comandos validados, persistência SQLite e undo/redo persistente. Ainda não
 há versão de produção ou modelo de IA integrado. A etapa 2 acrescenta o motor
-de canvas testável e um adaptador/interface nativa cujo build Apple está pendente.
+de canvas testável e uma interface nativa. O build Apple da base foi aprovado;
+a evolução com páginas, paleta e PencilKit está descrita em [Editor nativo](docs/native-editor.md).
 
 ## Executar
 

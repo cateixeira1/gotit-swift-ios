@@ -144,7 +144,8 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
             (title as NSString).draw(in: CGRect(x: 10, y: bounds.height - 52, width: bounds.width - 20, height: 24), withAttributes: [.font: UIFont.boldSystemFont(ofSize: 14), .foregroundColor: UIColor.black])
             if let note { (note.createdAt.formatted(date: .abbreviated, time: .shortened) as NSString).draw(in: CGRect(x: 10, y: bounds.height - 27, width: bounds.width - 20, height: 20), withAttributes: [.font: UIFont.systemFont(ofSize: 11), .foregroundColor: UIColor.darkGray]) }
             accessibilityLabel = title
-        case .pdf: placeholder("PDF")
+        case .pdf:
+            if let asset { asset.draw(in: bounds) } else { placeholder("PDF indisponível") }
         case .audio: placeholder("Áudio")
         case .video: placeholder("Vídeo")
         case .drawing: placeholder("Desenho PencilKit")
@@ -160,34 +161,6 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
         let path = UIBezierPath()
         for (index, point) in points.enumerated() { if index == 0 { path.move(to: point) } else { path.addLine(to: point) } }
         path.close(); return path
-    }
-}
-
-@MainActor
-final class StrokeInputView: UIView {
-    var onStroke: (([CanvasPoint]) -> Void)?
-    private var points: [CanvasPoint] = []
-    override init(frame: CGRect) { super.init(frame: frame); backgroundColor = .clear; isMultipleTouchEnabled = false }
-    required init?(coder: NSCoder) { fatalError() }
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { points = []; append(touches, event: event) }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { append(touches, event: event) }
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        append(touches, event: event)
-        if points.count >= 2 { onStroke?(points) }
-        points = []; setNeedsDisplay()
-    }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { points = []; setNeedsDisplay() }
-    private func append(_ touches: Set<UITouch>, event: UIEvent?) {
-        guard let touch = touches.first else { return }
-        for item in event?.coalescedTouches(for: touch) ?? [touch] {
-            let p = item.location(in: self); points.append(.init(x: p.x, y: p.y))
-        }
-        setNeedsDisplay()
-    }
-    override func draw(_ rect: CGRect) {
-        let path = UIBezierPath()
-        for (index, p) in points.enumerated() { if index == 0 { path.move(to: .init(x: p.x, y: p.y)) } else { path.addLine(to: .init(x: p.x, y: p.y)) } }
-        UIColor.systemBlue.setStroke(); path.lineWidth = 2; path.lineCapStyle = .round; path.stroke()
     }
 }
 

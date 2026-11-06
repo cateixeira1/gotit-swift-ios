@@ -176,3 +176,14 @@ func unsupportedMathRequiresCorrection(_ expression: String) {
     doc.blocks = [shape]
     #expect(try CanvasLayoutEngine.visibleBlocks(in: doc, viewport: .init(x: 145, y: 65, width: 10, height: 10), overscan: 0) == [shape.id])
 }
+
+@Test func pageFlowAndTextWrappingAreIsolated() throws {
+    var document = CanvasDocument(title: "Pages")
+    let second = CanvasPage(title: "Second"); document.pages.append(second)
+    let text = CanvasBlock(layout: .init(frame: .init(x: 0, y: 0, width: 300, height: 300)), content: .text(.init("First page")))
+    let shape = CanvasBlock(order: 1, layout: .init(frame: .init(x: 20, y: 10, width: 100, height: 100)), content: .shape(.init(kind: .rectangle)), pageID: second.id)
+    document.blocks = [text, shape]
+    let frames = try CanvasLayoutEngine.frames(in: document)
+    #expect(frames[shape.id]?.y == 10)
+    #expect(try TextFlowEngine.exclusions(for: text.id, in: document).isEmpty)
+}

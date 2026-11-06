@@ -218,7 +218,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 2)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 3)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -272,7 +272,7 @@ private func multimediaDocument() -> CanvasDocument {
     let db = try SQLiteConnection(path: fixture.url.path)
     func legacy(_ data: Data) throws -> Data {
         var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        object.removeValue(forKey: "kind"); object.removeValue(forKey: "canvas")
+        object.removeValue(forKey: "kind"); object.removeValue(forKey: "canvas"); object.removeValue(forKey: "pages")
         return try JSONSerialization.data(withJSONObject: object)
     }
     let metadata = try #require(db.execute("SELECT metadata FROM documents").first?.first?.data)
@@ -284,8 +284,29 @@ private func multimediaDocument() -> CanvasDocument {
     let loaded = try await reopened.load(original.id)
     #expect(loaded.canvas == .init())
     #expect(loaded.kind == .note)
+    #expect(loaded.pages.first?.id == original.id)
     let undone = try await reopened.undo(documentID: original.id, expectedRevision: 1)
     #expect(undone.blocks == original.blocks)
     #expect(undone.title == original.title)
+    try await reopened.close()
+}
+
+@Test func pagesAndDrawingAssetsSurviveReopenAndUndo() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let original = try await store.create(CanvasDocument(title: "Notebook"))
+    let page = CanvasPage(title: "Second")
+    let asset = Asset(hash: String(repeating: "a", count: 64), mediaType: "application/x-pencilkit", byteCount: 512)
+    let block = CanvasBlock(layout: .init(mode: .absolute), content: .drawing(.init(hash: asset.hash)), presentation: .init(wrap: .none), pageID: page.id)
+    let saved = try await store.execute([.appendPage(page), .registerAsset(asset), .insertBlock(block)], documentID: original.id, expectedRevision: 0)
+    try await store.close()
+    let reopened = try SQLiteStore(url: fixture.url)
+    #expect(try await reopened.load(original.id) == saved)
+    let undone = try await reopened.undo(documentID: original.id, expectedRevision: 1)
+    #expect(undone.pages == original.pages)
+    #expect(undone.blocks.isEmpty)
+    let redone = try await reopened.redo(documentID: original.id, expectedRevision: 2)
+    #expect(redone.pages == saved.pages)
+    #expect(redone.blocks == saved.blocks)
     try await reopened.close()
 }

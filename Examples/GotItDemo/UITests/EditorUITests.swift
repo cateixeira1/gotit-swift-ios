@@ -13,7 +13,11 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(addPage.waitForExistence(timeout: 10)); addPage.tap()
         let second = app.buttons["page-2"]
         XCTAssertTrue(second.waitForExistence(timeout: 10)); second.tap()
-        app.buttons["documentOptions"].tap()
+        // SwiftUI Menu's nested AX button can report non-hittable despite a visible
+        // toolbar frame. Tap its observed center instead of AX scroll-to-visible.
+        let options = app.buttons["documentOptions"]
+        XCTAssertTrue(options.waitForExistence(timeout: 10))
+        options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         app.buttons["Tamanho e opções do canvas"].tap()
         let recognize = app.switches["Reconhecer diagramas"]
         XCTAssertTrue(recognize.waitForExistence(timeout: 10)); recognize.tap()

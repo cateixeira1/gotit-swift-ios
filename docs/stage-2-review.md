@@ -69,18 +69,32 @@ e ampliação do reconhecimento permanecem congelados.
 ## Critérios que impedem o encerramento
 
 - Validar transferência do cursor, IME, teclado e desfazer após reflow no iPad e
-  iPhone. Seleção única entre fragmentos de páginas e backspace na fronteira
-  ainda precisam de implementação; não afirmar equivalência completa com Word.
-- Reflow automático provocado por mover/redimensionar obstáculos ainda precisa
-  ser conectado; atualmente o texto redistribui durante sua edição.
+  iPhone. **Backspace na fronteira implementado** (commit 4cb299b): na posição 0
+  de um fragmento de continuação, apaga o último caractere (emoji/combinação
+  inteiros) do fragmento anterior, pula páginas vazias e redistribui; composição
+  IME nunca é interceptada. Falta validar em aparelho. **Seleção única entre
+  fragmentos continua não implementada**: cada página é um `UITextView`; exige
+  mudar a arquitetura de texto. Não afirmar equivalência com Word.
+- **Reflow ao mover obstáculos conectado** (commit 7ec3fb3): inserir, remover,
+  mover, redimensionar, girar ou mudar o contorno de um objeto, redimensionar a
+  caixa da própria história ou mudar o padrão de contorno do canvas redistribui
+  as histórias afetadas no mesmo lote (um único desfazer). Traços e digitação não
+  disparam. Detecção pura com testes; layout TextKit verificado só por compilação
+  e testes de UI existentes, não em aparelho.
 - Medir latência e memória em aparelho físico, especialmente histórias longas.
   O layout/diff ainda percorre o documento; não há índice espacial incremental.
   Conexões e a camada PencilKit não usam o pool de views de blocos.
-- Limitar histórico por bytes e considerar deltas de traços PencilKit. O limite
-  atual continua sendo 50 grupos, não um orçamento de bytes.
-- Persistir fila de comandos pendentes para recuperação de encerramento abrupto.
+- **Histórico limitado por bytes** (commit 072324f): `historyByteLimit`, padrão
+  32 MiB por nota, além dos 50 grupos; a entrada mais recente é sempre mantida.
+  Deltas de traços PencilKit (em vez de snapshot por gesto) continuam pendentes.
+- Persistir fila de comandos pendentes para recuperação de encerramento abrupto:
+  reaberto (ver abaixo).
 - Demais critérios anteriores não congelados: tabelas/estilos nomeados, recorte
   com alças e clipping de imagens dentro de formas.
+
+Verificação desta continuação: 68 testes do núcleo em Swift 6.0.3/Linux
+(toolchain oficial de swift.org) e CI completo aprovado em
+https://github.com/cateixeira1/gotit-swift-ios/actions/runs/42279707397
 
 A próxima entrega deve fechar esses critérios, sem retomar Teia/equações antes
 que o núcleo de edição tenha sido validado.

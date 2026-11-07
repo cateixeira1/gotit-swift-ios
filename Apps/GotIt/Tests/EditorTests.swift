@@ -107,6 +107,22 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(visible.isEmpty || visible.first == document.pages.first?.id)
     }
 
+    func testStoryBoxesShrinkToTheirTextAndFillPagesBeforeContinuing() throws {
+        var document = CanvasDocument(title: "Auto")
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 100, width: 300, height: 600)), content: .text(.init("")))
+        block.textFlowID = block.id; document.blocks = [block]
+        block.content = .text(RichText("Olá"))
+        let short = try CommandEngine.applying(TextPagination.reflow(block, in: document, selection: NSRange(location: 3, length: 0)).commands, to: document)
+        let height = try XCTUnwrap(short.blocks.first?.layout.frame.height)
+        XCTAssertGreaterThanOrEqual(height, 44)
+        XCTAssertLessThan(height, 120)                         // one line plus room, not 600
+        block.content = .text(RichText(String(repeating: "texto longo ", count: 900)))
+        let long = try CommandEngine.applying(TextPagination.reflow(block, in: document, selection: NSRange(location: 0, length: 0)).commands, to: document)
+        XCTAssertGreaterThan(long.pages.count, 1)
+        let first = try XCTUnwrap(long.blocks.first { $0.id == block.id })
+        XCTAssertEqual(first.layout.frame.height, document.canvas.size.height - 100 - 24, accuracy: 0.5)   // grew to the margin
+    }
+
     func testOffscreenBlocksAreNotInstantiated() {
         var document = CanvasDocument(title: "Viewport")
         for i in 0..<1000 {

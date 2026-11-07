@@ -89,6 +89,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var lastTool: CanvasTool?
     /// Bumped to cancel a delayed save of a tap-sized dot.
     private var dotSaveGeneration = 0
+    /// Document revision when each text view last sent its content. A configuration that is not
+    /// newer than that is stale (SwiftUI can re-render before the host's update arrives) and must
+    /// not overwrite what the user is typing, or the caret jumps behind the last letters.
+    private var sentRevision: [UUID: Int64] = [:]
     private var loadedDrawingHash: String?
     private var fitted = false
     private var inkToolSignature = ""
@@ -230,7 +234,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     textView.typingAttributes = [.font: UIFont.systemFont(ofSize: style.fontSize ?? 18), .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
                 }
                 let rendered = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init())
-                if textView.markedTextRange == nil, !rendered.isEqual(to: textView.attributedText ?? NSAttributedString(string: "")) {
+                let stale = textView.isFirstResponder && (sentRevision[block.id].map { configuration.document.revision <= $0 } ?? false)
+                if !stale, textView.markedTextRange == nil, !rendered.isEqual(to: textView.attributedText ?? NSAttributedString(string: "")) {
                     let selection = textView.selectedRange
                     textView.attributedText = rendered
                     let location = min(selection.location, rendered.length)
@@ -322,7 +327,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ink.accessibilityIdentifier = configuration.pageNumber.map { "drawingCanvas-\($0)" } ?? "drawingCanvas"
         surface.bringSubviewToFront(ink)
         selectionOverlay?.removeFromSuperview(); selectionOverlay = nil
-        if configuration.tool == .select, let id = selectedObjectID, let object = blockViews[id],
+        if let id = selectedObjectID, let object = blockViews[id],
            let block = configuration.document.blocks.first(where: { $0.id == id }) {
             let handles = SelectionHandles(frame: object.bounds)
             handles.center = object.center; handles.transform = object.transform
@@ -629,6 +634,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let group = pendingTyping ? typingGroup : nil
         pendingTyping = false
         guard textView.markedTextRange == nil else { return } // Do not split an IME composition.
+        sentRevision[id] = configuration.document.revision
         if let onTextCommands = configuration.onTextCommands {
             if let focus = onTextCommands(block, group, textView.selectedRange) {
                 if focus.blockID == id {
@@ -820,7 +826,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     /// empty page), so writing never requires switching tools first.
     @objc private func tapInk(_ gesture: UITapGestureRecognizer) {
         let point = gesture.location(in: surface)
-        removeTapDots()
+        // PencilKit commits the tap's dot after this action runs; remove it a moment later
+        // (dot saves wait 350 ms, so it never reaches the history).
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(120))
+            self?.removeTapDots()
+        }
         for view in surface.subviews.reversed() {
             guard let object = view as? CanvasObjectView, object.id != nil, !object.isHidden else { continue }
             let local = object.convert(point, from: surface)
@@ -866,7 +877,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     private func insertText(at point: CGPoint) {
         let size = configuration.document.canvas.size
-        let frame = LogicalRect(x: point.x, y: point.y, width: max(80, size.width - point.x - 24), height: max(80, size.height - point.y - 24))
+        // One line tall; pagination grows it with the text (down to the page margin).
+        let frame = LogicalRect(x: point.x, y: point.y, width: max(80, size.width - point.x - 24), height: 44)
         var block = CanvasBlock(order: nextOrder, layout: .init(mode: .absolute, frame: frame), content: .text(RichText("")))
         if configuration.document.kind == .note { block.textFlowID = block.id }
         pendingFocusID = block.id

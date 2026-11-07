@@ -350,15 +350,21 @@ struct AppScreen: View {
                     Button("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
                     Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
                     ForEach(model.summaries) { summary in
-                        VStack(alignment: .leading) {
-                            Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
-                                VStack(alignment: .leading) {
-                                    if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
-                                    Text(summary.title).font(.headline)
-                                    Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                        // A List row with two buttons fires both on a single tap (opening a note
+                        // also created a Teia). One button per row; Teia is in the context menu.
+                        Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
+                            VStack(alignment: .leading) {
+                                if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
+                                Text(summary.title).font(.headline)
+                                Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .contextMenu {
+                            if summary.kind == .note {
+                                Button("Criar Teia com esta nota", systemImage: "point.3.connected.trianglepath.dotted") {
+                                    Task { await model.createWeb(including: summary.id); preferredColumn = .detail }
                                 }
                             }
-                            if summary.kind == .note { Button("Teia") { Task { await model.createWeb(including: summary.id); preferredColumn = .detail } }.font(.caption) }
                         }
                     }
                 } header: { Text("Todas as notas e Teias") }

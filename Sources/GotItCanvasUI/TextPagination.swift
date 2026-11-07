@@ -13,6 +13,8 @@ public struct TextFlowFocus {
 /// One logical story, stored as linked rich-text fragments. TextKit measures actual
 /// glyphs (including fonts, paragraphs and exclusions); it never estimates by characters.
 @MainActor public enum TextPagination {
+    static let pageBottomMargin = 24.0
+    static let minimumBoxHeight = 44.0
     public struct Result {
         public var commands: [DocumentCommand]
         public var focus: TextFlowFocus
@@ -51,11 +53,18 @@ public struct TextFlowFocus {
             fragment.textFlowID = story
             let page = fragment.pageID ?? firstPage
             let frame = fragment.layout.frame
-            let container = NSTextContainer(size: CGSize(width: max(1, frame.width - 8), height: max(1, frame.height - 8)))
+            // A story box may grow down to the page's bottom margin before text continues on the
+            // next page; afterwards the last box shrinks to its text (see below), so a box never
+            // covers empty paper where the user wants to tap and start another text.
+            let available = max(frame.height, document.canvas.size.height - frame.y - pageBottomMargin)
+            let container = NSTextContainer(size: CGSize(width: max(1, frame.width - 8), height: max(1, available - 8)))
             container.lineFragmentPadding = 5
-            // Existing media on this page keeps the same wrapping contract as the canvas.
-            if document.blocks.contains(where: { $0.id == fragment.id }) {
-                container.exclusionPaths = (try TextFlowEngine.exclusions(for: fragment.id, in: document)).map { exclusion in
+            // Existing media on this page keeps the same wrapping contract as the canvas,
+            // measured against the full area the box may grow into.
+            if let stored = document.blocks.firstIndex(where: { $0.id == fragment.id }) {
+                var probe = document
+                probe.blocks[stored].layout.frame.height = available
+                container.exclusionPaths = (try TextFlowEngine.exclusions(for: fragment.id, in: probe)).map { exclusion in
                     let path = UIBezierPath()
                     for (i, p) in exclusion.polygon.enumerated() {
                         let point = CGPoint(x: p.x - 4, y: p.y - 4)
@@ -73,6 +82,13 @@ public struct TextFlowFocus {
             let end = NSMaxRange(range)
             guard end > offset || storage.length == 0 else { throw DocumentError.invalid("Text layout made no progress") }
             fragment.content = .text(TextBridge.richText(storage.attributedSubstring(from: range)))
+            if end == storage.length {
+                // Last box: as tall as its text plus one line of room for the next keystroke.
+                let used = manager.usedRect(for: container)
+                fragment.layout.frame.height = min(available, max(minimumBoxHeight, ceil(used.maxY) + 8 + 24))
+            } else {
+                fragment.layout.frame.height = available
+            }
             commands.append(index < fragments.count ? .replaceBlock(fragment) : .insertBlock(fragment))
             used.append(fragment)
             if globalCaret >= range.location && (globalCaret < end || end == storage.length) {

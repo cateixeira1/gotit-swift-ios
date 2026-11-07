@@ -9,7 +9,7 @@ struct EditorWorkspace: View {
     let document: CanvasDocument
     @Environment(\.scenePhase) private var scenePhase
     @State private var session = EditorSession()
-    @State private var tool = CanvasTool.pen
+    @State private var tool = CanvasTool.select
     @State private var inkColor = Color.primary
     @State private var inkWidth = 3.0
     @State private var vectorEraser = false
@@ -72,7 +72,7 @@ struct EditorWorkspace: View {
             case .failure(let error): model.error = error.localizedDescription
             }
         }
-        .onChange(of: document.id) { _, _ in tool = .pen; session.hasTextSelection = false }
+        .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.perform(.finish) } }
     }
 
@@ -81,6 +81,25 @@ struct EditorWorkspace: View {
                           focusPageID: pageID, scrollRequest: pageScrollRequest, onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
+            .overlay(alignment: .bottomTrailing) { floatingPen }
+    }
+
+    /// One tap to draw, one tap to go back to the cursor; no need to open the tools panel.
+    private var floatingPen: some View {
+        Button {
+            session.perform(.finish)
+            tool = tool.isDrawing ? .select : .pen
+        } label: {
+            Image(systemName: tool.isDrawing ? "pencil.tip.crop.circle.fill" : "pencil.tip")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(tool.isDrawing ? Color.white : Color.accentColor)
+                .frame(width: 58, height: 58)
+                .background(tool.isDrawing ? Color.accentColor : Color(uiColor: .systemBackground), in: Circle())
+                .shadow(color: .black.opacity(0.22), radius: 6, y: 3)
+        }
+        .padding(18)
+        .accessibilityLabel(tool.isDrawing ? "Parar de desenhar" : "Desenhar com a caneta")
+        .accessibilityIdentifier("floatingPen")
     }
 
     private func pageEditor(_ targetPage: UUID) -> CanvasEditor {

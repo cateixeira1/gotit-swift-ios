@@ -1,0 +1,60 @@
+name: Unsigned IPA
+
+# Builds a device (arm64) IPA without code signing, for installing with a sideloading tool
+# such as Sideloadly, which re-signs it with the user's own Apple ID at install time.
+# This is a test build, not an App Store or TestFlight build.
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: xcodebuild -version
+      - name: Generate app project
+        run: |
+          brew install xcodegen
+          cd Apps/GotIt
+          xcodegen generate
+      - name: Build for device without signing
+        run: >-
+          xcodebuild -project Apps/GotIt/GotItApp.xcodeproj
+          -scheme GotItApp -configuration Release
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/GotItDevice"
+          CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+          MARKETING_VERSION=0.2
+          CURRENT_PROJECT_VERSION=${{ github.run_number }}
+          INFOPLIST_KEY_CFBundleDisplayName="Got It!"
+          build
+      - name: Package IPA
+        run: |
+          APP="$RUNNER_TEMP/GotItDevice/Build/Products/Release-iphoneos/GotItApp.app"
+          test -d "$APP"
+          # Fail early if the binary is not a device build.
+          lipo -info "$APP/GotItApp" | tee /dev/stderr | grep -q arm64
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          zip -qry "GotIt-0.2-${{ github.run_number }}-$SHORT_SHA.ipa" Payload
+          ls -l *.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GotIt-ipa-${{ github.run_number }}
+          path: ${{ runner.temp }}/ipa/*.ipa
+          retention-days: 14
+          if-no-files-found: error

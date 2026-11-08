@@ -51,17 +51,20 @@ final class EditorUITests: XCTestCase {
         insertSticker(app, "stickyNoteSticker")
         let note = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Post-it'")).firstMatch
         XCTAssertTrue(note.waitForExistence(timeout: 10)); failIfAlert(app, "post-it")
-        note.tap(); note.tap()
+        // Objects inside the page's scroll view cannot be "scrolled to visible" by AX: tap the spot.
+        let inside = note.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        inside.tap(); inside.tap()
         app.typeText("Comprar pão")
         XCTAssertTrue(app.textViews.containing(NSPredicate(format: "value CONTAINS 'Comprar'")).firstMatch.waitForExistence(timeout: 10))
         insertSticker(app, "calendarSticker")
         let calendar = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Calendário,'")).firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 10)); failIfAlert(app, "calendário")
-        calendar.doubleTap()
+        let day = calendar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        day.doubleTap()
         XCTAssertTrue(app.navigationBars["Data do calendário"].waitForExistence(timeout: 10), "o seletor de data não abriu")
         app.navigationBars["Data do calendário"].buttons.element(boundBy: 1).tap()
         XCTAssertTrue(calendar.waitForExistence(timeout: 10))
-        calendar.doubleTap(); calendar.doubleTap()
+        day.doubleTap(); day.doubleTap()
         if app.navigationBars["Data do calendário"].waitForExistence(timeout: 5) { app.navigationBars["Data do calendário"].buttons.element(boundBy: 1).tap() }
         // Still responsive: the options menu opens.
         let options = app.buttons["documentOptions"]

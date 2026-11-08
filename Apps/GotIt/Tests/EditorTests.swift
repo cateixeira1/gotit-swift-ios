@@ -408,11 +408,8 @@ final class EditorTests: XCTestCase {
         XCTAssertGreaterThan(document.pages.count, 5)
         // Laying out saved text again changes nothing (fonts survive being saved).
         let first = try XCTUnwrap(document.textFlowFragments(story: block.id).first)
-        let again = try CommandEngine.applying(TextPagination.reflow(first, in: document, selection: .init(location: 0, length: 0), incremental: false).commands, to: document)
-        func texts(_ d: CanvasDocument) -> [String] {
-            d.textFlowFragments(story: block.id).map { if case .text(let rich) = $0.content { return rich.plainText }; return "?" }
-        }
-        XCTAssertEqual(texts(again), texts(document), "saved text is laid out differently when laid out again")
+        let again = try TextPagination.reflow(first, in: document, selection: .init(location: 0, length: 0), incremental: false)
+        XCTAssertTrue(again.commands.isEmpty, "saved text is laid out differently when laid out again: \(again.commands.count) changes")
         var seed: UInt64 = 7
         func random(_ bound: Int) -> Int {
             seed = seed &* 6364136223846793005 &+ 1442695040888963407

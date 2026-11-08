@@ -60,6 +60,8 @@ public struct TableFocus: Equatable, Sendable {
             handle.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(drag(_:))))
             addSubview(handle)
         }
+        // Shown by layout only for the picked line.
+        for view in [rowBand, columnBand, rowHandle, columnHandle] { view.isHidden = true }
     }
     required init?(coder: NSCoder) { fatalError() }
 

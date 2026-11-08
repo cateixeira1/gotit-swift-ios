@@ -136,6 +136,7 @@ final class EditorTests: XCTestCase {
 
         controller.tapTableCell(table.id, row: 1, column: 1)            // selects: "+" buttons, nothing picked
         var chrome = try XCTUnwrap(controller.tableChromeForTesting)
+        chrome.layoutIfNeeded()
         XCTAssertNil(controller.tableFocus)
         XCTAssertTrue(chrome.rowHandle.isHidden && chrome.columnHandle.isHidden)
         pause()

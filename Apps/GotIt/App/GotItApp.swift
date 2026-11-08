@@ -320,6 +320,19 @@ final class AppModel {
         }
     }
 
+    /// An edit of a selection that runs across pages: the story is edited as one text and laid
+    /// out again, in one undo step.
+    func editStory(_ story: UUID, range: NSRange, edit: StoryEdit) -> TextFlowFocus? {
+        guard let document, !writeFailed else { return nil }
+        do {
+            let result = try StoryEditing.apply(edit, to: range, story: story, in: document)
+            enqueue(result.commands, historyGroup: nil)
+            // Typing or deleting moves the caret (and the page list) to where the edit ended.
+            if case .format = edit {} else if !writeFailed { selectedPageID = result.focus.pageID }
+            return result.focus
+        } catch { self.error = String(describing: error); return nil }
+    }
+
     /// Backspace at the start of a continuation box removes the last character of the previous
     /// box with text (on an earlier page) and reflows the story; the caret goes there.
     func backspaceAcrossFragments(_ blockID: UUID, group: String?) -> TextFlowFocus? {
@@ -354,27 +367,49 @@ final class AppModel {
         return Asset(hash: hash, mediaType: mediaType, byteCount: Int64(data.count))
     }
 
-    func saveDrawing(_ data: Data, extra: [DocumentCommand], pageID: UUID, documentID: UUID) {
+    /// Saves a page's drawing. Strokes only added since the last save become one more small part
+    /// (`AssetReference.parts`) instead of a new copy of the whole page; any other change writes the
+    /// whole drawing again and lets the old base and parts go.
+    func saveDrawing(_ save: DrawingSave, extra: [DocumentCommand], pageID: UUID, documentID: UUID) {
         guard let document, document.id == documentID, !writeFailed else { return }
         do {
-            let drawing = try PKDrawing(data: data)
             let existing = document.blocks.first { block in
                 if case .drawing = block.content { return document.pageID(for: block.id) == pageID }; return false
             }
             var commands = extra
-            if drawing.strokes.isEmpty {
-                if let existing { commands.append(.removeSubtree(existing.id)) }
-            } else {
+            var reference: AssetReference?
+            switch save {
+            case .unchanged:
+                guard !commands.isEmpty else { return }
+            case .appended(let data):
                 let asset = try storeAsset(data, mediaType: "application/x-pencilkit")
                 if !document.assets.contains(where: { $0.hash == asset.hash }) { commands.append(.registerAsset(asset)) }
-                var block = existing ?? CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: document.canvas.size.width, height: document.canvas.size.height), zIndex: 1000), content: .drawing(.init(hash: asset.hash)), presentation: .init(wrap: .none))
-                block.content = .drawing(.init(hash: asset.hash))
+                if case .drawing(let current)? = existing?.content {
+                    reference = AssetReference(hash: current.hash, parts: (current.parts ?? []) + [asset.hash])
+                } else {
+                    reference = AssetReference(hash: asset.hash)          // the page had no drawing yet
+                }
+            case .full(let data):
+                if try PKDrawing(data: data).strokes.isEmpty {
+                    if let existing { commands.append(.removeSubtree(existing.id)) }
+                } else {
+                    let asset = try storeAsset(data, mediaType: "application/x-pencilkit")
+                    if !document.assets.contains(where: { $0.hash == asset.hash }) { commands.append(.registerAsset(asset)) }
+                    reference = AssetReference(hash: asset.hash)
+                }
+            }
+            if let reference {
+                var block = existing ?? CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: document.canvas.size.width, height: document.canvas.size.height), zIndex: 1000), content: .drawing(reference), presentation: .init(wrap: .none))
+                block.content = .drawing(reference)
                 commands.append(existing == nil ? .insertBlock(block) : .replaceBlock(block))
             }
-            if let oldHash = existing?.content.assetHash,
-               !document.blocks.contains(where: { $0.id != existing?.id && $0.content.assetHash == oldHash }),
-               !commands.contains(where: { if case .replaceBlock(let b) = $0 { return b.content.assetHash == oldHash }; return false }) {
-                commands.append(.unregisterAsset(oldHash))
+            // Assets the page no longer uses (an earlier whole drawing and its parts).
+            if let existing, case .full = save {
+                let keep = Set(reference?.allHashes ?? [])
+                for hash in existing.content.assetHashes where !keep.contains(hash)
+                    && !document.blocks.contains(where: { $0.id != existing.id && $0.content.assetHashes.contains(hash) }) {
+                    commands.append(.unregisterAsset(hash))
+                }
             }
             enqueue(commands, pageID: pageID, documentID: documentID)
         } catch { self.error = String(describing: error) }
@@ -443,8 +478,7 @@ final class AppModel {
             for block in projection.blocks {
                 switch block.content {
                 case .drawing(let ref):
-                    guard let data = assetData(ref.hash) else { continue }
-                    for stroke in try PKDrawing(data: data).strokes {
+                    for stroke in try DrawingStorage.drawing(ref, data: assetData).strokes {
                         let points = stroke.path.map { point -> [Double] in
                             let location = point.location.applying(stroke.transform)
                             return [rounded(location.x), rounded(location.y), (point.timeOffset * 1000).rounded() / 1000]

@@ -219,7 +219,19 @@ public struct Shape: Codable, Equatable, Sendable {
 public struct AssetReference: Codable, Equatable, Sendable {
     public var hash: String
     public var caption: String?
-    public init(hash: String, caption: String? = nil) { self.hash = hash; self.caption = caption }
+    /// Drawings only: strokes added later, each saved as its own small asset and laid over `hash`
+    /// in order, so a new stroke writes only itself instead of the whole page again.
+    public var parts: [String]?
+    public init(hash: String, caption: String? = nil, parts: [String]? = nil) {
+        self.hash = hash; self.caption = caption; self.parts = parts
+    }
+    /// The base asset followed by the parts.
+    public var allHashes: [String] { [hash] + (parts ?? []) }
+}
+
+/// A drawing keeps at most this many parts; the next save writes the whole drawing again.
+public enum DrawingParts {
+    public static let limit = 24
 }
 
 public enum BlockContent: Codable, Equatable, Sendable {
@@ -248,6 +260,13 @@ public enum BlockContent: Codable, Equatable, Sendable {
         switch self {
         case .image(let ref), .drawing(let ref), .pdf(let ref), .audio(let ref), .video(let ref), .sticker(let ref): ref.hash
         default: nil
+        }
+    }
+    /// Every asset the block needs (a drawing's base and its parts).
+    public var assetHashes: [String] {
+        switch self {
+        case .drawing(let ref): ref.allHashes
+        default: assetHash.map { [$0] } ?? []
         }
     }
 }

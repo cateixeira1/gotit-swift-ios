@@ -33,22 +33,64 @@ final class EditorTests: XCTestCase {
         let point = PKStrokePoint(location: CGPoint(x: 20, y: 20), timeOffset: 0, size: CGSize(width: 3, height: 3), opacity: 1, force: 0.5, azimuth: 0, altitude: 1)
         let stroke = PKStroke(ink: PKInk(.pen, color: .black), path: PKStrokePath(controlPoints: [point], creationDate: Date()))
         let bytes = PKDrawing(strokes: [stroke]).dataRepresentation()
-        model.saveDrawing(bytes, extra: [], pageID: pageID, documentID: document.id)
+        model.saveDrawing(.full(bytes), extra: [], pageID: pageID, documentID: document.id)
         while model.isSaving { await Task.yield() }
         XCTAssertFalse(model.writeFailed)
         XCTAssertEqual(model.document?.blocks.count, 1)
-        model.saveDrawing(bytes, extra: [], pageID: pageID, documentID: document.id)
+        model.saveDrawing(.full(bytes), extra: [], pageID: pageID, documentID: document.id)
         while model.isSaving { await Task.yield() }
         XCTAssertEqual(model.document?.blocks.count, 1)
         await model.open(document.id)
         let hash = try XCTUnwrap(model.document?.blocks.first?.content.assetHash)
         XCTAssertEqual(try PKDrawing(data: XCTUnwrap(model.assetData(hash))).strokes.count, 1)
-        model.saveDrawing(PKDrawing().dataRepresentation(), extra: [], pageID: pageID, documentID: document.id)
+        model.saveDrawing(.full(PKDrawing().dataRepresentation()), extra: [], pageID: pageID, documentID: document.id)
         while model.isSaving { await Task.yield() }
         XCTAssertTrue(model.document?.blocks.isEmpty == true)
         await model.history(undo: true)
         XCTAssertEqual(model.document?.blocks.count, 1)
     }
+    /// New strokes are saved as small parts over the page's drawing; erasing writes it whole again
+    /// and frees the parts; undo brings the parts back.
+    func testNewStrokesAreSavedAsPartsAndAWholeSaveReplacesThem() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let document = try XCTUnwrap(model.document)
+        let pageID = try XCTUnwrap(document.pages.first?.id)
+        func stroke(_ x: CGFloat) -> PKStroke {
+            let points = (0..<20).map { PKStrokePoint(location: CGPoint(x: x + CGFloat($0), y: 40), timeOffset: Double($0) / 60, size: CGSize(width: 3, height: 3), opacity: 1, force: 1, azimuth: 0, altitude: 1) }
+            return PKStroke(ink: PKInk(.pen, color: .black), path: PKStrokePath(controlPoints: points, creationDate: Date().addingTimeInterval(Double(x))))
+        }
+        let base = PKDrawing(strokes: [stroke(10), stroke(40)])
+        model.saveDrawing(.full(base.dataRepresentation()), extra: [], pageID: pageID, documentID: document.id)
+        while model.isSaving { await Task.yield() }
+        for x in [80.0, 120.0, 160.0] {
+            model.saveDrawing(.appended(PKDrawing(strokes: [stroke(CGFloat(x))]).dataRepresentation()), extra: [], pageID: pageID, documentID: document.id)
+            while model.isSaving { await Task.yield() }
+        }
+        guard case .drawing(let reference)? = model.document?.blocks.first?.content else { return XCTFail("No drawing") }
+        XCTAssertEqual(reference.parts?.count, 3)
+        let assembled = try DrawingStorage.drawing(reference, data: model.assetData)
+        XCTAssertEqual(assembled.strokes.count, 5)
+        XCTAssertEqual(assembled.strokes.map { $0.path.creationDate }, ([10, 40, 80, 120, 160] as [Double]).map { stroke(CGFloat($0)).path.creationDate })
+        // Each part holds only its own stroke.
+        for hash in try XCTUnwrap(reference.parts) { XCTAssertEqual(try PKDrawing(data: XCTUnwrap(model.assetData(hash))).strokes.count, 1) }
+        // Reopened from disk, the same five strokes.
+        await model.open(document.id)
+        guard case .drawing(let reopened)? = model.document?.blocks.first?.content else { return XCTFail("No drawing") }
+        XCTAssertEqual(try DrawingStorage.drawing(reopened, data: model.assetData).strokes.count, 5)
+        // Erasing one stroke: the whole drawing again, parts released.
+        model.saveDrawing(.full(PKDrawing(strokes: Array(assembled.strokes.dropFirst())).dataRepresentation()), extra: [], pageID: pageID, documentID: document.id)
+        while model.isSaving { await Task.yield() }
+        guard case .drawing(let whole)? = model.document?.blocks.first?.content else { return XCTFail("No drawing") }
+        XCTAssertNil(whole.parts)
+        XCTAssertEqual(model.document?.assets.count, 1)
+        await model.history(undo: true)
+        guard case .drawing(let restored)? = model.document?.blocks.first?.content else { return XCTFail("No drawing") }
+        XCTAssertEqual(restored.parts?.count, 3)
+        XCTAssertEqual(try DrawingStorage.drawing(restored, data: model.assetData).strokes.count, 5)
+    }
+
     func testPaginationPreservesRichTextAndMovesOverflowToNewPages() throws {
         var document = CanvasDocument(title: "Flow")
         let rich = RichText(runs: [TextRun(String(repeating: "Olá 👨‍👩‍👧‍👦 漢字 café. ", count: 180), style: .init(fontSize: 20, bold: true))])
@@ -395,6 +437,112 @@ final class EditorTests: XCTestCase {
 
     /// Laying out only from the page before the edit, and stopping where pages line up again, gives
     /// exactly what laying out the whole story gives, for typing, new lines, pastes and deletions.
+    /// A story of several pages, laid out.
+    private func longStory(paragraphs: Int = 40) throws -> (CanvasDocument, UUID, String) {
+        var document = CanvasDocument(title: "Seleção", defaultStyle: .init(fontSize: 18))
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: document.canvas.size.width - 48, height: 44)),
+                                content: .text(.init("")))
+        block.textFlowID = block.id
+        document.blocks = [block]
+        let sentence = "Frase de teste para encher várias páginas com texto corrido. "
+        let story = (0..<paragraphs).map { "\($0): " + String(repeating: sentence, count: 3 + $0 % 3) }.joined(separator: "\n")
+        block.content = .text(RichText(story))
+        document = try CommandEngine.applying(TextPagination.reflow(block, in: document, selection: .init(location: 0, length: 0), incremental: false).commands, to: document)
+        return (document, block.id, story)
+    }
+
+    func testEditingASelectionAcrossPagesEditsTheWholeStory() throws {
+        let (document, story, text) = try longStory()
+        XCTAssertGreaterThanOrEqual(document.pages.count, 4)
+        let fragments = document.textFlowFragments(story: story)
+        func length(_ block: CanvasBlock) -> Int { if case .text(let rich) = block.content { return (rich.plainText as NSString).length }; return 0 }
+        // From the middle of page 1 to the middle of page 3.
+        let start = length(fragments[0]) / 2
+        let end = length(fragments[0]) + length(fragments[1]) + length(fragments[2]) / 2
+        let range = NSRange(location: start, length: end - start)
+        let whole = text as NSString
+        func storyText(_ d: CanvasDocument) throws -> String { try StoryEditing.joined(story: story, in: d).text.string }
+
+        let deleted = try StoryEditing.apply(.delete, to: range, story: story, in: document)
+        let afterDelete = try CommandEngine.applying(deleted.commands, to: document)
+        XCTAssertEqual(try storyText(afterDelete), whole.replacingCharacters(in: range, with: ""))
+        XCTAssertLessThan(afterDelete.pages.count, document.pages.count)
+
+        let typed = try StoryEditing.apply(.replace("X"), to: range, story: story, in: document)
+        let afterTyping = try CommandEngine.applying(typed.commands, to: document)
+        XCTAssertEqual(try storyText(afterTyping), whole.replacingCharacters(in: range, with: "X"))
+        // The caret lands right after the X, in whichever box holds it now.
+        let focusStart = afterTyping.textFlowFragments(story: story).prefix { $0.id != typed.focus.blockID }.reduce(0) { $0 + length($1) }
+        XCTAssertEqual(focusStart + typed.focus.range.location, start + 1)
+
+        let bold = try StoryEditing.apply(.format(.bold), to: range, story: story, in: document)
+        let afterBold = try CommandEngine.applying(bold.commands, to: document)
+        let joined = try StoryEditing.joined(story: story, in: afterBold).text
+        XCTAssertEqual(joined.string, text)
+        XCTAssertEqual(afterBold.pages.count >= document.pages.count, true)
+        func isBold(_ index: Int) -> Bool { ((joined.attribute(.font, at: index, effectiveRange: nil) as? UIFont)?.fontDescriptor.symbolicTraits.contains(.traitBold)) ?? false }
+        XCTAssertTrue(isBold(start)); XCTAssertTrue(isBold(end - 1)); XCTAssertTrue(isBold(length(fragments[0]) + 3))
+        XCTAssertFalse(isBold(start - 1)); XCTAssertFalse(isBold(end))
+        // Again: bold is turned off.
+        let plain = try CommandEngine.applying(StoryEditing.apply(.format(.bold), to: range, story: story, in: afterBold).commands, to: afterBold)
+        let unbolded = try StoryEditing.joined(story: story, in: plain).text
+        XCTAssertFalse(((unbolded.attribute(.font, at: start, effectiveRange: nil) as? UIFont)?.fontDescriptor.symbolicTraits.contains(.traitBold)) ?? true)
+    }
+
+    func testDeletingAcrossPagesIsOneUndoStep() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let document = try XCTUnwrap(model.document)
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 400, height: 44)), content: .text(.init("")))
+        block.textFlowID = block.id
+        model.enqueue([.insertBlock(block)], pageID: try XCTUnwrap(document.pages.first?.id), documentID: document.id)
+        while model.isSaving { await Task.yield() }
+        var long = try XCTUnwrap(model.document?.blocks.first { $0.id == block.id })
+        let text = String(repeating: "texto de várias páginas ", count: 500)
+        long.content = .text(RichText(text))
+        _ = model.editText(long, group: "colar", selection: NSRange(location: 0, length: 0))
+        while model.isSaving { await Task.yield() }
+        let pages = try XCTUnwrap(model.document?.pages.count)
+        XCTAssertGreaterThan(pages, 2)
+        _ = model.editStory(block.id, range: NSRange(location: 10, length: (text as NSString).length - 20), edit: .delete)
+        while model.isSaving { await Task.yield() }
+        XCTAssertEqual(model.document?.pages.count, 1)
+        XCTAssertEqual(try StoryEditing.joined(story: block.id, in: XCTUnwrap(model.document)).text.length, 20)
+        await model.history(undo: true)
+        XCTAssertEqual(model.document?.pages.count, pages)
+        XCTAssertEqual(try StoryEditing.joined(story: block.id, in: XCTUnwrap(model.document)).text.string, text)
+    }
+
+    func testASelectionAcrossPagesIsShownOnEachPageWithTwoHandles() throws {
+        let (document, story, _) = try longStory()
+        let session = EditorSession()
+        let editors = try document.pages.map { CanvasEditor(document: try document.pageDocument($0.id), onTextCommands: { _, _, _ in nil }, onCommands: { _ in }) }
+        let controller = PagedCanvasViewController(configuration: PagedCanvasEditor(
+            pages: editors, tool: .select, session: session, focusPageID: document.pages.first?.id,
+            onStoryEdit: { _, _, _ in nil }, onVisiblePage: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        let fragments = document.textFlowFragments(story: story)
+        XCTAssertEqual(session.fragmentRanges.count, fragments.count)
+        XCTAssertTrue(session.spansPages(story))
+        let first = try XCTUnwrap(session.fragmentRanges[fragments[0].id]?.range)
+        session.storySelection = StorySelection(story: story, range: NSRange(location: first.length - 30, length: 60))
+        func highlighted() -> [UITextView] {
+            func all(_ view: UIView) -> [UITextView] { ((view as? UITextView).map { [$0] } ?? []) + view.subviews.flatMap(all) }
+            return all(controller.view).filter { $0.layer.sublayers?.contains { $0.name == "storySelection" } == true }
+        }
+        XCTAssertEqual(highlighted().count, 2, "the end of page 1 and the start of page 2")
+        XCTAssertTrue(controller.storyHandlesVisible)
+        session.storySelection = nil
+        XCTAssertTrue(highlighted().isEmpty)
+        XCTAssertFalse(controller.storyHandlesVisible)
+        window.isHidden = true
+    }
+
     func testIncrementalReflowMatchesTheFullLayout() throws {
         var document = CanvasDocument(title: "Reflow", defaultStyle: .init(fontSize: 18))
         var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: document.canvas.size.width - 48, height: 44)),

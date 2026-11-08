@@ -156,3 +156,106 @@ public struct TextFlowFocus {
     }
 }
 #endif
+
+#if canImport(UIKit)
+/// An edit of a selection that may run across pages.
+public enum StoryEdit {
+    /// Typing or pasting over the selection.
+    case replace(String)
+    case delete
+    /// Bold, italic, underline, strike-through, colour, highlight, font or size on the selection.
+    case format(TextEditingAction)
+}
+
+/// Edits a story as one text: its fragments are joined, the edit is applied to the joined text,
+/// and the whole is laid out again from the first page (one undo step for the host).
+@MainActor public enum StoryEditing {
+    /// The whole story as one attributed text, and where each fragment begins in it.
+    public static func joined(story: UUID, in document: CanvasDocument) throws -> (text: NSMutableAttributedString, fragments: [CanvasBlock]) {
+        let pageIndices = Dictionary(uniqueKeysWithValues: document.pages.enumerated().map { ($0.element.id, $0.offset) })
+        let fragments = document.blocks.filter { $0.id == story || $0.textFlowID == story }.sorted {
+            (pageIndices[document.pageID(for: $0.id) ?? document.id] ?? 0, $0.order) < (pageIndices[document.pageID(for: $1.id) ?? document.id] ?? 0, $1.order)
+        }
+        let text = NSMutableAttributedString()
+        for fragment in fragments {
+            guard case .text(let rich) = fragment.content else { throw DocumentError.invalid("Invalid text story") }
+            text.append(TextBridge.attributed(rich, base: try document.resolvedStyle(for: fragment.id)))
+        }
+        return (text, fragments)
+    }
+
+    public static func apply(_ edit: StoryEdit, to range: NSRange, story: UUID, in document: CanvasDocument) throws -> TextPagination.Result {
+        let (text, fragments) = try joined(story: story, in: document)
+        guard var first = fragments.first else { throw DocumentError.invalid("Missing text story") }
+        let start = min(max(0, range.location), text.length)
+        let selection = NSRange(location: start, length: min(max(0, range.length), text.length - start))
+        var caret = NSRange(location: selection.location, length: 0)
+        switch edit {
+        case .replace(let string):
+            var attributes: [NSAttributedString.Key: Any] = [:]
+            if text.length > 0 { attributes = text.attributes(at: min(selection.location, text.length - 1), effectiveRange: nil) }
+            attributes[.attachment] = nil
+            text.replaceCharacters(in: selection, with: NSAttributedString(string: string, attributes: attributes))
+            caret.location = selection.location + (string as NSString).length
+        case .delete:
+            text.deleteCharacters(in: selection)
+        case .format(let action):
+            format(text, selection, action)
+            caret = selection
+        }
+        // Everything in the first fragment, the others emptied: laying the story out again from the
+        // start puts each page's share back, reusing the same boxes and removing the ones left over.
+        var working = document
+        var commands: [DocumentCommand] = []
+        for fragment in fragments.dropFirst() {
+            var emptied = fragment; emptied.content = .text(RichText(""))
+            commands.append(.replaceBlock(emptied))
+        }
+        working = try CommandEngine.applying(commands, to: working)
+        first.content = .text(TextBridge.richText(text))
+        let result = try TextPagination.reflow(first, in: working, selection: caret, incremental: false)
+        return .init(commands: commands + result.commands, focus: result.focus)
+    }
+
+    static func format(_ text: NSMutableAttributedString, _ range: NSRange, _ action: TextEditingAction) {
+        guard range.length > 0 else { return }
+        func fonts(_ change: (UIFont) -> UIFont) {
+            text.enumerateAttribute(.font, in: range) { value, part, _ in
+                text.addAttribute(.font, value: change((value as? UIFont) ?? .systemFont(ofSize: 18)), range: part)
+            }
+        }
+        func allFonts(_ test: (UIFont) -> Bool) -> Bool {
+            var all = true
+            text.enumerateAttribute(.font, in: range) { value, _, stop in
+                if !test((value as? UIFont) ?? .systemFont(ofSize: 18)) { all = false; stop.pointee = true }
+            }
+            return all
+        }
+        func trait(_ trait: UIFontDescriptor.SymbolicTraits) {
+            let remove = allFonts { $0.fontDescriptor.symbolicTraits.contains(trait) }
+            fonts { font in
+                var traits = font.fontDescriptor.symbolicTraits
+                if remove { traits.remove(trait) } else { traits.insert(trait) }
+                return font.fontDescriptor.withSymbolicTraits(traits).map { UIFont(descriptor: $0, size: font.pointSize) } ?? font
+            }
+        }
+        func toggle(_ key: NSAttributedString.Key) {
+            var all = true
+            text.enumerateAttribute(key, in: range) { value, _, stop in if ((value as? Int) ?? 0) == 0 { all = false; stop.pointee = true } }
+            if all { text.removeAttribute(key, range: range) } else { text.addAttribute(key, value: NSUnderlineStyle.single.rawValue, range: range) }
+        }
+        switch action {
+        case .bold: trait(.traitBold)
+        case .italic: trait(.traitItalic)
+        case .underline: toggle(.underlineStyle)
+        case .strike: toggle(.strikethroughStyle)
+        case .foreground(let color): text.addAttribute(.foregroundColor, value: color, range: range)
+        case .highlight(let color):
+            if let color { text.addAttribute(.backgroundColor, value: color, range: range) } else { text.removeAttribute(.backgroundColor, range: range) }
+        case .fontSize(let size): fonts { $0.withSize(max(6, min(144, size))) }
+        case .font(let name): fonts { font in name == "Sistema" ? .systemFont(ofSize: font.pointSize) : (UIFont(name: name, size: font.pointSize) ?? font) }
+        default: break
+        }
+    }
+}
+#endif

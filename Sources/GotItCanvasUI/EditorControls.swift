@@ -54,6 +54,13 @@ public enum TextEditingAction {
 /// A key typed while the caret was moving to another page, replayed once it arrives.
 enum QueuedKey: Equatable { case insert(String), deleteBackward }
 
+/// A selection in a story that runs over several pages, in characters of the whole story.
+public struct StorySelection: Equatable {
+    public var story: UUID
+    public var range: NSRange
+    public init(story: UUID, range: NSRange) { self.story = story; self.range = range }
+}
+
 /// Keeps the selected UITextView and its text range alive while native toolbar buttons act on it.
 /// Shared by every page of a note, so it also carries what crosses page boundaries: the caret
 /// moving to another page's text box, and whether an Apple Pencil is in use.
@@ -77,6 +84,21 @@ public final class EditorSession {
     /// or by the system setting "Only Draw with Apple Pencil").
     @ObservationIgnored public private(set) var prefersPencil = false
     @ObservationIgnored var handler: ((TextEditingAction) -> Void)?
+    /// Text selected across pages (shown with its own highlight and handles); nil otherwise.
+    @ObservationIgnored public var storySelection: StorySelection? {
+        didSet { if oldValue != storySelection { storySelectionChanged?() } }
+    }
+    @ObservationIgnored var storySelectionChanged: (() -> Void)?
+    /// Where each story fragment sits in its whole story (set by the paged editor).
+    @ObservationIgnored var fragmentRanges: [UUID: (story: UUID, range: NSRange)] = [:]
+    /// Applies an edit to the story selection (typing over it, deleting, formatting).
+    @ObservationIgnored var storyEdit: ((StorySelection, StoryEdit) -> Void)?
+    /// Copy, cut, paste and select all from a text box, for a selection across pages.
+    @ObservationIgnored var storyCommand: ((Selector, UUID) -> Bool)?
+    /// The edit menu for a selection across pages.
+    @ObservationIgnored var storyMenu: (() -> UIMenu)?
+    /// Stories with more than one box: only those use the selection across pages.
+    func spansPages(_ story: UUID) -> Bool { fragmentRanges.values.filter { $0.story == story }.count > 1 }
     public init() {
         #if !targetEnvironment(macCatalyst)
         prefersPencil = UIPencilInteraction.prefersPencilOnlyDrawing

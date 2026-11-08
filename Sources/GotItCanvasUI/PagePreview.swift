@@ -39,7 +39,7 @@ public enum PagePreview {
                     view.layoutIfNeeded()
                     view.layer.render(in: context.cgContext)
                 } else if case .drawing(let ref) = block.content {
-                    if let bytes = drawingData(ref.hash), let drawing = try? PKDrawing(data: bytes) {
+                    if let drawing = try? DrawingStorage.drawing(ref, data: drawingData) {
                         drawing.image(from: CGRect(origin: .zero, size: rect.size), scale: scale * 2).draw(in: CGRect(origin: .zero, size: rect.size))
                     }
                 } else {

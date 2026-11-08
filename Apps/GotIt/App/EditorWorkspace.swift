@@ -81,7 +81,9 @@ struct EditorWorkspace: View {
 
     private var canvas: some View {
         PagedCanvasEditor(pages: document.pages.map { pageEditor($0.id) }, tool: tool, session: session,
-                          focusPageID: pageID, scrollRequest: pageScrollRequest, onVisiblePage: { model.selectedPageID = $0 })
+                          focusPageID: pageID, scrollRequest: pageScrollRequest,
+                          onStoryEdit: { story, range, edit in model.editStory(story, range: range, edit: edit) },
+                          onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
             .overlay(alignment: .bottomTrailing) { floatingPen }
@@ -113,7 +115,7 @@ struct EditorWorkspace: View {
             inkColor: UIColor(inkColor).resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)),
             inkWidth: inkWidth, vectorEraser: vectorEraser,
             drawingData: model.assetData,
-            onDrawing: { data, commands in model.saveDrawing(data, extra: commands, pageID: targetPage, documentID: targetDocument) },
+            onDrawing: { save, commands in model.saveDrawing(save, extra: commands, pageID: targetPage, documentID: targetDocument) },
             image: model.image, note: { model.noteMetadata[$0] },
             onTextCommands: { block, group, selection in model.editText(block, group: group, selection: selection) },
             onBackspaceAtStart: { id, group in model.backspaceAcrossFragments(id, group: group) },

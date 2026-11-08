@@ -24,7 +24,7 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var inkWidth: CGFloat
     public var vectorEraser: Bool
     public var drawingData: (String) -> Data?
-    public var onDrawing: (Data, [DocumentCommand]) -> Void
+    public var onDrawing: (DrawingSave, [DocumentCommand]) -> Void
     public var image: (String) -> UIImage?
     public var note: (UUID) -> NoteCardPresentation?
     public var onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)?
@@ -41,7 +41,7 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
                 drawingData: @escaping (String) -> Data? = { _ in nil },
-                onDrawing: @escaping (Data, [DocumentCommand]) -> Void = { _, _ in },
+                onDrawing: @escaping (DrawingSave, [DocumentCommand]) -> Void = { _, _ in },
                 image: @escaping (String) -> UIImage? = { _ in nil },
                 note: @escaping (UUID) -> NoteCardPresentation? = { _ in nil },
                 onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)? = nil,
@@ -87,6 +87,12 @@ final class FlowTextView: UITextView {
     /// keyboard, leaving the box) changes no characters, so UIKit may not report a change; the
     /// editor ignores changes while text is marked, and would keep the composed text unsaved until
     /// the next key. Report it here (duplicates are dropped by the editor).
+    /// Copy, cut, paste and select all go to the selection across pages when there is one.
+    var storyCommand: ((Selector) -> Bool)?
+    override func copy(_ sender: Any?) { if storyCommand?(#selector(copy(_:))) != true { super.copy(sender) } }
+    override func cut(_ sender: Any?) { if storyCommand?(#selector(cut(_:))) != true { super.cut(sender) } }
+    override func paste(_ sender: Any?) { if storyCommand?(#selector(paste(_:))) != true { super.paste(sender) } }
+    override func selectAll(_ sender: Any?) { if storyCommand?(#selector(selectAll(_:))) != true { super.selectAll(sender) } }
     override func unmarkText() {
         let wasMarked = markedTextRange != nil
         super.unmarkText()
@@ -104,7 +110,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private weak var activeText: UITextView?
     private var applyingDrawing = false
     private var usingTool = false
-    private var lastDrawingData = PKDrawing().dataRepresentation()
+    /// What the saved drawing holds, stroke by stroke (see `DrawingStorage.fingerprint`), and how
+    /// many parts it has: a save that only adds strokes writes just those.
+    private var savedStrokes: [String] = []
+    private var savedParts = 0
     private var strokesAtStart = 0
     /// Finger tap over the ink layer while an Apple Pencil draws: same meaning as in cursor mode.
     private var inkTap: UITapGestureRecognizer?
@@ -597,20 +606,17 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     private func loadDrawing() {
         guard !usingTool else { return }
-        let hash = configuration.document.blocks.compactMap { block -> String? in
-            if case .drawing(let ref) = block.content { return ref.hash }; return nil
+        let reference = configuration.document.blocks.compactMap { block -> AssetReference? in
+            if case .drawing(let ref) = block.content { return ref }; return nil
         }.first
+        let hash = reference.map { $0.allHashes.joined(separator: "+") }
         guard hash != loadedDrawingHash else { return }
         do {
-            let data: Data
-            if let hash {
-                guard let bytes = configuration.drawingData(hash) else { throw DocumentError.invalid("Desenho indisponível") }
-                data = bytes
-            } else { data = PKDrawing().dataRepresentation() }
-            let drawing = try PKDrawing(data: data)
+            let drawing = try reference.map { try DrawingStorage.drawing($0, data: configuration.drawingData) } ?? PKDrawing()
             applyingDrawing = true; ink.drawing = drawing; applyingDrawing = false
             drawing.strokes.forEach { classifiedStrokes.insert(Self.key($0)) }
-            loadedDrawingHash = hash; lastDrawingData = data
+            loadedDrawingHash = hash
+            savedStrokes = drawing.strokes.map(DrawingStorage.fingerprint); savedParts = reference?.parts?.count ?? 0
         } catch { configuration.onError(error) }
     }
 
@@ -853,11 +859,24 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private func saveDrawing(_ commands: [DocumentCommand] = []) {
         guard !usingTool, !applyingDrawing else { return }
         let drawing = ink.drawing
-        let bytes = drawing.dataRepresentation()
-        guard bytes != lastDrawingData || !commands.isEmpty else { return }
+        let current = drawing.strokes.map(DrawingStorage.fingerprint)
+        guard current != savedStrokes || !commands.isEmpty else { return }
         ink.accessibilityValue = "\(drawing.strokes.count) traços"
-        lastDrawingData = bytes
-        configuration.onDrawing(bytes, commands)
+        let save: DrawingSave
+        if current == savedStrokes {
+            save = .unchanged
+        } else if !savedStrokes.isEmpty, current.count > savedStrokes.count, Array(current.prefix(savedStrokes.count)) == savedStrokes,
+                  savedParts < DrawingParts.limit {
+            // Only new strokes: write just those, as one more part.
+            save = .appended(PKDrawing(strokes: Array(drawing.strokes.dropFirst(savedStrokes.count))).dataRepresentation())
+            savedParts += 1
+        } else {
+            // Strokes erased, moved, turned into shapes, or too many parts: the whole drawing again.
+            save = .full(drawing.dataRepresentation())
+            savedParts = 0
+        }
+        savedStrokes = current
+        configuration.onDrawing(save, commands)
     }
 
     /// Views outside the overscan are detached and reset. Focus/IME and active drags stay pinned.
@@ -886,6 +905,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if let reused = textPool.popLast() { textIDs[ObjectIdentifier(reused)] = id; return reused }
         let text = FlowTextView(usingTextLayoutManager: true)
         text.backspaceAtStart = { [weak self, weak text] in self?.backspaceAcrossFragments(text) ?? false }
+        text.storyCommand = { [weak self, weak text] selector in
+            guard let self, let text, let id = self.textIDs[ObjectIdentifier(text)] else { return false }
+            return self.configuration.session?.storyCommand?(selector, id) ?? false
+        }
         text.delegate = self; text.backgroundColor = .clear
         text.textContainerInset = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
         text.isScrollEnabled = true
@@ -895,9 +918,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         textIDs[ObjectIdentifier(text)] = id
         let bar = UIToolbar()
         bar.items = [
-            UIBarButtonItem(title: "B", primaryAction: UIAction { [weak self, weak text] _ in if let text { text.toggleBoldface(nil); self?.textViewDidChange(text) } }),
-            UIBarButtonItem(title: "I", primaryAction: UIAction { [weak self, weak text] _ in if let text { text.toggleItalics(nil); self?.textViewDidChange(text) } }),
-            UIBarButtonItem(title: "U", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.format(text, key: .underlineStyle, value: NSUnderlineStyle.single.rawValue) } }),
+            UIBarButtonItem(title: "B", primaryAction: UIAction { [weak self, weak text] _ in
+                guard let self, let text, !self.storyFormat(.bold) else { return }
+                text.toggleBoldface(nil); self.textViewDidChange(text)
+            }),
+            UIBarButtonItem(title: "I", primaryAction: UIAction { [weak self, weak text] _ in
+                guard let self, let text, !self.storyFormat(.italic) else { return }
+                text.toggleItalics(nil); self.textViewDidChange(text)
+            }),
+            UIBarButtonItem(title: "U", primaryAction: UIAction { [weak self, weak text] _ in
+                guard let self, let text, !self.storyFormat(.underline) else { return }
+                self.format(text, key: .underlineStyle, value: NSUnderlineStyle.single.rawValue)
+            }),
             UIBarButtonItem(title: "A+", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.resizeFont(text, delta: 2) } }),
             UIBarButtonItem(title: "A−", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.resizeFont(text, delta: -2) } }),
             UIBarButtonItem(title: "Cor", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.format(text, key: .foregroundColor, value: UIColor.systemBlue) } }),
@@ -944,6 +976,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     public func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
         if textView === cellEditor { return true }
         let now = Date(), id = textIDs[ObjectIdentifier(textView)]
+        // Typing or deleting over a selection that runs across pages edits the whole story.
+        if let session = configuration.session, let selection = session.storySelection, let storyEdit = session.storyEdit,
+           let id, session.fragmentRanges[id]?.story == selection.story, textView.markedTextRange == nil {
+            storyEdit(selection, text.isEmpty ? .delete : .replace(text))
+            return false
+        }
         if let session = configuration.session, session.waitingForFocus, session.pendingFocus?.blockID != id,
            textView.markedTextRange == nil {
             if range.length == 0, !text.isEmpty { session.queuedInput.append(.insert(text)); return false }
@@ -968,6 +1006,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if activeText === textView { activeText = nil; configuration.session?.hasTextSelection = false }
         typingGroup = nil; typingBlock = nil; typingCaret = nil; pendingTyping = false
         removeIfAbandoned(textView)
+        // Leaving the text (a tap on the page, another tool) ends a selection across pages; moving
+        // to another box of the story does not, so decide once focus has settled.
+        if configuration.session?.storySelection != nil {
+            Task { @MainActor [weak self] in
+                guard let session = self?.configuration.session, !session.hasTextSelection else { return }
+                session.storySelection = nil
+            }
+        }
     }
 
     /// A tap creates a text block; leaving it without typing must not leave an empty box behind.
@@ -1013,7 +1059,98 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView.isFirstResponder else { return }
+        syncStorySelection(from: textView)
         configuration.session?.revealCaret?()
+    }
+
+    /// A selection made in a box of a story longer than a page becomes a story selection, which
+    /// has its own handles that can be dragged onto other pages. A caret ends it.
+    private func syncStorySelection(from textView: UITextView) {
+        // Selections set by the editor itself (re-rendering after an edit) are not the user's.
+        guard !rendering, let session = configuration.session, session.storyEdit != nil,
+              let id = textIDs[ObjectIdentifier(textView)], let fragment = session.fragmentRanges[id] else { return }
+        let native = textView.selectedRange
+        guard native.length > 0, textView.markedTextRange == nil else {
+            if session.storySelection != nil { session.storySelection = nil }
+            return
+        }
+        guard session.spansPages(fragment.story) else { return }
+        session.storySelection = StorySelection(story: fragment.story, range: NSRange(location: fragment.range.location + native.location, length: native.length))
+    }
+
+    public func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let session = configuration.session, let selection = session.storySelection, let id = textIDs[ObjectIdentifier(textView)],
+              session.fragmentRanges[id]?.story == selection.story, let menu = session.storyMenu else { return nil }
+        return menu()
+    }
+
+    // MARK: Selection across pages
+
+    /// Formats the selection across pages, if there is one.
+    private func storyFormat(_ action: TextEditingAction) -> Bool {
+        guard let session = configuration.session, let selection = session.storySelection, let edit = session.storyEdit else { return false }
+        edit(selection, .format(action)); return true
+    }
+
+    private static let storyHighlightName = "storySelection"
+
+    /// Draws this page's part of the story selection, and hides the native one meanwhile.
+    func showStorySelection() {
+        let session = configuration.session
+        for (id, view) in blockViews {
+            guard let text = view as? UITextView, text !== cellEditor else { continue }
+            text.layer.sublayers?.filter { $0.name == Self.storyHighlightName }.forEach { $0.removeFromSuperlayer() }
+            guard let selection = session?.storySelection, let fragment = session?.fragmentRanges[id], fragment.story == selection.story else {
+                if text.tintColor == .clear { text.tintColor = nil }
+                continue
+            }
+            text.tintColor = .clear
+            let shared = NSIntersectionRange(selection.range, fragment.range)
+            guard shared.length > 0,
+                  let start = text.position(from: text.beginningOfDocument, offset: shared.location - fragment.range.location),
+                  let end = text.position(from: start, offset: shared.length),
+                  let textRange = text.textRange(from: start, to: end) else { continue }
+            let path = UIBezierPath()
+            for rect in text.selectionRects(for: textRange) where rect.rect.width > 0 && rect.rect.height > 0 { path.append(UIBezierPath(rect: rect.rect)) }
+            let layer = CAShapeLayer()
+            layer.name = Self.storyHighlightName
+            layer.path = path.cgPath
+            layer.fillColor = UIColor.systemBlue.withAlphaComponent(0.25).cgColor
+            text.layer.insertSublayer(layer, at: 0)
+        }
+    }
+
+    /// The story character nearest to `point` (in this page's view), or nil if the story has no box here.
+    func storyIndex(at point: CGPoint, story: UUID) -> Int? {
+        guard let session = configuration.session else { return nil }
+        let boxes = blockViews.compactMap { id, view -> (UITextView, NSRange)? in
+            guard let text = view as? UITextView, text !== cellEditor, let fragment = session.fragmentRanges[id], fragment.story == story else { return nil }
+            return (text, fragment.range)
+        }
+        func distance(_ text: UITextView) -> CGFloat {
+            let frame = text.superview?.convert(text.frame, to: view) ?? text.frame
+            return frame.contains(point) ? 0 : max(0, max(frame.minY - point.y, point.y - frame.maxY))
+        }
+        guard let nearest = boxes.min(by: { distance($0.0) < distance($1.0) }) else { return nil }
+        let (text, range) = nearest
+        let local = view.convert(point, to: text)
+        guard let position = text.closestPosition(to: local) else { return nil }
+        return range.location + text.offset(from: text.beginningOfDocument, to: position)
+    }
+
+    /// Caret rectangle of a story position on this page (in this page's view). At the end of a
+    /// page and the start of the next, `endOfBox` picks the earlier box.
+    func storyCaretRect(_ index: Int, story: UUID, endOfBox: Bool) -> CGRect? {
+        guard let session = configuration.session else { return nil }
+        for (id, view) in blockViews {
+            guard let text = view as? UITextView, text !== cellEditor, let fragment = session.fragmentRanges[id], fragment.story == story else { continue }
+            let range = fragment.range
+            let inside = endOfBox ? (index > range.location && index <= NSMaxRange(range)) : (index >= range.location && index < NSMaxRange(range))
+            guard inside || (range.length == 0 && index == range.location),
+                  let position = text.position(from: text.beginningOfDocument, offset: index - range.location) else { continue }
+            return text.convert(text.caretRect(for: position), to: self.view)
+        }
+        return nil
     }
 
     private func format(_ text: UITextView, key: NSAttributedString.Key, value: Any) {

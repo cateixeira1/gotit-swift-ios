@@ -116,7 +116,10 @@ public enum DocumentValidator {
             case .table(let table): try validate(table: table, frame: block.layout.frame)
             default: break
             }
-            if let hash = block.content.assetHash, !hashes.contains(hash) {
+            if case .drawing(let ref) = block.content, (ref.parts?.count ?? 0) > DrawingParts.limit {
+                throw DocumentError.invalid("Too many drawing parts")
+            }
+            if block.content.assetHashes.contains(where: { !hashes.contains($0) }) {
                 throw DocumentError.invalid("Block references an unregistered asset")
             }
         }

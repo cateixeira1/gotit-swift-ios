@@ -1,6 +1,7 @@
 #if canImport(UIKit)
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import GotItDomain
 
 /// All pages of a note stacked vertically in one scroll view, like a word processor.
@@ -17,18 +18,23 @@ public struct PagedCanvasEditor: UIViewControllerRepresentable {
     public var onVisiblePage: (UUID) -> Void
     /// Changing this asks to show `focusPageID` even if it was already the focus (page list taps).
     public var scrollRequest: Int
+    /// Edits a selection that runs across pages (story, range in the whole story); returns where
+    /// the caret goes. Without it, selections stay inside one page.
+    public var onStoryEdit: ((UUID, NSRange, StoryEdit) -> TextFlowFocus?)?
 
     public init(pages: [CanvasEditor], tool: CanvasTool, session: EditorSession?, focusPageID: UUID?,
-                scrollRequest: Int = 0, onVisiblePage: @escaping (UUID) -> Void) {
+                scrollRequest: Int = 0, onStoryEdit: ((UUID, NSRange, StoryEdit) -> TextFlowFocus?)? = nil,
+                onVisiblePage: @escaping (UUID) -> Void) {
         self.pages = pages; self.tool = tool; self.session = session
-        self.focusPageID = focusPageID; self.scrollRequest = scrollRequest; self.onVisiblePage = onVisiblePage
+        self.focusPageID = focusPageID; self.scrollRequest = scrollRequest; self.onStoryEdit = onStoryEdit
+        self.onVisiblePage = onVisiblePage
     }
     public func makeUIViewController(context: Context) -> PagedCanvasViewController { PagedCanvasViewController(configuration: self) }
     public func updateUIViewController(_ controller: PagedCanvasViewController, context: Context) { controller.configure(self) }
 }
 
 @MainActor
-public final class PagedCanvasViewController: UIViewController, UIScrollViewDelegate {
+public final class PagedCanvasViewController: UIViewController, UIScrollViewDelegate, UIEditMenuInteractionDelegate {
     private var configuration: PagedCanvasEditor
     private let scroll = UIScrollView()
     private let content = UIView()
@@ -52,6 +58,12 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
     private var lockedAxis: (horizontal: Bool, offset: CGPoint)?
     private var keyboardOverlap: CGFloat = 0
     private var caretRevealQueued = false
+    /// Handles of a selection across pages; they live in the scroll view so zoom does not shrink them.
+    private let startHandle = SelectionHandle(isStart: true)
+    private let endHandle = SelectionHandle(isStart: false)
+    private var draggingStart = false
+    private lazy var storyMenuInteraction = UIEditMenuInteraction(delegate: self)
+    var storyHandlesVisible: Bool { !startHandle.isHidden || !endHandle.isHidden }
 
     init(configuration: PagedCanvasEditor) { self.configuration = configuration; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError("Use PagedCanvasEditor") }
@@ -73,6 +85,12 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         view.addSubview(scroll)
         scroll.addSubview(content)
         view.addSubview(ruler)
+        for handle in [startHandle, endHandle] {
+            handle.isHidden = true
+            handle.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(dragHandle(_:))))
+            scroll.addSubview(handle)
+        }
+        scroll.addInteraction(storyMenuInteraction)
         bindSession()
         layoutPages()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
@@ -96,7 +114,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
     }
 
     public func viewForZooming(in scrollView: UIScrollView) -> UIView? { content }
-    public func scrollViewDidZoom(_ scrollView: UIScrollView) { centerContent(); realizeVisiblePages(); updateRuler() }
+    public func scrollViewDidZoom(_ scrollView: UIScrollView) { centerContent(); realizeVisiblePages(); updateRuler(); placeHandles() }
     public func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { followsWidth = false; lockedAxis = nil }
     public func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
         // Close to the page width counts as "fill the width" again.
@@ -212,6 +230,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
                 detach(id, child)
             }
         }
+        if configuration.session?.storySelection != nil { showStorySelection() }
     }
 
     private func detach(_ id: UUID, _ child: CanvasViewController) {
@@ -331,6 +350,15 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
             return child.claimFocus(focus)
         }
         session.revealCaret = { [weak self] in self?.revealCaretSoon() }
+        if configuration.onStoryEdit != nil {
+            session.storySelectionChanged = { [weak self] in self?.showStorySelection() }
+            session.storyEdit = { [weak self] selection, edit in self?.performStoryEdit(selection, edit) }
+            session.storyCommand = { [weak self] selector, id in self?.storyCommand(selector, from: id) ?? false }
+            session.storyMenu = { [weak self] in self?.storyMenu() ?? UIMenu(children: []) }
+        } else {
+            session.storyEdit = nil; session.storyCommand = nil; session.storyMenu = nil
+        }
+        updateFragmentRanges()
         session.interactionChanged = { [weak self] in
             guard let self else { return }
             for child in self.pageEditors.values { child.applyInputMode() }
@@ -338,6 +366,14 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         }
     }
     private func route(_ action: TextEditingAction) {
+        // Formatting a selection that runs across pages formats all of it.
+        if let selection = configuration.session?.storySelection {
+            switch action {
+            case .bold, .italic, .underline, .strike, .foreground, .highlight, .fontSize, .font:
+                performStoryEdit(selection, .format(action)); return
+            default: break
+            }
+        }
         switch action {
         case .zoom(let factor):
             followsWidth = false
@@ -353,6 +389,184 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         }
     }
 
+    // MARK: Selection across pages
+
+    /// Where each story box sits in its whole story, page after page.
+    private func updateFragmentRanges() {
+        guard let session = configuration.session else { return }
+        var ranges: [UUID: (story: UUID, range: NSRange)] = [:], ends: [UUID: Int] = [:]
+        for editor in configuration.pages {
+            for block in editor.document.blocks.filter({ $0.parentID == nil }).sorted(by: { $0.order < $1.order }) {
+                guard case .text(let rich) = block.content else { continue }
+                let story = block.textFlowID ?? block.id, length = (rich.plainText as NSString).length
+                let start = ends[story, default: 0]
+                ranges[block.id] = (story, NSRange(location: start, length: length)); ends[story] = start + length
+            }
+        }
+        session.fragmentRanges = ranges
+        if let selection = session.storySelection {
+            let total = ends[selection.story] ?? 0
+            if total == 0 || selection.range.location >= total { session.storySelection = nil }
+            else if NSMaxRange(selection.range) > total {
+                session.storySelection = StorySelection(story: selection.story, range: NSRange(location: selection.range.location, length: total - selection.range.location))
+            }
+        }
+    }
+
+    private func showStorySelection() {
+        for child in pageEditors.values { child.showStorySelection() }
+        placeHandles()
+    }
+
+    /// Puts the handles at both ends of the selection (hidden when an end's page is not on screen).
+    private func placeHandles() {
+        guard let selection = configuration.session?.storySelection else {
+            startHandle.isHidden = true; endHandle.isHidden = true; return
+        }
+        func rect(_ index: Int, endOfBox: Bool) -> CGRect? {
+            for child in pageEditors.values {
+                if let caret = child.storyCaretRect(index, story: selection.story, endOfBox: endOfBox) { return child.view.convert(caret, to: scroll) }
+            }
+            return nil
+        }
+        if let start = rect(selection.range.location, endOfBox: false) { startHandle.place(at: start); startHandle.isHidden = false } else { startHandle.isHidden = true }
+        if let end = rect(NSMaxRange(selection.range), endOfBox: true) { endHandle.place(at: end); endHandle.isHidden = false } else { endHandle.isHidden = true }
+        scroll.bringSubviewToFront(startHandle); scroll.bringSubviewToFront(endHandle)
+    }
+
+    /// The story character under a point of the page stack (nearest page with a box of the story).
+    private func storyIndex(at point: CGPoint, story: UUID) -> Int? {
+        let pages = pageEditors.compactMap { id, child in frames[id].map { (child, $0) } }
+            .sorted { abs($0.1.midY - point.y) < abs($1.1.midY - point.y) }
+        for (child, frame) in pages where frame.minY - gap <= point.y && point.y <= frame.maxY + gap || pages.count == 1 {
+            if let index = child.storyIndex(at: content.convert(point, to: child.view), story: story) { return index }
+        }
+        for (child, _) in pages { if let index = child.storyIndex(at: content.convert(point, to: child.view), story: story) { return index } }
+        return nil
+    }
+
+    @objc private func dragHandle(_ pan: UIPanGestureRecognizer) {
+        guard let session = configuration.session, var selection = session.storySelection, let handle = pan.view as? SelectionHandle else { return }
+        switch pan.state {
+        case .began:
+            draggingStart = handle.isStart
+            storyMenuInteraction.dismissMenu()
+        case .changed:
+            autoscroll(near: pan.location(in: view))
+            // The finger holds the knob; the text it points at is on the caret line next to it.
+            var aim = pan.location(in: scroll)
+            aim.y += draggingStart ? handle.knobOffset : -handle.knobOffset
+            guard let index = storyIndex(at: scroll.convert(aim, to: content), story: selection.story) else { return }
+            let fixed = draggingStart ? NSMaxRange(selection.range) : selection.range.location
+            guard index != fixed else { return }
+            if draggingStart ? index > fixed : index < fixed { draggingStart.toggle() }   // the ends crossed
+            selection.range = NSRange(location: min(index, fixed), length: abs(index - fixed))
+            session.storySelection = selection
+        case .ended, .cancelled:
+            presentStoryMenu()
+        default: break
+        }
+    }
+
+    /// Dragging a handle near the top or bottom edge scrolls the pages.
+    private func autoscroll(near point: CGPoint) {
+        let visibleBottom = scroll.frame.maxY - keyboardOverlap
+        var offset = scroll.contentOffset
+        if point.y > visibleBottom - 44 { offset.y += 14 } else if point.y < scroll.frame.minY + 44 { offset.y -= 14 } else { return }
+        let insets = scroll.adjustedContentInset
+        offset.y = min(max(-insets.top, offset.y), max(-insets.top, scroll.contentSize.height + insets.bottom - scroll.bounds.height))
+        scroll.setContentOffset(offset, animated: false)
+    }
+
+    private func presentStoryMenu() {
+        guard configuration.session?.storySelection != nil else { return }
+        let anchor = endHandle.isHidden ? (startHandle.isHidden ? CGPoint(x: scroll.bounds.midX, y: scroll.bounds.midY) : startHandle.center) : endHandle.center
+        storyMenuInteraction.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: anchor))
+    }
+
+    public func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                                    suggestedActions: [UIMenuElement]) -> UIMenu? { storyMenu() }
+
+    private func storyMenu() -> UIMenu {
+        func edit(_ change: StoryEdit) -> () -> Void {
+            { [weak self] in if let self, let selection = self.configuration.session?.storySelection { self.performStoryEdit(selection, change) } }
+        }
+        let copy = UIAction(title: "Copiar", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copyStorySelection() }
+        let cut = UIAction(title: "Recortar", image: UIImage(systemName: "scissors")) { [weak self] _ in
+            self?.copyStorySelection(); edit(.delete)()
+        }
+        let delete = UIAction(title: "Apagar", image: UIImage(systemName: "delete.left"), attributes: .destructive) { _ in edit(.delete)() }
+        let formats: [(String, String, TextEditingAction)] = [("Negrito", "bold", .bold), ("Itálico", "italic", .italic),
+                                                              ("Sublinhado", "underline", .underline), ("Riscado", "strikethrough", .strike)]
+        let format = UIMenu(title: "Formatar", image: UIImage(systemName: "textformat"), children: formats.map { title, symbol, action in
+            UIAction(title: title, image: UIImage(systemName: symbol)) { _ in edit(.format(action))() }
+        })
+        let all = UIAction(title: "Selecionar tudo", image: UIImage(systemName: "selection.pin.in.out")) { [weak self] _ in self?.selectWholeStory() }
+        return UIMenu(children: [copy, cut, delete, format, all])
+    }
+
+    /// The whole story as attributed text, from the page documents.
+    private func storyText(_ story: UUID) -> NSAttributedString {
+        let text = NSMutableAttributedString()
+        for editor in configuration.pages {
+            for block in editor.document.blocks.filter({ $0.parentID == nil && ($0.textFlowID ?? $0.id) == story }).sorted(by: { $0.order < $1.order }) {
+                guard case .text(let rich) = block.content else { continue }
+                text.append(TextBridge.attributed(rich, base: (try? editor.document.resolvedStyle(for: block.id)) ?? .init()))
+            }
+        }
+        return text
+    }
+
+    private func copyStorySelection() {
+        guard let selection = configuration.session?.storySelection else { return }
+        let text = storyText(selection.story)
+        let range = NSIntersectionRange(selection.range, NSRange(location: 0, length: text.length))
+        guard range.length > 0 else { return }
+        let part = text.attributedSubstring(from: range)
+        var item: [String: Any] = [UTType.utf8PlainText.identifier: part.string]
+        if let rtf = try? part.data(from: NSRange(location: 0, length: part.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+            item[UTType.rtf.identifier] = rtf
+        }
+        UIPasteboard.general.setItems([item])
+    }
+
+    private func selectWholeStory(_ story: UUID? = nil) {
+        guard let session = configuration.session, let story = story ?? session.storySelection?.story else { return }
+        let total = session.fragmentRanges.values.filter { $0.story == story }.map { NSMaxRange($0.range) }.max() ?? 0
+        guard total > 0 else { return }
+        session.storySelection = StorySelection(story: story, range: NSRange(location: 0, length: total))
+        presentStoryMenu()
+    }
+
+    private func storyCommand(_ selector: Selector, from id: UUID) -> Bool {
+        guard let session = configuration.session, let fragment = session.fragmentRanges[id] else { return false }
+        if selector == #selector(UIResponderStandardEditActions.selectAll(_:)) {
+            guard session.spansPages(fragment.story) else { return false }
+            selectWholeStory(fragment.story); return true
+        }
+        guard let selection = session.storySelection, selection.story == fragment.story else { return false }
+        switch selector {
+        case #selector(UIResponderStandardEditActions.copy(_:)): copyStorySelection()
+        case #selector(UIResponderStandardEditActions.cut(_:)): copyStorySelection(); performStoryEdit(selection, .delete)
+        case #selector(UIResponderStandardEditActions.paste(_:)):
+            guard let string = UIPasteboard.general.string else { return true }
+            performStoryEdit(selection, .replace(string))
+        default: return false
+        }
+        return true
+    }
+
+    /// Hands the edit to the host; typing and deleting end the selection with the caret after it,
+    /// formatting keeps it.
+    private func performStoryEdit(_ selection: StorySelection, _ edit: StoryEdit) {
+        guard let session = configuration.session, let onStoryEdit = configuration.onStoryEdit else { return }
+        storyMenuInteraction.dismissMenu()
+        let focus = onStoryEdit(selection.story, selection.range, edit)
+        if case .format = edit { return }
+        session.storySelection = nil
+        if let focus, session.focusRouter?(focus) != true { session.pendingFocus = focus }
+    }
+
     private func updateRuler() {
         ruler.zoom = scroll.zoomScale
         ruler.offset = scroll.contentOffset.x - (content.frame.minX + sideGap * scroll.zoomScale)
@@ -363,6 +577,36 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         case .pixels: ruler.pointsPerUnit = 72 / first.pixelsPerInch; ruler.unitName = "px"
         }
         ruler.setNeedsDisplay()
+    }
+}
+
+/// A selection handle: a line as tall as the caret with a round knob above (start) or below (end).
+@MainActor
+final class SelectionHandle: UIView {
+    let isStart: Bool
+    let knobOffset: CGFloat = 16
+    private var caretHeight: CGFloat = 20
+    init(isStart: Bool) {
+        self.isStart = isStart
+        super.init(frame: .zero)
+        backgroundColor = .clear; isOpaque = false
+        accessibilityIdentifier = isStart ? "storySelectionStart" : "storySelectionEnd"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    /// `caret` is the caret rectangle at that end, in the superview's coordinates.
+    func place(at caret: CGRect) {
+        caretHeight = max(8, caret.height)
+        let width: CGFloat = 44
+        frame = CGRect(x: caret.midX - width / 2, y: isStart ? caret.minY - knobOffset : caret.minY,
+                       width: width, height: caretHeight + knobOffset)
+        setNeedsDisplay()
+    }
+    override func draw(_ rect: CGRect) {
+        UIColor.systemBlue.setFill()
+        let lineTop = isStart ? knobOffset : 0
+        UIBezierPath(rect: CGRect(x: bounds.midX - 1, y: lineTop, width: 2, height: caretHeight)).fill()
+        let knobY = isStart ? knobOffset - 6 : caretHeight + 6
+        UIBezierPath(ovalIn: CGRect(x: bounds.midX - 6, y: knobY - 6, width: 12, height: 12)).fill()
     }
 }
 #endif

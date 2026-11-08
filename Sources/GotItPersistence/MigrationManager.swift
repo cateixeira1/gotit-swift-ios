@@ -23,7 +23,7 @@ enum MigrationManager {
                     guard let beforeData = row[2].data, let afterData = row[3].data else { throw PersistenceError.corruptData("Invalid legacy history") }
                     func prune(_ document: CanvasDocument) -> CanvasDocument {
                         var result = document
-                        let used = Set(document.blocks.compactMap { $0.content.assetHash })
+                        let used = Set(document.blocks.flatMap { $0.content.assetHashes })
                         result.assets.removeAll { $0.mediaType == "application/x-pencilkit" && !used.contains($0.hash) }
                         return result
                     }

@@ -117,3 +117,18 @@ func rejectsInvalidDimensions(_ width: Double) {
     try DocumentValidator.validate(document)
     #expect(try document.resolvedStyle(for: #require(parent)) == .init())
 }
+
+@Test func drawingPartsMustBeRegisteredAndKeepTheirAssetsInUse() throws {
+    var document = CanvasDocument(title: "Partes")
+    let base = Asset(hash: String(repeating: "a", count: 64), mediaType: "application/x-pencilkit", byteCount: 10)
+    let part = Asset(hash: String(repeating: "b", count: 64), mediaType: "application/x-pencilkit", byteCount: 4)
+    let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: 100, height: 100)),
+                            content: .drawing(.init(hash: base.hash, parts: [part.hash])))
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.registerAsset(base), .insertBlock(block)], to: document) }
+    document = try CommandEngine.applying([.registerAsset(base), .registerAsset(part), .insertBlock(block)], to: document)
+    #expect(block.content.assetHashes == [base.hash, part.hash])
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.unregisterAsset(part.hash)], to: document) }
+    // Older documents decode with no parts.
+    let old = try JSONDecoder().decode(AssetReference.self, from: Data(#"{"hash":"x"}"#.utf8))
+    #expect(old.parts == nil); #expect(old.allHashes == ["x"])
+}

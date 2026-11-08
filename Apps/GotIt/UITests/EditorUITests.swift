@@ -56,6 +56,9 @@ final class EditorUITests: XCTestCase {
         inside.tap(); inside.tap()
         app.typeText("Comprar pão")
         XCTAssertTrue(app.textViews.containing(NSPredicate(format: "value CONTAINS 'Comprar'")).firstMatch.waitForExistence(timeout: 10))
+        // Close the keyboard (it covers the bottom toolbar on iPhone).
+        let done = app.buttons["Concluir"]
+        if done.waitForExistence(timeout: 3) { done.tap() }
         insertSticker(app, "calendarSticker")
         let calendar = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Calendário,'")).firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 10)); failIfAlert(app, "calendário")

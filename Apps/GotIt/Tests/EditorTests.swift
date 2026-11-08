@@ -72,7 +72,8 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(reference.parts?.count, 3)
         let assembled = try DrawingStorage.drawing(reference, data: model.assetData)
         XCTAssertEqual(assembled.strokes.count, 5)
-        XCTAssertEqual(assembled.strokes.map { $0.path.creationDate }, ([10, 40, 80, 120, 160] as [Double]).map { stroke(CGFloat($0)).path.creationDate })
+        // In the order they were drawn: base first, then each part.
+        XCTAssertEqual(assembled.strokes.map { Double($0.path[0].location.x).rounded() }, [10, 40, 80, 120, 160])
         // Each part holds only its own stroke.
         for hash in try XCTUnwrap(reference.parts) { XCTAssertEqual(try PKDrawing(data: XCTUnwrap(model.assetData(hash))).strokes.count, 1) }
         // Reopened from disk, the same five strokes.

@@ -47,6 +47,42 @@ branca, inclusive quando os controles acompanham o modo escuro.
   figuras sintéticas (300 de cada): caixas 299, círculos/elipses 300,
   triângulos 297, nenhuma do tipo errado; 0 de 3.600 letras viraram forma. Falta
   medir com traços reais.
+- Ajustes de 08/11/2026, após o terceiro teste em aparelho:
+  - Formas lado a lado: um traço logo ao lado de uma figura recém-convertida não a
+    desfaz mais na hora. Na pausa seguinte, se esses traços formam (ou começam) outra
+    figura, mesmo tosca (reconhecimento com tolerância de "segurar"), a primeira
+    fica; só escrita a devolve à tinta. Os vizinhos são avaliados em grupo: uma
+    caixa desenhada em vários traços ao lado não conta como escrita.
+  - Triângulos de qualquer forma (retângulo, escaleno, apontando para qualquer
+    lado): os cantos desenhados são mantidos em `Shape.vertices` (frações do
+    quadro); um lado a menos de ~11° da horizontal/vertical fica exato, e um vértice
+    perto do meio ou da ponta da base vai para lá. Um triângulo apontando para baixo
+    não é mais girado 180° (o texto dentro fica em pé). Canto aberto: três lados
+    retos cujo primeiro e último, prolongados, se encontram perto das pontas. Lados
+    tortos: o contorno fica perto dos três lados (até 17% do lado), cada canto é uma
+    virada real do traço (≥ 34°) e no máximo um lado abaulado para fora (um meio
+    disco tem o topo redondo). Medido (300 de cada): forma qualquer 300, para antes
+    do início 285, as duas pontas curtas 300, canto aberto entre dois traços 298,
+    lados tortos 299, três traços 300; nenhum de outro tipo. Não viraram triângulo
+    0 de 3.000 letras de traços retos (Z, N, 4, A, V, W, M, 7, 2) e 13 de 300 meios
+    discos (só arcos altos e pontudos). Caixas, círculos e letras mantiveram as
+    taxas anteriores.
+  - Conectores: um traço que vai de uma figura a outra (reto ou levemente curvo,
+    sem voltar; pontas a até 22 pt de tela de cada figura) vira conector reto, mesmo
+    curto ou desenhado antes de as figuras converterem: na pausa as figuras
+    convertem primeiro e as linhas depois. Os lados de uma caixa em vários traços
+    terminam no mesmo grupo e continuam lados.
+- Stickers desenhados (08/11/2026, `Stickers.swift`): post-it (`ShapeKind.stickyNote`)
+  com caixa de texto dentro, cinco cores de papel (amarelo padrão; menu "Cor do
+  post-it"), faixa colada no topo, sombra sob a borda solta e canto inferior direito
+  levantado; calendário (`ShapeKind.calendar`, dia em `Shape.date`, "aaaa-mm-dd" no
+  calendário do usuário) no estilo do emoji de calendário, com o dia de hoje ao
+  inserir; tocar de novo no calendário selecionado (ou "Alterar data…") abre o
+  seletor de data. Documentos antigos abrem sem mudança (campos opcionais).
+- Teia: uma página embutida mostra todos os seus objetos (ela só existe quando está
+  perto da tela) e é redesenhada quando recebe o tamanho real; antes, a primeira
+  renderização acontecia com o tamanho provisório da view e podia deixar cartões de
+  fora ao voltar de uma nota. A causa exata no aparelho não foi reproduzida aqui.
 
 ## Persistência e compatibilidade
 
@@ -66,7 +102,7 @@ texto automaticamente; objetos de mídia continuam excluindo texto por padrão.
 ## Limites restantes
 
 Não há paginação automática do texto, exclusão/reordenação de páginas, edição
-interna de PDFs, galeria própria de stickers, pastas persistidas, OCR matemático,
+interna de PDFs, pastas persistidas, OCR matemático,
 SLM integrado ou medições em aparelho físico nesta entrega. Assets antigos são
 preservados para undo e não têm coleta de lixo; snapshots completos de desenho e
 histórico exigem otimização antes de notas grandes. As miniaturas usam o mesmo

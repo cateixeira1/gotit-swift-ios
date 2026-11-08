@@ -544,6 +544,30 @@ final class EditorTests: XCTestCase {
         window.isHidden = true
     }
 
+    func testAnObjectDroppedOnTheNextPageMovesThere() throws {
+        var document = CanvasDocument(title: "Mover")
+        document = try CommandEngine.applying([.appendPage(CanvasPage(title: "Página 2"))], to: document)
+        let session = EditorSession()
+        let editors = try document.pages.map { CanvasEditor(document: try document.pageDocument($0.id), onCommands: { _ in }) }
+        let controller = PagedCanvasViewController(configuration: PagedCanvasEditor(
+            pages: editors, tool: .select, session: session, focusPageID: document.pages.first?.id, onVisiblePage: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        let first = try XCTUnwrap(controller.children.compactMap { $0 as? CanvasViewController }.first { $0.view.frame.minY < 100 })
+        let height = document.canvas.size.height
+        // Dragged 60 points past the bottom of page 1 (beyond the gap): lands near the top of page 2.
+        let drop = try XCTUnwrap(session.pageForDrop?(first, CGRect(x: 100, y: height + 60, width: 120, height: 120)))
+        XCTAssertEqual(drop.page, document.pages[1].id)
+        XCTAssertEqual(drop.origin.x, 100, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(drop.origin.y, 0); XCTAssertLessThan(drop.origin.y, 60)
+        // Moved within its own page: stays.
+        XCTAssertNil(session.pageForDrop?(first, CGRect(x: 100, y: 300, width: 120, height: 120)))
+        window.isHidden = true
+    }
+
     func testIncrementalReflowMatchesTheFullLayout() throws {
         var document = CanvasDocument(title: "Reflow", defaultStyle: .init(fontSize: 18))
         var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: document.canvas.size.width - 48, height: 44)),

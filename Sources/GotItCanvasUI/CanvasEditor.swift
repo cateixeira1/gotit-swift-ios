@@ -217,6 +217,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 1
             scroll.isScrollEnabled = false; scroll.delaysContentTouches = false
             scroll.backgroundColor = .clear; view.backgroundColor = .clear
+            // An object dragged toward another page stays visible past this page's edge.
+            scroll.clipsToBounds = false
             ruler.isHidden = true
         }
         render()
@@ -565,7 +567,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private func perform(_ action: TextEditingAction) {
         switch action {
         case .insertText: insertText(at: CGPoint(x: 24, y: max(24, scroll.contentOffset.y / scroll.zoomScale + 24))); return
-        case .insertTable: insertTable(at: CGPoint(x: 24, y: max(24, scroll.contentOffset.y / scroll.zoomScale + 24))); return
+        case .insertTable:
+            let probe = CanvasTable(rows: 3, columns: 3, width: min(480, configuration.document.canvas.size.width - 48))
+            let spot = Placement.firstFreeSpot(width: probe.width, height: probe.height, on: configuration.document)
+            insertTable(at: CGPoint(x: spot.x, y: spot.y)); return
         case .fitPage: fitPage(); return
         case .zoom(let factor): scroll.setZoomScale(min(scroll.maximumZoomScale, max(scroll.minimumZoomScale, scroll.zoomScale * factor)), animated: true); return
         case .finish: activeText?.resignFirstResponder(); usingTool = false; saveDrawing(); return
@@ -1276,9 +1281,19 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     @objc private func moveObject(_ gesture: UIPanGestureRecognizer) {
         guard let object = gesture.view as? CanvasObjectView, let id = object.id,
               var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
-        if gesture.state == .began { movingID = id; moveOrigin = object.center }
+        if gesture.state == .began { movingID = id; moveOrigin = object.center; configuration.session?.objectDragBegan?(self) }
         let delta = gesture.translation(in: surface)
         if gesture.state == .changed { object.center = CGPoint(x: moveOrigin.x + delta.x, y: moveOrigin.y + delta.y) }
+        // Dropped on another page: the object moves there (a whole root object, not a text story box).
+        if gesture.state == .ended, block.parentID == nil, block.textFlowID == nil,
+           let target = configuration.session?.pageForDrop?(self, object.superview?.convert(object.frame, to: view) ?? object.frame) {
+            block.pageID = target.page
+            block.layout.mode = .absolute
+            block.layout.frame.x = target.origin.x; block.layout.frame.y = target.origin.y
+            if selectedObjectID == id { selectedObjectID = nil }
+            configuration.onCommands([.replaceBlock(block)]); movingID = nil
+            return
+        }
         if gesture.state == .ended {
             if block.layout.mode == .flow, let world = frames[id] {
                 let parent = block.parentID.flatMap { frames[$0] }

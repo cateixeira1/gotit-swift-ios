@@ -424,32 +424,41 @@ final class AppModel {
             let decoded = image(asset.hash)
             let aspect = Double((decoded?.size.height ?? 200) / max(1, decoded?.size.width ?? 240))
             let width = min(240, current.canvas.size.width * 0.6)
-            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 80, width: width, height: width * aspect)), content: sticker ? .sticker(.init(hash: asset.hash)) : .image(.init(hash: asset.hash)))
+            let spot = freeSpot(width: width, height: width * aspect, pageID: pageID, in: current)
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: width, height: width * aspect)), content: sticker ? .sticker(.init(hash: asset.hash)) : .image(.init(hash: asset.hash)))
             enqueue((current.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
         } catch { self.error = String(describing: error) }
     }
 
-    /// Built-in stickers (rendered emoji): no picker, inserted at a fixed spot and selected.
+    /// Built-in stickers (rendered emoji): no picker, inserted at the first free spot and selected.
     func insertSticker(png data: Data, pageID: UUID, documentID: UUID) {
         do {
             guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
             let asset = try storeAsset(data, mediaType: "image/png")
-            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 40, y: 80, width: 120, height: 120)),
+            let spot = freeSpot(width: 120, height: 120, pageID: pageID, in: current)
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: 120, height: 120)),
                                     content: .sticker(.init(hash: asset.hash)), presentation: .init(wrap: .none))
             enqueue((current.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)],
                     pageID: pageID, documentID: documentID)
         } catch { self.error = String(describing: error) }
     }
 
-    /// Drawn stickers: a yellow post-it with a text box, or a calendar showing today. Inserted at a
-    /// fixed spot of the page and selected, like the emoji stickers.
+    /// Drawn stickers: a yellow post-it with a text box, or a calendar showing today. Inserted at
+    /// the first free spot of the page and selected, like the emoji stickers.
     func insertStickyNote(pageID: UUID, documentID: UUID) {
         guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
-        enqueue(Stickers.stickyNote(at: .init(x: 40, y: 80), order: nextRootOrder(in: current)), pageID: pageID, documentID: documentID)
+        let spot = freeSpot(width: Stickers.stickyNoteSide, height: Stickers.stickyNoteSide, pageID: pageID, in: current)
+        enqueue(Stickers.stickyNote(at: spot, order: nextRootOrder(in: current)), pageID: pageID, documentID: documentID)
     }
     func insertCalendar(pageID: UUID, documentID: UUID) {
         guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
-        enqueue(Stickers.calendar(at: .init(x: 40, y: 80), order: nextRootOrder(in: current)), pageID: pageID, documentID: documentID)
+        let spot = freeSpot(width: Stickers.calendarSize.width, height: Stickers.calendarSize.height, pageID: pageID, in: current)
+        enqueue(Stickers.calendar(at: spot, order: nextRootOrder(in: current)), pageID: pageID, documentID: documentID)
+    }
+    /// First free spot from the page's top-left corner (see `Placement`).
+    private func freeSpot(width: Double, height: Double, pageID: UUID, in document: CanvasDocument) -> CanvasPoint {
+        guard let page = try? document.pageDocument(pageID) else { return .init(x: Placement.margin, y: Placement.margin) }
+        return Placement.firstFreeSpot(width: width, height: height, on: page)
     }
     private func nextRootOrder(in document: CanvasDocument) -> Int {
         (document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
@@ -463,7 +472,8 @@ final class AppModel {
             let data = try Data(contentsOf: url)
             guard let pdf = PDFDocument(data: data), pdf.pageCount > 0, !pdf.isLocked else { throw DocumentError.invalid("PDF vazio, protegido ou inválido") }
             let asset = try storeAsset(data, mediaType: "application/pdf")
-            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 80, width: 240, height: 340)), content: .pdf(.init(hash: asset.hash, caption: url.lastPathComponent)))
+            let spot = freeSpot(width: 240, height: 340, pageID: pageID, in: document)
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: 240, height: 340)), content: .pdf(.init(hash: asset.hash, caption: url.lastPathComponent)))
             enqueue((document.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
         } catch { self.error = String(describing: error) }
     }

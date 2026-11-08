@@ -97,6 +97,11 @@ public final class EditorSession {
     @ObservationIgnored var storyCommand: ((Selector, UUID) -> Bool)?
     /// The edit menu for a selection across pages.
     @ObservationIgnored var storyMenu: (() -> UIMenu)?
+    /// An object drag started on a page (that page is brought above its neighbours).
+    @ObservationIgnored var objectDragBegan: ((CanvasViewController) -> Void)?
+    /// For an object dropped at `frame` (in that page's view): the other page under it and the
+    /// object's origin there, or nil to keep it on its own page.
+    @ObservationIgnored var pageForDrop: ((CanvasViewController, CGRect) -> (page: UUID, origin: CGPoint)?)?
     /// Stories with more than one box: only those use the selection across pages.
     func spansPages(_ story: UUID) -> Bool { fragmentRanges.values.filter { $0.story == story }.count > 1 }
     public init() {

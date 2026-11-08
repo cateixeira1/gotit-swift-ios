@@ -350,6 +350,8 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
             return child.claimFocus(focus)
         }
         session.revealCaret = { [weak self] in self?.revealCaretSoon() }
+        session.objectDragBegan = { [weak self] child in self?.content.bringSubviewToFront(child.view) }
+        session.pageForDrop = { [weak self] child, rect in self?.pageForDrop(child, rect) }
         if configuration.onStoryEdit != nil {
             session.storySelectionChanged = { [weak self] in self?.showStorySelection() }
             session.storyEdit = { [weak self] selection, edit in self?.performStoryEdit(selection, edit) }
@@ -387,6 +389,24 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
             let target = pageEditors.values.first(where: \.hasActiveText) ?? currentPageID.flatMap { pageEditors[$0] }
             target?.performAction(action)
         }
+    }
+
+    // MARK: Moving objects between pages
+
+    /// The page under the centre of an object dropped by `child`, if it is another page, and the
+    /// object's origin in that page (kept inside it).
+    private func pageForDrop(_ child: CanvasViewController, _ rect: CGRect) -> (page: UUID, origin: CGPoint)? {
+        guard let source = pageEditors.first(where: { $0.value === child })?.key else { return nil }
+        let dropped = child.view.convert(rect, to: content)
+        let center = CGPoint(x: dropped.midX, y: dropped.midY)
+        let candidates = order.compactMap { id in frames[id].map { (id, $0) } }
+        guard let found = candidates.first(where: { $0.1.insetBy(dx: -gap / 2, dy: -gap / 2).contains(center) })
+                ?? candidates.min(by: { abs($0.1.midY - center.y) < abs($1.1.midY - center.y) }),
+              found.0 != source else { return nil }
+        let (target, frame) = found
+        let x = min(max(0, dropped.minX - frame.minX), max(0, frame.width - dropped.width))
+        let y = min(max(0, dropped.minY - frame.minY), max(0, frame.height - dropped.height))
+        return (target, CGPoint(x: x, y: y))
     }
 
     // MARK: Selection across pages

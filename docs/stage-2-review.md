@@ -176,3 +176,35 @@ assertion"); a primeira falha fica no pacote de resultados.
 A estratégia de retomada dos recursos adiados está em [workflow.md](workflow.md).
 Teia entra após catálogo/indexação; equações após estabilização da tinta e
 validação do reconhecimento, com reavaliação na inteligência local se necessário.
+
+## Quinto teste no aparelho e rodada 2 (08/11/2026)
+
+Correções (a7b5fc7): calendário em folha no iPhone e popover sem adaptação no iPad
+(o popover adaptado travava); stickers, post-it, calendário, imagens e PDFs entram no
+primeiro espaço livre a partir do canto superior esquerdo (`Placement`, texto vazio
+ignorado, sobrepõe só com a página cheia); objetos arrastados para outra página mudam
+de página.
+
+Funções novas:
+
+- **Tabelas** (7c7ccf7): toque na primeira célula de uma linha (coluna 1) ou coluna
+  (linha 1) seleciona a linha/coluna (faixa azul e alça na borda final para
+  estreitar/alargar); toque duplo rápido oferece Duplicar/Excluir; segundo toque
+  lento edita a célula. Botões "+" abaixo e à direita da tabela selecionada. Toque
+  longo: Nova linha, Nova coluna, Editar célula, submenus Linha n / Coluna n
+  (inserir, duplicar, ajustar, excluir) e Aparência. Texto justificado por padrão.
+- **Lixeira** (57a3676): deslizar para a esquerda numa nota ou Teia mostra a
+  lixeira em vermelho; deslizar até o fim ou tocar apaga. Esquema v7 com a tabela
+  `trash`: o documento fica inteiro (conteúdo e histórico) até ser restaurado ou
+  apagado para sempre (com confirmação) ou a Lixeira ser esvaziada. Nada é apagado
+  automaticamente por tempo.
+- **Remover fundo / vetorizar** (4fdf7bf): fotos usam o recorte de sujeito do Vision
+  (`VNGenerateForegroundInstanceMaskRequest`, iOS 17); desenhos em papel ou quadro
+  branco (ou quando o Vision não encontra sujeito) têm o papel tornado transparente
+  (limiar de Otsu). A vetorização traça a linha média de cada traço
+  (máscara de tinta, distância chanfrada para a espessura, afinamento Zhang–Suen,
+  rastreamento, junção nos cruzamentos, Douglas–Peucker) e cria traços de caneta do
+  PencilKit editáveis no lugar da imagem (um passo de desfazer). Escolhido em vez de
+  `VNDetectContoursRequest` porque contornos circundam cada linha (viraria duas) e em
+  vez de Rembg/Potrace/AutoTrace (Python; Potrace GPL; AutoTrace GPL/LGPL).
+  O recorte do Vision não roda no simulador: só o caminho do papel é testado no CI.

@@ -433,6 +433,47 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// The note's strokes as JSON (ink left as ink, and the original strokes of shapes and
+    /// connectors made from ink), so recognition can be tuned on the user's own handwriting.
+    func exportInk(of document: CanvasDocument) throws -> URL {
+        var strokes: [InkSampleFile.Stroke] = []
+        func rounded(_ value: Double) -> Double { (value * 10).rounded() / 10 }
+        for (index, page) in document.pages.enumerated() {
+            let projection = try document.pageDocument(page.id)
+            for block in projection.blocks {
+                switch block.content {
+                case .drawing(let ref):
+                    guard let data = assetData(ref.hash) else { continue }
+                    for stroke in try PKDrawing(data: data).strokes {
+                        let points = stroke.path.map { point -> [Double] in
+                            let location = point.location.applying(stroke.transform)
+                            return [rounded(location.x), rounded(location.y), (point.timeOffset * 1000).rounded() / 1000]
+                        }
+                        strokes.append(.init(kind: "tinta", page: index + 1, points: points))
+                    }
+                case .shape(let shape):
+                    guard let original = shape.originalStroke else { continue }
+                    strokes.append(.init(kind: shape.kind.rawValue, page: index + 1, points: original.points.map { [rounded($0.x), rounded($0.y), 0] }))
+                default: continue
+                }
+            }
+            for relation in projection.relations {
+                guard let original = relation.originalStroke else { continue }
+                strokes.append(.init(kind: "conector", page: index + 1, points: original.points.map { [rounded($0.x), rounded($0.y), 0] }))
+            }
+        }
+        guard !strokes.isEmpty else { throw DocumentError.invalid("Esta nota não tem traços desenhados.") }
+        var system = utsname(); uname(&system)
+        let machine = withUnsafeBytes(of: &system.machine) { raw in String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self) }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let file = InkSampleFile(app: "Got It! \(version)", device: "\(machine), iOS \(UIDevice.current.systemVersion)", exportedAt: Date(), strokes: strokes)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let name = document.title.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: "-")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("GotIt-tracos-\(name.isEmpty ? "nota" : name).json")
+        try encoder.encode(file).write(to: url, options: .atomic)
+        return url
+    }
+
     func pagePreview(_ page: CanvasDocument) -> UIImage {
         PagePreview.image(document: page, asset: image, drawingData: assetData)
     }
@@ -450,6 +491,8 @@ struct AppScreen: View {
     @State private var showPage = false
     @State private var equation = "x² - 5x + 6 = 0"
     @State private var showEquation = false
+    @State private var showDiagnostics = false
+    @State private var sharing: ShareFile?
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $preferredColumn) {
             List {
@@ -507,10 +550,19 @@ struct AppScreen: View {
                                 Menu("Adicionar nota à Teia") { ForEach(model.summaries.filter { $0.kind == .note }) { summary in Button(summary.title) { model.addNote(summary) } } }
                             }
                             if document.canvas.solveEquations { Button("Resolver equação digitada") { showEquation = true } }
+                            Divider()
+                            Button("Exportar traços desta nota", systemImage: "scribble") {
+                                do { sharing = ShareFile(url: try model.exportInk(of: document)) }
+                                catch let DocumentError.invalid(text) { model.error = text }
+                                catch { model.error = String(describing: error) }
+                            }
+                            Button("Medir desempenho do aparelho", systemImage: "speedometer") { showDiagnostics = true }
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityIdentifier("documentOptions")
                     }
                 }
                 .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.enqueueReflowing([.setCanvasSettings($0)]) } }
+                .sheet(isPresented: $showDiagnostics) { DiagnosticsView() }
+                .sheet(item: $sharing) { file in ActivitySheet(url: file.url) }
                 .alert("Equação de uma incógnita", isPresented: $showEquation) {
                     TextField("Ex.: x² - 5x + 6 = 0", text: $equation)
                     Button("Resolver") { solveEquation(document) }

@@ -355,6 +355,40 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(try story(), pasted)
     }
 
+    func testInkExportCarriesTheOriginalStrokesOfShapes() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let document = try XCTUnwrap(model.document)
+        let stroke = InkStroke(points: [.init(x: 0, y: 0), .init(x: 120, y: 2), .init(x: 118, y: 80), .init(x: 1, y: 79), .init(x: 0, y: 1)])
+        let box = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 40, y: 40, width: 120, height: 80)),
+                              content: .shape(.init(kind: .rectangle, originalStroke: stroke)))
+        model.enqueue([.insertBlock(box)], pageID: try XCTUnwrap(document.pages.first?.id), documentID: document.id)
+        while model.isSaving { await Task.yield() }
+        let url = try model.exportInk(of: try XCTUnwrap(model.document))
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let file = try decoder.decode(InkSampleFile.self, from: Data(contentsOf: url))
+        XCTAssertEqual(file.strokes.count, 1)
+        XCTAssertEqual(file.strokes.first?.kind, "rectangle")
+        XCTAssertEqual(file.strokes.first?.points.count, 5)
+        XCTAssertEqual(file.strokes.first?.page, 1)
+    }
+
+    /// Runs the on-device measurement once (here in the simulator) and prints it in the test log.
+    func testDeviceMeasurementRunsAndReportsEveryPart() async throws {
+        var steps: [String] = []
+        let lines = await DevicePerformance.run { steps.append($0) }
+        let report = DevicePerformance.report(lines)
+        print("MEDICAO\n" + report)
+        XCTAssertFalse(lines.contains { $0.title == "Medição interrompida" }, report)
+        XCTAssertTrue(lines.contains { $0.title.hasPrefix("Digitar no fim") })
+        XCTAssertTrue(lines.contains { $0.title.hasPrefix("Gravar no banco") })
+        XCTAssertTrue(lines.contains { $0.title.hasPrefix("Salvar desenho") })
+        XCTAssertTrue(lines.contains { $0.title == "Memória" })
+        XCTAssertGreaterThanOrEqual(steps.count, 5)
+        XCTAssertEqual(DevicePerformance.summary([3, 1, 2]), "mediana 2,0 ms · p95 3,0 ms · máx 3,0 ms")
+    }
+
     func testOffscreenBlocksAreNotInstantiated() {
         var document = CanvasDocument(title: "Viewport")
         for i in 0..<1000 {

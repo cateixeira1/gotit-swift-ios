@@ -28,6 +28,9 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var image: (String) -> UIImage?
     public var note: (UUID) -> NoteCardPresentation?
     public var onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)?
+    /// Backspace at the start of a continuation box: joins it to the previous page's text. The page
+    /// projection does not hold other pages' boxes, so the host resolves it on the whole note.
+    public var onBackspaceAtStart: ((UUID, String?) -> TextFlowFocus?)?
     public var onCommands: ([DocumentCommand]) -> Void
     public var onOpenPDF: (UUID) -> Void
     public var onOpenNote: (UUID) -> Void
@@ -42,6 +45,7 @@ public struct CanvasEditor: UIViewControllerRepresentable {
                 image: @escaping (String) -> UIImage? = { _ in nil },
                 note: @escaping (UUID) -> NoteCardPresentation? = { _ in nil },
                 onTextCommands: ((CanvasBlock, String?, NSRange) -> TextFlowFocus?)? = nil,
+                onBackspaceAtStart: ((UUID, String?) -> TextFlowFocus?)? = nil,
                 onCommands: @escaping ([DocumentCommand]) -> Void,
                 onOpenPDF: @escaping (UUID) -> Void = { _ in },
                 onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in },
@@ -50,7 +54,7 @@ public struct CanvasEditor: UIViewControllerRepresentable {
         self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
         self.drawingData = drawingData; self.onDrawing = onDrawing
         self.onOpenPDF = onOpenPDF
-        self.onTextCommands = onTextCommands
+        self.onTextCommands = onTextCommands; self.onBackspaceAtStart = onBackspaceAtStart
         self.document = document; self.tool = tool; self.image = image; self.note = note
         self.onCommands = onCommands; self.onOpenNote = onOpenNote; self.onError = onError
     }
@@ -63,6 +67,17 @@ public struct CanvasEditor: UIViewControllerRepresentable {
 /// covers hardware keyboards. Marked text (IME composition) is never intercepted.
 final class FlowTextView: UITextView {
     var backspaceAtStart: (() -> Bool)?
+    /// Story boxes grow with their text (pagination sizes them), so they never scroll their own
+    /// content. Scrolling here hid the first lines whenever a line arrived before the box grew.
+    /// Other text (inside a shape, say) keeps a fixed box and may scroll.
+    var pinsContent = false
+    override var contentOffset: CGPoint {
+        get { super.contentOffset }
+        set { super.contentOffset = pinsContent ? .zero : newValue }
+    }
+    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+        super.setContentOffset(pinsContent ? .zero : contentOffset, animated: pinsContent ? false : animated)
+    }
     override func deleteBackward() {
         if selectedRange.location == 0, selectedRange.length == 0, markedTextRange == nil,
            backspaceAtStart?() == true { return }
@@ -82,13 +97,23 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var usingTool = false
     private var lastDrawingData = PKDrawing().dataRepresentation()
     private var strokesAtStart = 0
-    /// Finger tap over the ink layer: selects objects, places the caret, or starts a text block.
+    /// Finger tap over the ink layer while an Apple Pencil draws: same meaning as in cursor mode.
     private var inkTap: UITapGestureRecognizer?
+    /// Never recognizes anything; it only notices the first Apple Pencil touch.
+    private let pencilWatcher = UITapGestureRecognizer()
     /// Blocks seen in the previous render, to select a freshly inserted image or table.
     private var knownBlockIDs: Set<UUID>?
     private var lastTool: CanvasTool?
-    /// Bumped to cancel a delayed save of a tap-sized dot.
-    private var dotSaveGeneration = 0
+    /// Strokes whose meaning was already decided (keyed by creation time); loaded strokes count.
+    private var classifiedStrokes: Set<Double> = []
+    private var toolEndedAt = Date.distantPast
+    /// Recent finished strokes: the context that tells writing from figures and dots from taps.
+    private var recentInk: [Double: InkSample] = [:]
+    /// Strokes waiting for a pause to decide whether they form a figure.
+    private var awaitingShape: [Double] = []
+    private var shapeCheckGeneration = 0
+    /// The last figure made without an explicit gesture; undone if writing continues beside it.
+    private var lastConversion: (shapeID: UUID, strokes: [PKStroke], bounds: LogicalRect, at: Double)?
     /// Document revision when each text view last sent its content. A configuration that is not
     /// newer than that is stale (SwiftUI can re-render before the host's update arrives) and must
     /// not overwrite what the user is typing, or the caret jumps behind the last letters.
@@ -159,6 +184,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         inkTap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]   // finger only; Pencil taps stay dots
         inkTap.cancelsTouchesInView = false; inkTap.delegate = self
         ink.addGestureRecognizer(inkTap); self.inkTap = inkTap
+        pencilWatcher.delegate = self; pencilWatcher.cancelsTouchesInView = false
+        ink.addGestureRecognizer(pencilWatcher)
         bindSession()
         surface.addSubview(ink)
         if embedded {
@@ -226,15 +253,22 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             if case .drawing = block.content { continue }
             guard ids.contains(block.id), let logical = frames[block.id] else { continue }
             let blockView: UIView
+            var keepFrame = false
             if case .text(let richText) = block.content {
                 let isNew = blockViews[block.id] == nil
                 let textView = (blockViews[block.id] as? UITextView) ?? makeTextView(id: block.id)
+                if let flow = textView as? FlowTextView {
+                    flow.pinsContent = block.textFlowID != nil && block.parentID == nil
+                    if flow.pinsContent, flow.contentOffset != .zero { flow.contentOffset = .zero }
+                }
                 if richText.plainText.isEmpty, !textView.isFirstResponder {
                     let style = (try? configuration.document.resolvedStyle(for: block.id)) ?? .init()
                     textView.typingAttributes = [.font: UIFont.systemFont(ofSize: style.fontSize ?? 18), .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
                 }
                 let rendered = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init())
                 let stale = textView.isFirstResponder && (sentRevision[block.id].map { configuration.document.revision <= $0 } ?? false)
+                // The box being typed in was already resized locally; an older layout must not shrink it.
+                keepFrame = stale && blockViews[block.id] === textView
                 if !stale, textView.markedTextRange == nil, !rendered.isEqual(to: textView.attributedText ?? NSAttributedString(string: "")) {
                     let selection = textView.selectedRange
                     textView.attributedText = rendered
@@ -250,12 +284,6 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     path.close(); return path
                 }
                 blockView = textView
-                if let focus = configuration.session?.pendingFocus, focus.blockID == block.id {
-                    configuration.session?.pendingFocus = nil
-                    Task { @MainActor [weak textView] in
-                        textView?.becomeFirstResponder(); textView?.selectedRange = focus.range
-                    }
-                }
                 if isNew, richText.plainText.isEmpty, pendingFocusID == block.id {
                     pendingFocusID = nil
                     Task { @MainActor [weak textView] in textView?.becomeFirstResponder() }
@@ -274,9 +302,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             }
             if let previous = blockViews[block.id], previous !== blockView { previous.removeFromSuperview() }
             blockViews[block.id] = blockView
-            blockView.transform = .identity
-            blockView.frame = CGRect(x: logical.x, y: logical.y, width: logical.width, height: logical.height)
-            blockView.transform = CGAffineTransform(rotationAngle: block.effectivePresentation.rotationRadians)
+            if !keepFrame {
+                blockView.transform = .identity
+                blockView.frame = CGRect(x: logical.x, y: logical.y, width: logical.width, height: logical.height)
+                blockView.transform = CGAffineTransform(rotationAngle: block.effectivePresentation.rotationRadians)
+            }
             if blockView.superview == nil { surface.addSubview(blockView) }
             surface.bringSubviewToFront(blockView)
         }
@@ -318,7 +348,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             ink.tool = configuration.tool.nativeTool(color: configuration.inkColor, width: configuration.inkWidth, vectorEraser: configuration.vectorEraser)
             inkToolSignature = signature
         }
-        scroll.panGestureRecognizer.minimumNumberOfTouches = configuration.tool.isDrawing ? 2 : 1
+        applyInputMode()
         // Only switching to a pen ends typing; re-renders while typing in pen mode must not.
         if configuration.tool.isDrawing, let previous = lastTool, !previous.isDrawing { activeText?.resignFirstResponder() }
         lastTool = configuration.tool
@@ -390,18 +420,80 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         // or the table drawing hides what is being typed.
         if let cellEditor { surface.bringSubviewToFront(cellEditor) }
         updateRuler()
+        claimPendingFocus()
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        claimPendingFocus()
+    }
+
+    /// With an Apple Pencil, fingers never draw: they scroll with one finger and tap like the cursor.
+    /// Without one (iPhone), the finger is the pen and taps are read from the stroke itself.
+    func applyInputMode() {
+        let pencil = configuration.session?.prefersPencil ?? false
+        let policy: PKCanvasViewDrawingPolicy = pencil ? .pencilOnly : .anyInput
+        if ink.drawingPolicy != policy { ink.drawingPolicy = policy }
+        inkTap?.isEnabled = pencil
+        scroll.panGestureRecognizer.minimumNumberOfTouches = configuration.tool.isDrawing && !pencil && ink.isUserInteractionEnabled ? 2 : 1
+    }
+    /// True while one-finger drags on this page draw ink (scrolling then needs two fingers).
+    var fingerDraws: Bool { ink.isUserInteractionEnabled && ink.drawingPolicy == .anyInput }
+
+    /// The caret moved to a box on this page (another page overflowed into it, or backspace joined
+    /// it). Taking focus here, synchronously, keeps the next keystrokes in the right box.
+    func claimPendingFocus() {
+        guard let focus = configuration.session?.pendingFocus, blockViews[focus.blockID] != nil, view.window != nil else { return }
+        _ = claimFocus(focus)
+    }
+    func claimFocus(_ focus: TextFlowFocus) -> Bool {
+        guard let textView = blockViews[focus.blockID] as? UITextView, textView.window != nil else { return false }
+        let base = (try? configuration.document.resolvedStyle(for: focus.blockID)) ?? .init()
+        let rendered = TextBridge.attributed(focus.text, base: base)
+        if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered }
+        if let frame = focus.frame { resize(textView, to: frame) }
+        // Read the keys typed meanwhile before clearing the pending move (clearing drops the queue).
+        let queued = configuration.session?.queuedInput ?? []
+        configuration.session?.queuedInput.removeAll()
+        if configuration.session?.pendingFocus?.blockID == focus.blockID { configuration.session?.pendingFocus = nil }
+        // Until the host's update for this move arrives, renders carry older text for this box.
+        sentRevision[focus.blockID] = configuration.document.revision
+        if !textView.isFirstResponder { textView.becomeFirstResponder() }
+        let length = textView.attributedText.length
+        let location = min(focus.range.location, length)
+        textView.selectedRange = NSRange(location: location, length: min(focus.range.length, length - location))
+        for key in queued {
+            switch key {
+            case .insert(let text): textView.insertText(text)
+            case .deleteBackward: textView.deleteBackward()
+            }
+        }
+        configuration.session?.revealCaret?()
+        return true
+    }
+    /// Grows or shrinks a story box at once, before the host re-renders, so no line is clipped.
+    private func resize(_ textView: UITextView, to frame: LogicalRect) {
+        let rotation = textView.transform
+        textView.transform = .identity
+        textView.frame = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        textView.transform = rotation
     }
 
     /// Pens own the page unless the user is typing, editing a cell or has an object selected;
     /// then touches reach text views, handles and objects (move/resize) instead of drawing.
     private func updateInkInteraction() {
-        ink.isUserInteractionEnabled = configuration.tool.isDrawing && activeText == nil && cellEditor == nil && selectedObjectID == nil
+        let enabled = configuration.tool.isDrawing && activeText == nil && cellEditor == nil && selectedObjectID == nil
+        guard ink.isUserInteractionEnabled != enabled else { return }
+        ink.isUserInteractionEnabled = enabled
+        applyInputMode()
+        configuration.session?.interactionChanged?()
     }
 
     private func bindSession() {
         // Stacked pages share one session; the container routes toolbar actions to the right page.
         guard !embedded else { return }
         configuration.session?.handler = { [weak self] action in self?.perform(action) }
+        configuration.session?.focusRouter = { [weak self] focus in self?.claimFocus(focus) ?? false }
     }
 
     private func fitPage() {
@@ -476,52 +568,208 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             } else { data = PKDrawing().dataRepresentation() }
             let drawing = try PKDrawing(data: data)
             applyingDrawing = true; ink.drawing = drawing; applyingDrawing = false
+            drawing.strokes.forEach { classifiedStrokes.insert(Self.key($0)) }
             loadedDrawingHash = hash; lastDrawingData = data
         } catch { configuration.onError(error) }
     }
 
     public func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
         usingTool = true; strokesAtStart = canvasView.drawing.strokes.count
+        shapeCheckGeneration += 1          // writing continues: wait for the next pause
     }
     public func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
-        usingTool = false
+        usingTool = false; toolEndedAt = Date()
         // PencilKit can deliver the final drawing change after the tool-end callback.
-        Task { @MainActor [weak self] in await Task.yield(); self?.scheduleSave() }
+        Task { @MainActor [weak self] in await Task.yield(); self?.processInk() }
     }
     public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !applyingDrawing, !usingTool else { return }
-        Task { @MainActor [weak self] in await Task.yield(); self?.scheduleSave() }
+        Task { @MainActor [weak self] in await Task.yield(); self?.processInk() }
     }
-    private func saveDrawing() {
-        guard !usingTool, !applyingDrawing else { return }
-        var drawing = ink.drawing
-        guard drawing.dataRepresentation() != lastDrawingData else { return }
-        var commands: [DocumentCommand] = []
-        if configuration.tool != .eraser, configuration.document.canvas.recognizeDiagrams,
-           drawing.strokes.count == strokesAtStart + 1, let stroke = drawing.strokes.last {
-            let points = stroke.path.map { point -> CanvasPoint in
-                let location = point.location.applying(stroke.transform)
-                return .init(x: location.x, y: location.y)
-            }
-            if DiagramRecognizer.recognize(points) != nil {
-                do {
-                    commands = try DiagramCommands.insertStroke(points, in: configuration.document).map { command in
-                        if case .insertBlock(var block) = command, case .shape(var shape) = block.content {
-                            shape.stroke = configuration.inkColor.hex; shape.lineWidth = configuration.inkWidth
-                            block.content = .shape(shape); return .insertBlock(block)
-                        }
-                        if case .setRelation(var relation) = command {
-                            relation.style = .init(color: configuration.inkColor.hex, width: configuration.inkWidth)
-                            return .setRelation(relation)
-                        }
-                        return command
-                    }
-                    drawing = PKDrawing(strokes: Array(drawing.strokes.dropLast()))
-                    applyingDrawing = true; ink.drawing = drawing; applyingDrawing = false
-                } catch { configuration.onError(error); return }
-            }
+
+    private static func key(_ stroke: PKStroke) -> Double { stroke.path.creationDate.timeIntervalSinceReferenceDate }
+    private func sample(_ stroke: PKStroke, releasedAt: Date? = nil) -> InkSample {
+        let points = stroke.path.map { point -> CanvasPoint in
+            let location = point.location.applying(stroke.transform)
+            return .init(x: location.x, y: location.y)
         }
+        let start = Self.key(stroke), times = stroke.path.map(\.timeOffset)
+        let release = max(releasedAt?.timeIntervalSinceReferenceDate ?? 0, start + (times.last ?? 0))
+        return InkSample(points: points, times: times, startedAt: start, releasedAt: release)
+    }
+    /// Screen points per logical point, including the container's zoom.
+    private var screenScale: Double {
+        let probe = ink.convert(CGRect(x: 0, y: 0, width: 100, height: 100), to: nil)
+        return probe.width > 0 ? probe.width / 100 : 1
+    }
+
+    /// Decides what each finished stroke means. On iPhone the finger is the pen, so a tap is told
+    /// apart from a stroke by its size and duration, and from the dot of an "i" by the writing just
+    /// before it. A tap is never ink and never opens a text box while drawing; it selects what is
+    /// under it. A stroke that rests at its end asks for a figure; other strokes become figures only
+    /// after a pause, when they clearly are one and are not part of writing.
+    private func processInk() {
+        guard !usingTool, !applyingDrawing, isViewLoaded else { return }
+        let strokes = ink.drawing.strokes
+        let fresh = strokes.filter { !classifiedStrokes.contains(Self.key($0)) }
+        fresh.forEach { classifiedStrokes.insert(Self.key($0)) }
+        guard configuration.tool != .eraser, !fresh.isEmpty else { saveDrawing(); return }
+        let fingerIsPen = !(configuration.session?.prefersPencil ?? false)
+        let scale = screenScale
+        var taps: [(key: Double, point: CGPoint)] = []
+        var held: [Double] = []
+        var extra: [DocumentCommand] = []
+        for stroke in fresh {
+            let drawn = sample(stroke, releasedAt: toolEndedAt)
+            let key = Self.key(stroke)
+            if fingerIsPen, InkIntent.isTap(drawn, screenScale: scale), !InkIntent.tapBelongsToWriting(drawn, recent: Array(recentInk.values)) {
+                let box = drawn.bounds
+                taps.append((key, CGPoint(x: box.x + box.width / 2, y: box.y + box.height / 2))); continue
+            }
+            if let conversion = lastConversion, InkIntent.continuesWriting(after: conversion.bounds, convertedAt: conversion.at, with: drawn) {
+                extra += revert(conversion)
+            }
+            recentInk[key] = drawn
+            if InkIntent.holdDuration(drawn, screenScale: scale) >= InkIntent.holdToSnap { held.append(key) }
+            else { awaitingShape.append(key) }
+        }
+        let now = Date().timeIntervalSinceReferenceDate
+        recentInk = recentInk.filter { now - $0.value.releasedAt < 20 }
+        if !taps.isEmpty {
+            let removed = Set(taps.map(\.key))
+            applyingDrawing = true
+            ink.drawing = PKDrawing(strokes: ink.drawing.strokes.filter { !removed.contains(Self.key($0)) })
+            applyingDrawing = false
+        }
+        saveDrawing(extra)               // the ink itself is kept first: undo then restores it
+        for key in held { snapFigure(endingWith: key) }
+        if let tap = taps.last { handleFingerTap(at: tap.point) }
+        scheduleShapeCheck()
+    }
+
+    /// "Draw and hold": the stroke, with strokes drawn just before and touching it, becomes a figure.
+    private func snapFigure(endingWith key: Double) {
+        guard configuration.document.canvas.recognizeDiagrams,
+              let stroke = ink.drawing.strokes.first(where: { Self.key($0) == key }) else { return }
+        let last = sample(stroke)
+        let box = last.bounds
+        let pad = max(12, 0.2 * max(box.width, box.height))
+        let partners = recentInk.filter { $0.key != key && last.startedAt - $0.value.releasedAt < 4 && $0.value.releasedAt <= last.startedAt + 0.01 }
+            .filter { InkIntent.groups([box, $0.value.bounds], padding: pad).count == 1 }
+            .sorted { $0.value.startedAt > $1.value.startedAt }.prefix(3)
+        let together = partners.map(\.value.points) + [last.points]
+        if partners.count > 0, let figure = ShapeRecognizer.recognize(together, intent: .deliberate) {
+            convert(figure, strokes: Set(partners.map(\.key) + [key]), automatic: false); return
+        }
+        if let figure = ShapeRecognizer.recognize([last.points], intent: .deliberate) {
+            convert(figure, strokes: [key], automatic: false)
+        }
+    }
+
+    private func scheduleShapeCheck() {
+        guard !awaitingShape.isEmpty else { return }
+        guard configuration.document.canvas.recognizeDiagrams else { awaitingShape.removeAll(); return }
+        shapeCheckGeneration += 1
+        let generation = shapeCheckGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(900))
+            guard let self, self.shapeCheckGeneration == generation, !self.usingTool else { return }
+            self.checkAwaitingShapes()
+        }
+    }
+
+    /// After a pause: strokes drawn together are one candidate. Many strokes, writing on the same
+    /// line, small strokes, or strokes inside an object (a label in a box) stay ink.
+    private func checkAwaitingShapes() {
+        let pending = awaitingShape.compactMap { key in recentInk[key].map { (key: key, ink: $0) } }
+            .filter { item in ink.drawing.strokes.contains { Self.key($0) == item.key } }
+        awaitingShape.removeAll()
+        guard !pending.isEmpty else { return }
+        let scale = screenScale
+        let minimum = max(36, 40 / max(scale, 0.01))      // at least 40 screen points (about 7 mm) at any zoom
+        for group in InkIntent.groups(pending.map(\.ink.bounds), padding: max(6, 10 / max(scale, 0.01))) where group.count <= 4 {
+            let members = group.map { pending[$0] }
+            let keys = Set(members.map(\.key))
+            let points = members.map(\.ink.points)
+            let bounds = InkIntent.union(members.map(\.ink.bounds))
+            guard max(bounds.width, bounds.height) >= minimum, !liesInsideObject(bounds) else { continue }
+            let neighbours = recentInk.filter { !keys.contains($0.key) }.map(\.value)
+            guard !InkIntent.isNextToWriting(bounds, neighbours: neighbours) else { continue }
+            // Every stroke of a figure is a real part of its outline, not a dot or a tick.
+            let total = members.reduce(0) { $0 + $1.ink.length }
+            if members.count > 1, members.contains(where: { $0.ink.length < 0.15 * total }) { continue }
+            guard let figure = ShapeRecognizer.recognize(points, intent: .automatic) else { continue }
+            convert(figure, strokes: keys, automatic: true)
+        }
+    }
+
+    private func liesInsideObject(_ rect: LogicalRect) -> Bool {
+        configuration.document.blocks.contains { block in
+            guard block.parentID == nil, let frame = frames[block.id] else { return false }
+            switch block.content {
+            case .shape, .image, .sticker, .pdf, .table, .container: break
+            default: return false
+            }
+            return rect.x >= frame.x && rect.y >= frame.y && rect.x + rect.width <= frame.x + frame.width && rect.y + rect.height <= frame.y + frame.height
+        }
+    }
+
+    /// Replaces strokes by a figure in one save, after the ink itself was saved: one undo brings the
+    /// strokes back. Free lines become shapes only on a deliberate gesture; otherwise only lines
+    /// joining two figures (connectors) convert.
+    private func convert(_ figure: RecognizedShape, strokes keys: Set<Double>, automatic: Bool) {
+        do {
+            guard let commands = try DiagramCommands.insert(figure, in: configuration.document, stroke: configuration.inkColor.hex,
+                                                             lineWidth: configuration.inkWidth, allowFreeLines: !automatic) else { return }
+            let removed = ink.drawing.strokes.filter { keys.contains(Self.key($0)) }
+            applyingDrawing = true
+            ink.drawing = PKDrawing(strokes: ink.drawing.strokes.filter { !keys.contains(Self.key($0)) })
+            applyingDrawing = false
+            keys.forEach { recentInk.removeValue(forKey: $0) }
+            awaitingShape.removeAll { keys.contains($0) }
+            lastConversion = nil
+            if automatic, case .insertBlock(let block)? = commands.first, block.parentID == nil {
+                let f = figure.frame
+                lastConversion = (block.id, removed, f, Date().timeIntervalSinceReferenceDate)
+            }
+            saveDrawing(commands)
+        } catch { configuration.onError(error) }
+    }
+
+    /// Writing went on right beside a figure made a moment ago: it was a letter. Puts the strokes back.
+    private func revert(_ conversion: (shapeID: UUID, strokes: [PKStroke], bounds: LogicalRect, at: Double)) -> [DocumentCommand] {
+        lastConversion = nil
+        guard configuration.document.blocks.contains(where: { $0.id == conversion.shapeID }) else { return [] }
+        applyingDrawing = true
+        ink.drawing = PKDrawing(strokes: ink.drawing.strokes + conversion.strokes)
+        applyingDrawing = false
+        for stroke in conversion.strokes { recentInk[Self.key(stroke)] = sample(stroke) }
+        return [.removeSubtree(conversion.shapeID)]
+    }
+
+    /// An isolated finger tap while the finger is the pen: selects the object under it or places the
+    /// caret in a text under it. On empty paper it does nothing; text boxes start in cursor mode.
+    private func handleFingerTap(at point: CGPoint) {
+        for view in surface.subviews.reversed() {
+            guard let object = view as? CanvasObjectView, object.id != nil, !object.isHidden else { continue }
+            let local = object.convert(point, from: surface)
+            if object.point(inside: local, with: nil) { handleObjectTap(object, at: local); return }
+        }
+        for view in surface.subviews.reversed() {
+            guard let text = view as? UITextView, text !== cellEditor, textIDs[ObjectIdentifier(text)] != nil else { continue }
+            let local = text.convert(point, from: surface)
+            guard text.point(inside: local, with: nil) else { continue }
+            text.becomeFirstResponder()
+            if let position = text.closestPosition(to: local) { text.selectedTextRange = text.textRange(from: position, to: position) }
+            return
+        }
+    }
+
+    private func saveDrawing(_ commands: [DocumentCommand] = []) {
+        guard !usingTool, !applyingDrawing else { return }
+        let drawing = ink.drawing
         let bytes = drawing.dataRepresentation()
+        guard bytes != lastDrawingData || !commands.isEmpty else { return }
         ink.accessibilityValue = "\(drawing.strokes.count) traços"
         lastDrawingData = bytes
         configuration.onDrawing(bytes, commands)
@@ -577,23 +825,44 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     /// Joins a continuation fragment to the previous one: the character before the story break
     /// is deleted, the text reflows, and the caret lands where that character was.
     private func backspaceAcrossFragments(_ textView: UITextView?) -> Bool {
-        guard let textView, let id = textIDs[ObjectIdentifier(textView)],
-              let onTextCommands = configuration.onTextCommands,
+        guard let textView, let id = textIDs[ObjectIdentifier(textView)] else { return false }
+        if configuration.session?.waitingForFocus == true { configuration.session?.queuedInput.append(.deleteBackward); return true }
+        if let onBackspace = configuration.onBackspaceAtStart {
+            typingGroup = UUID().uuidString; typingBlock = nil; typingCaret = nil; pendingTyping = false
+            guard let focus = onBackspace(id, typingGroup) else { return false }
+            handOff(focus); return true
+        }
+        guard let onTextCommands = configuration.onTextCommands,
               let merge = configuration.document.backspaceAcrossFragments(at: id) else { return false }
         typingGroup = UUID().uuidString; typingBlock = nil; typingCaret = nil; pendingTyping = false
         guard let focus = onTextCommands(merge.replacement, typingGroup, NSRange(location: merge.caret, length: 0)) else { return true }
-        configuration.session?.pendingFocus = focus
+        handOff(focus)
         return true
+    }
+
+    /// The caret now belongs in another box. If that box is on screen it takes focus at once; if it is
+    /// being created (a new page), keys typed meanwhile are queued for it instead of landing here,
+    /// where they would end up before the text that already moved on.
+    private func handOff(_ focus: TextFlowFocus) {
+        if configuration.session?.focusRouter?(focus) == true { return }
+        configuration.session?.pendingFocus = focus
     }
 
     public func textViewDidBeginEditing(_ textView: UITextView) {
         activeText = textView; configuration.session?.hasTextSelection = true
         updateInkInteraction()
+        configuration.session?.revealCaret?()
     }
+    var activeTextView: UITextView? { activeText ?? cellEditor }
 
     public func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
         if textView === cellEditor { return true }
         let now = Date(), id = textIDs[ObjectIdentifier(textView)]
+        if let session = configuration.session, session.waitingForFocus, session.pendingFocus?.blockID != id,
+           textView.markedTextRange == nil {
+            if range.length == 0, !text.isEmpty { session.queuedInput.append(.insert(text)); return false }
+            if range.length == 1, text.isEmpty { session.queuedInput.append(.deleteBackward); return false }
+        }
         if typingBlock != id || typingCaret != textView.selectedRange.location || textView.selectedRange.length > 0 ||
            now.timeIntervalSince(typingTime) > 1 || now.timeIntervalSince(typingStarted) > 5 || text.count > 1 {
             typingGroup = UUID().uuidString; typingStarted = now
@@ -638,12 +907,22 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if let onTextCommands = configuration.onTextCommands {
             if let focus = onTextCommands(block, group, textView.selectedRange) {
                 if focus.blockID == id {
-                    textView.attributedText = TextBridge.attributed(focus.text, base: (try? configuration.document.resolvedStyle(for: id)) ?? .init())
-                    textView.selectedRange = focus.range
-                } else { configuration.session?.pendingFocus = focus }
+                    // Only rewrite the view when pagination moved text out of it; rewriting on every
+                    // key resets the keyboard's autocorrection state.
+                    let rendered = TextBridge.attributed(focus.text, base: (try? configuration.document.resolvedStyle(for: id)) ?? .init())
+                    if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered }
+                    if textView.selectedRange != focus.range { textView.selectedRange = focus.range }
+                    if let frame = focus.frame { resize(textView, to: frame) }
+                } else { handOff(focus) }
             }
         }
         else { configuration.onCommands([.replaceBlock(block)]) }
+        configuration.session?.revealCaret?()
+    }
+
+    public func textViewDidChangeSelection(_ textView: UITextView) {
+        guard textView.isFirstResponder else { return }
+        configuration.session?.revealCaret?()
     }
 
     private func format(_ text: UITextView, key: NSAttributedString.Key, value: Any) {
@@ -806,6 +1085,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === pencilWatcher {
+            if touch.type == .pencil, !(configuration.session?.prefersPencil ?? false) {
+                configuration.session?.pencilDetected()
+                applyInputMode()
+            }
+            return false
+        }
         if gestureRecognizer === inkTap { return true }
         return touch.view === surface && (configuration.tool == .select || !ink.isUserInteractionEnabled)
     }
@@ -822,16 +1108,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         insertText(at: gesture.location(in: surface))
     }
 
-    /// Finger tap while a pen is active: the same meaning as in selection mode (object, text,
-    /// empty page), so writing never requires switching tools first.
+    /// Finger tap while an Apple Pencil draws (fingers cannot draw then, so no dot exists): the same
+    /// meaning as in cursor mode, so writing never requires switching tools first.
     @objc private func tapInk(_ gesture: UITapGestureRecognizer) {
         let point = gesture.location(in: surface)
-        // PencilKit commits the tap's dot after this action runs; remove it a moment later
-        // (dot saves wait 350 ms, so it never reaches the history).
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            self?.removeTapDots()
-        }
         for view in surface.subviews.reversed() {
             guard let object = view as? CanvasObjectView, object.id != nil, !object.isHidden else { continue }
             let local = object.convert(point, from: surface)
@@ -846,33 +1126,6 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             return
         }
         insertText(at: point)
-    }
-
-    /// PencilKit turns a finger tap into a dot; a tap that means "place text" must not leave one.
-    private func removeTapDots() {
-        dotSaveGeneration += 1
-        let now = Date()
-        let kept = ink.drawing.strokes.filter { stroke in
-            let bounds = stroke.renderBounds
-            return !(bounds.width < 12 && bounds.height < 12 && now.timeIntervalSince(stroke.path.creationDate) < 1.5)
-        }
-        guard kept.count != ink.drawing.strokes.count else { return }
-        applyingDrawing = true; ink.drawing = PKDrawing(strokes: kept); applyingDrawing = false
-        saveDrawing()   // no change, and so no history entry, if the dot had not been saved yet
-    }
-
-    /// A dot-sized stroke waits briefly before saving, so a finger tap can claim it as a tap.
-    private func scheduleSave() {
-        dotSaveGeneration += 1
-        let generation = dotSaveGeneration
-        if let last = ink.drawing.strokes.last, last.renderBounds.width < 12, last.renderBounds.height < 12,
-           Date().timeIntervalSince(last.path.creationDate) < 1.5 {
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(350))
-                guard let self, self.dotSaveGeneration == generation else { return }
-                self.saveDrawing()
-            }
-        } else { saveDrawing() }
     }
 
     private func insertText(at point: CGPoint) {

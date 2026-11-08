@@ -51,14 +51,45 @@ public enum TextEditingAction {
     case insertText, insertTable, fitPage, zoom(CGFloat), finish
 }
 
+/// A key typed while the caret was moving to another page, replayed once it arrives.
+enum QueuedKey: Equatable { case insert(String), deleteBackward }
+
 /// Keeps the selected UITextView and its text range alive while native toolbar buttons act on it.
+/// Shared by every page of a note, so it also carries what crosses page boundaries: the caret
+/// moving to another page's text box, and whether an Apple Pencil is in use.
 @Observable @MainActor
 public final class EditorSession {
     public var hasTextSelection = false
-    public var pendingFocus: TextFlowFocus?
+    /// The caret belongs in another text box (usually on the next page) that may not exist yet.
+    @ObservationIgnored public var pendingFocus: TextFlowFocus? {
+        didSet { pendingFocusSince = Date(); if pendingFocus == nil { queuedInput.removeAll() } }
+    }
+    @ObservationIgnored var pendingFocusSince = Date.distantPast
+    /// Keys typed while `pendingFocus` waits; they belong after the caret's new position.
+    @ObservationIgnored var queuedInput: [QueuedKey] = []
+    /// Moves the caret to a text box on any page right away; false if that box is not on screen yet.
+    @ObservationIgnored var focusRouter: ((TextFlowFocus) -> Bool)?
+    /// Keeps the caret visible above the keyboard after typing or moving it.
+    @ObservationIgnored var revealCaret: (() -> Void)?
+    /// Called when drawing input or ink interaction changes, so scrolling can adapt.
+    @ObservationIgnored var interactionChanged: (() -> Void)?
+    /// An Apple Pencil draws and fingers navigate, tap and select (set on the first Pencil touch,
+    /// or by the system setting "Only Draw with Apple Pencil").
+    @ObservationIgnored public private(set) var prefersPencil = false
     @ObservationIgnored var handler: ((TextEditingAction) -> Void)?
-    public init() {}
+    public init() {
+        #if !targetEnvironment(macCatalyst)
+        prefersPencil = UIPencilInteraction.prefersPencilOnlyDrawing
+        #endif
+    }
     public func perform(_ action: TextEditingAction) { handler?(action) }
+    func pencilDetected() {
+        guard !prefersPencil else { return }
+        prefersPencil = true
+        interactionChanged?()
+    }
+    /// A pending caret move that never completed must not swallow typing forever.
+    var waitingForFocus: Bool { pendingFocus != nil && Date().timeIntervalSince(pendingFocusSince) < 1 }
 }
 
 @MainActor

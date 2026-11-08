@@ -26,10 +26,27 @@ branca, inclusive quando os controles acompanham o modo escuro.
 - Selecionar uma ponta ativa imediatamente o desenho. A primeira marca cria a
   camada de desenho da página; marcas seguintes editam a mesma camada. Dois dedos
   movem o canvas nesse modo. A escrita e as pressões são preservadas em PKDrawing.
-- Formas reconhecidas pela heurística existente viram blocos com texto editável,
-  mantendo as proporções. A transformação e a remoção do traço correspondente são
-  uma operação de histórico. Desativar reconhecimento preserva o traço livre.
-  O reconhecimento geométrico ainda precisa de calibração com manuscritos reais.
+- Intenção do traço (07/11/2026). No iPhone o dedo é a caneta: um toque (até 8 pt
+  de tela e 0,35 s) não vira tinta nem cria caixa de texto; seleciona o objeto ou
+  posiciona o cursor no texto sob o dedo, e em papel vazio não faz nada. Um toque
+  logo depois de escrever, ao lado da escrita, é tinta (pingo do i, ponto final).
+  Caixas de texto novas nascem no modo cursor. Ao primeiro toque de Apple Pencil
+  (ou com o ajuste "Desenhar só com o Apple Pencil"), só o Pencil desenha e o
+  dedo rola com um dedo e toca como cursor.
+- Formas (07/11/2026, `ShapeRecognition.swift`): fecho convexo e razões de área
+  (maior triângulo e maior quadrilátero inscritos, preenchimento do retângulo
+  mínimo), que não mudam ao esticar a figura; aceita lados tortos, sobra ou folga
+  na ponta, caixa em até 4 traços, caixa e elipse giradas, triângulo para cima,
+  baixo e lados, losango. Segurar parado 0,4 s no fim do traço converte na hora e
+  com tolerância maior (inclusive linha solta). Sem segurar, a conversão espera
+  0,9 s sem novo traço e não ocorre se houver escrita na mesma linha, se o traço
+  estiver dentro de um objeto, se o grupo tiver mais de 4 traços ou se a figura
+  tiver menos de 40 pt de tela; uma figura convertida assim volta a ser tinta se
+  a escrita continuar ao lado em até 3 s (era uma letra, como "o"). A tinta é
+  salva antes da conversão: um desfazer devolve o traço original. Medido em
+  figuras sintéticas (300 de cada): caixas 299, círculos/elipses 300,
+  triângulos 297, nenhuma do tipo errado; 0 de 3.600 letras viraram forma. Falta
+  medir com traços reais.
 
 ## Persistência e compatibilidade
 

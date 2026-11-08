@@ -123,6 +123,111 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(first.layout.frame.height, document.canvas.size.height - 100 - 24, accuracy: 0.5)   // grew to the margin
     }
 
+    func testFocusCarriesTheBoxFrameSoTheViewGrowsAtOnce() throws {
+        var document = CanvasDocument(title: "Grow")
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 100, width: 300, height: 44)), content: .text(.init("")))
+        block.textFlowID = block.id; document.blocks = [block]
+        block.content = .text(RichText("uma\nduas\ntrês"))
+        let result = try TextPagination.reflow(block, in: document, selection: NSRange(location: 12, length: 0))
+        let frame = try XCTUnwrap(result.focus.frame)
+        XCTAssertGreaterThan(frame.height, 44)            // three lines: taller than one
+    }
+
+    func testPageFillsTheWidthAndCannotDriftSideways() throws {
+        var document = CanvasDocument(title: "Fit")
+        document.pages.append(CanvasPage(title: "Página 2"))
+        let editors = try document.pages.map { CanvasEditor(document: try document.pageDocument($0.id), onCommands: { _ in }) }
+        let controller = PagedCanvasViewController(configuration: PagedCanvasEditor(
+            pages: editors, tool: .select, session: EditorSession(), focusPageID: document.pages.first?.id, onVisiblePage: { _ in }))
+        controller.loadViewIfNeeded(); controller.view.frame = CGRect(x: 0, y: 0, width: 393, height: 800)
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        let scroll = controller.pagesScrollView
+        XCTAssertLessThanOrEqual(scroll.contentSize.width, scroll.bounds.width)          // nothing to scroll sideways
+        XCTAssertGreaterThan(scroll.contentSize.width, scroll.bounds.width - 2)          // the page fills the width
+        // Rotating (or a wider window) refits instead of leaving the old zoom.
+        controller.view.frame = CGRect(x: 0, y: 0, width: 852, height: 393)
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        XCTAssertEqual(scroll.contentSize.width, scroll.bounds.width, accuracy: 2)
+    }
+
+    func testCaretMovesToTheNextPageAtOnceAndQueuedKeysFollowIt() throws {
+        var document = CanvasDocument(title: "Flow")
+        document.pages.append(CanvasPage(title: "Continuação"))
+        let story = UUID()
+        let first = CanvasBlock(id: story, layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 300, height: 60)),
+                                content: .text(.init("abc")), textFlowID: story)
+        let second = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 300, height: 60)),
+                                 content: .text(.init("def")), pageID: document.pages[1].id, textFlowID: story)
+        document.blocks = [first, second]
+        let session = EditorSession()
+        let editors = try document.pages.map { CanvasEditor(document: try document.pageDocument($0.id), session: session, onCommands: { _ in }) }
+        let controller = PagedCanvasViewController(configuration: PagedCanvasEditor(
+            pages: editors, tool: .select, session: session, focusPageID: document.pages[1].id, onVisiblePage: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        // Pagination moved "X" to the start of page 2 while a "Y" was being typed: the caret lands there
+        // synchronously and the queued key follows it, in order.
+        let focus = TextFlowFocus(blockID: second.id, pageID: document.pages[1].id, range: NSRange(location: 1, length: 0), text: RichText("Xdef"))
+        session.queuedInput = [.insert("Y")]
+        XCTAssertEqual(session.focusRouter?(focus), true)
+        func firstResponder(in view: UIView) -> UITextView? {
+            if let text = view as? UITextView, text.isFirstResponder { return text }
+            return view.subviews.lazy.compactMap(firstResponder).first
+        }
+        let editing = try XCTUnwrap(firstResponder(in: window))
+        XCTAssertEqual(editing.text, "XYdef")
+        XCTAssertEqual(editing.selectedRange.location, 2)
+        window.isHidden = true
+    }
+
+    func testBackspaceAtTheStartOfAPageJoinsThePreviousPage() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let document = try XCTUnwrap(model.document)
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 300, height: 44)), content: .text(.init("")))
+        block.textFlowID = block.id
+        model.enqueue([.insertBlock(block)], pageID: try XCTUnwrap(document.pages.first?.id), documentID: document.id)
+        while model.isSaving { await Task.yield() }
+        var long = try XCTUnwrap(model.document?.blocks.first { $0.id == block.id })
+        long.content = .text(RichText(String(repeating: "palavra ", count: 700)))
+        _ = model.editText(long, group: nil, selection: NSRange(location: 0, length: 0))
+        while model.isSaving { await Task.yield() }
+        func storyText() throws -> String {
+            try XCTUnwrap(model.document).textFlowFragments(story: block.id).compactMap { fragment -> String? in
+                if case .text(let text) = fragment.content { return text.plainText }; return nil
+            }.joined()
+        }
+        let fragments = try XCTUnwrap(model.document).textFlowFragments(story: block.id)
+        XCTAssertGreaterThan(fragments.count, 1)
+        let before = try storyText()
+        let focus = try XCTUnwrap(model.backspaceAcrossFragments(fragments[1].id, group: "join"))
+        // The caret stays at the same place in the story (the page boundary), on either side of it.
+        XCTAssertTrue(fragments.map(\.id).contains(focus.blockID))
+        while model.isSaving { await Task.yield() }
+        XCTAssertEqual(try storyText().count, before.count - 1)
+    }
+
+    func testNoteOpenedFromATeiaGoesBackToTheTeiaFirst() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let note = try XCTUnwrap(model.document?.id)
+        await model.createWeb(including: note)
+        let web = try XCTUnwrap(model.document?.id)
+        await model.open(note, returningTo: web)
+        XCTAssertEqual(model.document?.id, note)
+        XCTAssertEqual(model.returnStack, [web])
+        await model.goBack()
+        XCTAssertEqual(model.document?.id, web)
+        XCTAssertTrue(model.returnStack.isEmpty)
+        await model.open(note)                     // from the list: no way "back" to a Teia
+        XCTAssertTrue(model.returnStack.isEmpty)
+    }
+
     func testOffscreenBlocksAreNotInstantiated() {
         var document = CanvasDocument(title: "Viewport")
         for i in 0..<1000 {

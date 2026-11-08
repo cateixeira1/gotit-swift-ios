@@ -46,6 +46,9 @@ struct EditorWorkspace: View {
             }
             .background(Color(uiColor: .systemBackground))
         }
+        // The page view keeps the caret above the keyboard itself (scroll insets), so the layout does
+        // not shrink and the bottom bar stays put behind the keyboard.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showPages) {
             NavigationStack { pagesPanel.navigationTitle("Páginas").toolbar { Button("Concluir") { showPages = false } } }
                 .presentationDetents([.medium, .large])
@@ -113,13 +116,14 @@ struct EditorWorkspace: View {
             onDrawing: { data, commands in model.saveDrawing(data, extra: commands, pageID: targetPage, documentID: targetDocument) },
             image: model.image, note: { model.noteMetadata[$0] },
             onTextCommands: { block, group, selection in model.editText(block, group: group, selection: selection) },
+            onBackspaceAtStart: { id, group in model.backspaceAcrossFragments(id, group: group) },
             onCommands: { model.enqueue($0, pageID: targetPage, documentID: targetDocument) },
             onOpenPDF: { id in
                 if let block = document.blocks.first(where: { $0.id == id }), let hash = block.content.assetHash, let url = model.assetURL(hash) {
                     reader = .init(id: id, documentID: targetDocument, url: url)
                 }
             },
-            onOpenNote: { id in Task { await model.open(id) } },
+            onOpenNote: { id in Task { await model.open(id, returningTo: document.kind == .web ? document.id : nil) } },
             onError: { model.error = String(describing: $0) })
     }
 

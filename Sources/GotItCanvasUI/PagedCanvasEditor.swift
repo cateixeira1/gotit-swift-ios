@@ -36,19 +36,29 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
     private var pageEditors: [UUID: CanvasViewController] = [:]
     private var frames: [UUID: CGRect] = [:]
     private var order: [UUID] = []
-    private var fitted = false
     private var lastFocus: UUID?
     private var lastScrollRequest = 0
     private var lastReportedPage: UUID?
     /// While the app itself scrolls to a page, intermediate positions are not "the user's page".
     private var scrollingToPage = false
+    /// Space between pages, and beside them (kept small so the page fills the screen).
     private let gap: CGFloat = 20
+    private let sideGap: CGFloat = 6
+    /// The page fills the width (the default, "full screen"); pinching away from it turns this off,
+    /// pinching back near it or "Ajustar à largura" turns it on again.
+    private var followsWidth = true
+    private var fittedWidth: CGFloat = 0
+    /// Axis chosen at the start of a drag: vertical unless the drag is clearly sideways.
+    private var lockedAxis: (horizontal: Bool, offset: CGPoint)?
+    private var keyboardOverlap: CGFloat = 0
+    private var caretRevealQueued = false
 
     init(configuration: PagedCanvasEditor) { self.configuration = configuration; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { fatalError("Use PagedCanvasEditor") }
 
     /// Number of page editors currently instantiated (virtualization check in tests).
     public var realizedPageCount: Int { pageEditors.count }
+    var pagesScrollView: UIScrollView { scroll }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -57,29 +67,63 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         scroll.minimumZoomScale = 0.15; scroll.maximumZoomScale = 6
         scroll.backgroundColor = .systemGray5
         scroll.accessibilityIdentifier = "pagesScroll"
+        scroll.isDirectionalLockEnabled = true
+        scroll.alwaysBounceHorizontal = false
+        scroll.keyboardDismissMode = .none
         view.addSubview(scroll)
         scroll.addSubview(content)
         view.addSubview(ruler)
         bindSession()
         layoutPages()
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardChanged(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
     }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         ruler.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 28)
         scroll.frame = CGRect(x: 0, y: 28, width: view.bounds.width, height: max(0, view.bounds.height - 28))
-        if !fitted, scroll.bounds.width > 0, !order.isEmpty {
-            fitted = true; fitWidth()
-            if let focus = configuration.focusPageID, focus != order.first { scrollToPageIfHidden(focus, animated: false) }
+        if scroll.bounds.width > 0, !order.isEmpty {
+            if fittedWidth == 0 {
+                fitWidth(keepingTop: false)
+                if let focus = configuration.focusPageID, focus != order.first { scrollToPageIfHidden(focus, animated: false) }
+            } else if followsWidth, abs(fittedWidth - scroll.bounds.width) > 1 {
+                fitWidth(keepingTop: true)      // rotation, split view, sidebar shown or hidden
+            }
         }
+        applyKeyboardInset()
         realizeVisiblePages(); updateRuler()
     }
 
     public func viewForZooming(in scrollView: UIScrollView) -> UIView? { content }
-    public func scrollViewDidZoom(_ scrollView: UIScrollView) { realizeVisiblePages(); updateRuler() }
-    public func scrollViewDidScroll(_ scrollView: UIScrollView) { realizeVisiblePages(); updateRuler(); reportVisiblePage() }
+    public func scrollViewDidZoom(_ scrollView: UIScrollView) { centerContent(); realizeVisiblePages(); updateRuler() }
+    public func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { followsWidth = false; lockedAxis = nil }
+    public func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        // Close to the page width counts as "fill the width" again.
+        let fit = fitScale
+        guard fit > 0, abs(scale - fit) / fit < 0.08 else { return }
+        followsWidth = true; fittedWidth = scroll.bounds.width
+        if abs(scale - fit) > 0.001 { scroll.setZoomScale(fit, animated: true) }
+    }
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if let lock = lockedAxis, scroll.isDragging || scroll.isDecelerating, !scroll.isZooming {
+            // Keep the other axis still: a vertical drag never drifts sideways, and vice versa.
+            if lock.horizontal, scroll.contentOffset.y != lock.offset.y { scroll.contentOffset.y = lock.offset.y }
+            if !lock.horizontal, scroll.contentOffset.x != lock.offset.x { scroll.contentOffset.x = lock.offset.x }
+        }
+        realizeVisiblePages(); updateRuler(); reportVisiblePage()
+    }
     public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { scrollingToPage = false; reportVisiblePage() }
-    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { scrollingToPage = false }
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        scrollingToPage = false
+        // Sideways only when the movement is clearly sideways (within about 25° of horizontal).
+        let pan = scroll.panGestureRecognizer
+        var motion = pan.translation(in: scroll)
+        if abs(motion.x) + abs(motion.y) < 2 { motion = pan.velocity(in: scroll) }
+        lockedAxis = (abs(motion.x) > 2.1 * abs(motion.y), scroll.contentOffset)
+    }
+    public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) { if !decelerate { lockedAxis = nil } }
+    public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { lockedAxis = nil }
 
     func configure(_ value: PagedCanvasEditor) {
         configuration = value
@@ -88,10 +132,13 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         layoutPages()
         // A new focus, or an explicit request (tap on a page in the list), shows that page.
         // scrollToPageIfHidden does nothing when the page is already on screen, so focus changes
-        // that come from the user's own scrolling never move the view.
+        // that come from the user's own scrolling never move the view. While typing, the caret is
+        // followed instead, so text flowing onto the next page does not jump to that page's top.
         if let focus = value.focusPageID, focus != lastFocus || value.scrollRequest != lastScrollRequest {
+            let requested = value.scrollRequest != lastScrollRequest
             lastFocus = focus; lastScrollRequest = value.scrollRequest
-            scrollToPageIfHidden(focus)
+            if !requested, pageEditors.values.contains(where: \.hasActiveText) { revealCaretSoon() }
+            else { scrollToPageIfHidden(focus) }
         }
     }
 
@@ -104,20 +151,35 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         frames = [:]
         for editor in configuration.pages {
             let size = CGSize(width: editor.document.canvas.size.width, height: editor.document.canvas.size.height)
-            frames[pageID(editor)] = CGRect(x: gap, y: y, width: size.width, height: size.height)
-            y += size.height + gap; width = max(width, size.width + 2 * gap)
+            frames[pageID(editor)] = CGRect(x: sideGap, y: y, width: size.width, height: size.height)
+            y += size.height + gap; width = max(width, size.width + 2 * sideGap)
         }
         // Only touch geometry when the stack size changes, so updates never fight a pinch or scroll.
         if content.bounds.size != CGSize(width: width, height: y) {
             let zoom = scroll.zoomScale
             content.bounds = CGRect(x: 0, y: 0, width: width, height: y)
-            content.center = CGPoint(x: width * zoom / 2, y: y * zoom / 2)
             scroll.contentSize = CGSize(width: width * zoom, height: y * zoom)
+            centerContent()
         }
-        scroll.panGestureRecognizer.minimumNumberOfTouches = configuration.tool.isDrawing ? 2 : 1
+        updatePanTouches()
         // Drop editors of pages that no longer exist.
         for (id, child) in pageEditors where frames[id] == nil { detach(id, child) }
         realizeVisiblePages()
+    }
+
+    /// Pages narrower than the screen (zoomed out) sit in the middle instead of on the left edge.
+    private func centerContent() {
+        let size = scroll.contentSize
+        let inset = max(0, (scroll.bounds.width - size.width) / 2)
+        content.center = CGPoint(x: size.width / 2 + inset, y: size.height / 2)
+    }
+
+    /// Two fingers scroll while one finger draws; otherwise (typing, an object selected, an Apple
+    /// Pencil in use, cursor mode) one finger scrolls.
+    private func updatePanTouches() {
+        let fingerDraws = configuration.tool.isDrawing && !(configuration.session?.prefersPencil ?? false) &&
+            pageEditors.values.allSatisfy(\.fingerDraws)
+        scroll.panGestureRecognizer.minimumNumberOfTouches = fingerDraws ? 2 : 1
     }
 
     /// Pages within one screen of the viewport, plus the focused page and any page being typed in,
@@ -132,6 +194,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
             guard let frame = frames[id] else { continue }
             var page = editor; page.tool = configuration.tool; page.session = configuration.session; page.pageNumber = index + 1
             let keep = frame.intersects(window) || id == configuration.focusPageID || pageEditors[id]?.hasActiveText == true
+                || configuration.session?.pendingFocus?.pageID == id
             if keep {
                 if let child = pageEditors[id] {
                     child.view.frame = frame
@@ -143,6 +206,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
                     content.addSubview(child.view)
                     child.didMove(toParent: self)
                     pageEditors[id] = child
+                    child.claimPendingFocus()       // text that just flowed onto this new page
                 }
             } else if let child = pageEditors[id] {
                 detach(id, child)
@@ -156,11 +220,23 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         pageEditors[id] = nil
     }
 
-    private func fitWidth() {
+    private var fitScale: CGFloat {
         let width = content.bounds.width
-        guard width > 0 else { return }
-        scroll.setZoomScale(min(1, max(scroll.minimumZoomScale, scroll.bounds.width / width)), animated: false)
-        scroll.contentOffset = .zero
+        guard width > 0, scroll.bounds.width > 0 else { return 0 }
+        // A hair under the exact width, so rounding never allows a sideways scroll.
+        return min(scroll.maximumZoomScale, max(scroll.minimumZoomScale, scroll.bounds.width / width * 0.9995))
+    }
+
+    /// Page width = screen width. Keeps the same spot of the note at the top when refitting.
+    private func fitWidth(keepingTop: Bool) {
+        let scale = fitScale
+        guard scale > 0 else { return }
+        let top = scroll.contentOffset.y / max(scroll.zoomScale, 0.01)
+        scroll.setZoomScale(scale, animated: false)
+        fittedWidth = scroll.bounds.width; followsWidth = true
+        centerContent()
+        let maxY = max(-scroll.adjustedContentInset.top, scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
+        scroll.contentOffset = CGPoint(x: 0, y: keepingTop ? min(maxY, top * scale) : 0)
     }
 
     private func scrollToPageIfHidden(_ id: UUID, animated: Bool = true) {
@@ -170,7 +246,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         if visible.intersection(frame).height >= min(frame.height, visible.height) * 0.5 { return }
         // Page top just below the top edge of the viewport.
         let zoom = scroll.zoomScale
-        let maxY = max(0, scroll.contentSize.height - scroll.bounds.height)
+        let maxY = max(0, scroll.contentSize.height + scroll.contentInset.bottom - scroll.bounds.height)
         let offset = CGPoint(x: scroll.contentOffset.x, y: min(maxY, max(0, (frame.minY - gap / 2) * zoom)))
         lastReportedPage = id
         scrollingToPage = animated
@@ -192,16 +268,81 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         configuration.focusPageID.flatMap { frames[$0] != nil ? $0 : nil } ?? lastReportedPage ?? order.first
     }
 
+    // MARK: Keyboard and caret
+
+    /// The keyboard covers the bottom of the pages; the covered part becomes scrollable space.
+    @objc private func keyboardChanged(_ notification: Notification) {
+        guard let screen = view.window?.windowScene?.screen else { return }
+        var overlap: CGFloat = 0
+        if notification.name != UIResponder.keyboardWillHideNotification,
+           let end = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+            let keyboard = view.convert(end, from: screen.coordinateSpace)
+            overlap = max(0, scroll.frame.maxY - keyboard.minY)
+        }
+        guard overlap != keyboardOverlap else { return }
+        keyboardOverlap = overlap
+        applyKeyboardInset()
+        revealCaretSoon()
+    }
+    private func applyKeyboardInset() {
+        guard scroll.contentInset.bottom != keyboardOverlap else { return }
+        scroll.contentInset.bottom = keyboardOverlap
+        scroll.verticalScrollIndicatorInsets.bottom = keyboardOverlap
+    }
+
+    /// Coalesced to the next turn of the run loop, after the text box has its new size.
+    private func revealCaretSoon() {
+        guard !caretRevealQueued else { return }
+        caretRevealQueued = true
+        Task { @MainActor [weak self] in
+            self?.caretRevealQueued = false
+            self?.revealCaret()
+        }
+    }
+    /// Scrolls just enough to keep the caret, and the line after it, above the keyboard.
+    private func revealCaret() {
+        guard let textView = pageEditors.values.lazy.compactMap(\.activeTextView).first(where: \.isFirstResponder),
+              let range = textView.selectedTextRange, textView.window != nil else { return }
+        let caret = textView.convert(textView.caretRect(for: range.end), to: scroll)
+        guard caret.height.isFinite, caret.height > 0 else { return }
+        let insets = scroll.adjustedContentInset
+        let margin = caret.height * 1.5
+        var offset = scroll.contentOffset
+        let top = offset.y + insets.top + 8, bottom = offset.y + scroll.bounds.height - insets.bottom - 8
+        if caret.maxY + margin > bottom { offset.y += caret.maxY + margin - bottom }
+        else if caret.minY - 8 < top { offset.y -= top - (caret.minY - 8) }
+        let left = offset.x + 8, right = offset.x + scroll.bounds.width - 8
+        if caret.maxX + 24 > right { offset.x += caret.maxX + 24 - right }
+        else if caret.minX - 24 < left { offset.x -= left - (caret.minX - 24) }
+        let maxY = max(-insets.top, scroll.contentSize.height + insets.bottom - scroll.bounds.height)
+        let maxX = max(-insets.left, scroll.contentSize.width + insets.right - scroll.bounds.width)
+        offset.y = min(maxY, max(-insets.top, offset.y)); offset.x = min(maxX, max(-insets.left, offset.x))
+        guard abs(offset.y - scroll.contentOffset.y) > 0.5 || abs(offset.x - scroll.contentOffset.x) > 0.5 else { return }
+        scroll.setContentOffset(offset, animated: true)
+    }
+
     /// Toolbar actions: zoom is global; insertions go to the current page; formatting goes to the
-    /// page that owns the text being edited.
+    /// page that owns the text being edited. The caret can move to any page through here.
     private func bindSession() {
-        configuration.session?.handler = { [weak self] action in self?.route(action) }
+        guard let session = configuration.session else { return }
+        session.handler = { [weak self] action in self?.route(action) }
+        session.focusRouter = { [weak self] focus in
+            guard let self, let child = self.pageEditors[focus.pageID] else { return false }
+            return child.claimFocus(focus)
+        }
+        session.revealCaret = { [weak self] in self?.revealCaretSoon() }
+        session.interactionChanged = { [weak self] in
+            guard let self else { return }
+            for child in self.pageEditors.values { child.applyInputMode() }
+            self.updatePanTouches()
+        }
     }
     private func route(_ action: TextEditingAction) {
         switch action {
         case .zoom(let factor):
+            followsWidth = false
             scroll.setZoomScale(min(scroll.maximumZoomScale, max(scroll.minimumZoomScale, scroll.zoomScale * factor)), animated: true)
-        case .fitPage: fitWidth()
+        case .fitPage: fitWidth(keepingTop: true)
         case .insertText, .insertTable:
             if let id = currentPageID { scrollToPageIfHidden(id); pageEditors[id]?.performAction(action) }
         case .finish:
@@ -214,7 +355,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
 
     private func updateRuler() {
         ruler.zoom = scroll.zoomScale
-        ruler.offset = scroll.contentOffset.x - gap * scroll.zoomScale
+        ruler.offset = scroll.contentOffset.x - (content.frame.minX + sideGap * scroll.zoomScale)
         guard let first = configuration.pages.first?.document.canvas else { return }
         switch first.displayUnit {
         case .centimeters: ruler.pointsPerUnit = 72 / 2.54; ruler.unitName = "cm"

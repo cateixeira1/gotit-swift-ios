@@ -3,73 +3,63 @@ import GotItDomain
 
 public struct RecognizedShape: Equatable, Sendable {
     public var kind: ShapeKind
+    /// Upright frame; the figure is drawn rotated by `rotationRadians` about its centre.
     public var frame: LogicalRect
     public var originalPoints: [CanvasPoint]
+    public var rotationRadians: Double
+    public init(kind: ShapeKind, frame: LogicalRect, originalPoints: [CanvasPoint], rotationRadians: Double = 0) {
+        self.kind = kind; self.frame = frame; self.originalPoints = originalPoints; self.rotationRadians = rotationRadians
+    }
 }
 
-/// Conservative single-stroke geometric recognition. Ambiguous strokes return nil.
+/// Single-stroke entry point kept for callers that only have one stroke. Ambiguous strokes return nil.
 /// This recognizes geometry, not handwriting or mathematical notation.
 public enum DiagramRecognizer {
-    public static func recognize(_ points: [CanvasPoint]) -> RecognizedShape? {
-        guard points.count >= 4, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
-              let first = points.first, let last = points.last else { return nil }
-        let xs = points.map(\.x), ys = points.map(\.y)
-        let minX = xs.min()!, minY = ys.min()!, width = xs.max()! - minX, height = ys.max()! - minY
-        let diagonal = hypot(width, height)
-        guard diagonal >= 12 else { return nil }
-        let frame = LogicalRect(x: minX, y: minY, width: width, height: height)
-        let endpointDistance = distance(first, last)
-        if endpointDistance > diagonal * 0.8 {
-            let maximumError = points.map { segmentDistance($0, first, last) }.max() ?? .infinity
-            if maximumError <= diagonal * 0.04 { return .init(kind: .line, frame: frame, originalPoints: points) }
-            return nil
-        }
-        guard endpointDistance <= diagonal * 0.2, width >= 8, height >= 8 else { return nil }
-        let normalized = points.map { CanvasPoint(x: ($0.x - minX) / width, y: ($0.y - minY) / height) }
-        let rectangle = [CanvasPoint(x: 0, y: 0), .init(x: 1, y: 0), .init(x: 1, y: 1), .init(x: 0, y: 1)]
-        let diamond = [CanvasPoint(x: 0.5, y: 0), .init(x: 1, y: 0.5), .init(x: 0.5, y: 1), .init(x: 0, y: 0.5)]
-        let triangle = [CanvasPoint(x: 0.5, y: 0), .init(x: 1, y: 1), .init(x: 0, y: 1)]
-        let ellipseError = normalized.map { abs(hypot(($0.x - 0.5) * 2, ($0.y - 0.5) * 2) - 1) / 2 }.reduce(0, +) / Double(points.count)
-        let candidates: [(ShapeKind, Double)] = [(.rectangle, polygonError(normalized, rectangle)), (.diamond, polygonError(normalized, diamond)), (.triangle, polygonError(normalized, triangle)), (.ellipse, ellipseError)]
-        let sorted = candidates.sorted { $0.1 < $1.1 }
-        guard let best = sorted.first, best.1 <= 0.055, sorted[1].1 - best.1 >= 0.012 else { return nil }
-        // Bounding dimensions are retained, so a wide rectangle stays wide.
-        return .init(kind: best.0, frame: frame, originalPoints: points)
-    }
-
-    private static func polygonError(_ points: [CanvasPoint], _ vertices: [CanvasPoint]) -> Double {
-        points.map { point in vertices.indices.map { segmentDistance(point, vertices[$0], vertices[($0 + 1) % vertices.count]) }.min()! }.reduce(0, +) / Double(points.count)
-    }
-    private static func distance(_ a: CanvasPoint, _ b: CanvasPoint) -> Double { hypot(a.x - b.x, a.y - b.y) }
-    private static func segmentDistance(_ p: CanvasPoint, _ a: CanvasPoint, _ b: CanvasPoint) -> Double {
-        let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
-        guard length > 0 else { return distance(p, a) }
-        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length))
-        return distance(p, .init(x: a.x + t * dx, y: a.y + t * dy))
+    public static func recognize(_ points: [CanvasPoint], intent: ShapeIntent = .automatic) -> RecognizedShape? {
+        ShapeRecognizer.recognize([points], intent: intent)
     }
 }
 
 public enum DiagramCommands {
     public static func insertStroke(_ points: [CanvasPoint], in document: CanvasDocument) throws -> [DocumentCommand] {
         guard points.count >= 2, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { throw DocumentError.invalid("Invalid stroke") }
+        if document.canvas.recognizeDiagrams, let recognized = DiagramRecognizer.recognize(points),
+           let commands = try insert(recognized, in: document) { return commands }
         let minX = points.map(\.x).min()!, minY = points.map(\.y).min()!
         let frame = LogicalRect(x: minX, y: minY, width: max(1, points.map(\.x).max()! - minX), height: max(1, points.map(\.y).max()! - minY))
         let ink = InkStroke(points: points.map { .init(x: $0.x - minX, y: $0.y - minY) })
         let order = (document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
-        if document.canvas.recognizeDiagrams, let recognized = DiagramRecognizer.recognize(points) {
-            if recognized.kind == .line, var relation = try connection(for: points, document: document) {
+        return [.insertBlock(CanvasBlock(order: order, layout: .init(mode: .absolute, frame: frame), content: .ink(ink)))]
+    }
+
+    /// Commands for a recognized figure. A line between two shapes becomes a connector; a line
+    /// elsewhere becomes a line shape only when `allowFreeLines` (a deliberate gesture), else nil.
+    public static func insert(_ recognized: RecognizedShape, in document: CanvasDocument, stroke: String? = nil,
+                              lineWidth: Double? = nil, allowFreeLines: Bool = true) throws -> [DocumentCommand]? {
+        let points = recognized.originalPoints
+        if recognized.kind == .line {
+            if var relation = try connection(for: points, document: document) {
                 relation.originalStroke = InkStroke(points: points)
+                if let stroke { relation.style = .init(color: stroke, width: lineWidth ?? 2) }
                 return [.setRelation(relation)]
             }
-            var commands = insertNode(kind: recognized.kind, frame: frame, order: order)
-            if case .insertBlock(var block) = commands[0], case .shape(var shape) = block.content {
-                shape.originalStroke = ink
-                block.content = .shape(shape)
-                commands[0] = .insertBlock(block)
-            }
-            return commands
+            guard allowFreeLines else { return nil }
         }
-        return [.insertBlock(CanvasBlock(order: order, layout: .init(mode: .absolute, frame: frame), content: .ink(ink)))]
+        let order = (document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
+        var commands = insertNode(kind: recognized.kind, frame: recognized.frame, order: order)
+        if case .insertBlock(var block) = commands[0], case .shape(var shape) = block.content {
+            let minX = points.map(\.x).min() ?? 0, minY = points.map(\.y).min() ?? 0
+            shape.originalStroke = InkStroke(points: points.map { .init(x: $0.x - minX, y: $0.y - minY) })
+            if let stroke { shape.stroke = stroke }
+            if let lineWidth { shape.lineWidth = lineWidth }
+            block.content = .shape(shape)
+            if recognized.rotationRadians != 0 {
+                var presentation = block.effectivePresentation; presentation.rotationRadians = recognized.rotationRadians
+                block.presentation = presentation
+            }
+            commands[0] = .insertBlock(block)
+        }
+        return commands
     }
 
     /// Node and editable text child are one atomic, undoable operation.

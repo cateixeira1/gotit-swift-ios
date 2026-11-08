@@ -24,6 +24,8 @@ final class AppModel {
     private var previewRevisions: [UUID: Int64] = [:]
     private var lastPreviewTime = Date.distantPast
     var noteMetadata: [UUID: NoteCardPresentation] = [:]
+    /// Teias a note was opened from, most recent last: "back" returns there before the list.
+    var returnStack: [UUID] = []
     var error: String?
     var isSaving = false
     var writeFailed = false
@@ -68,14 +70,34 @@ final class AppModel {
         }
     }
 
-    func open(_ id: UUID) async {
+    /// Opens a note or Teia. `returningTo` is the Teia it was opened from; opening from the list
+    /// (no origin) starts over.
+    func open(_ id: UUID, returningTo origin: UUID? = nil) async {
         guard !isSaving, let store else { return }
-        do { document = try await store.load(id); selectedPageID = document?.pages.first?.id }
+        do {
+            let loaded = try await store.load(id)
+            if let origin, origin != id { returnStack.append(origin) } else if origin == nil { returnStack.removeAll() }
+            document = loaded; selectedPageID = loaded.pages.first?.id
+        }
         catch { self.error = String(describing: error) }
+    }
+
+    /// Back to the Teia this note was opened from.
+    func goBack() async {
+        guard !isSaving, let store, let origin = returnStack.last else { return }
+        do {
+            let loaded = try await store.load(origin)
+            returnStack.removeLast()
+            document = loaded; selectedPageID = loaded.pages.first?.id
+        } catch { returnStack.removeLast(); self.error = String(describing: error) }
+    }
+    var returnTitle: String? {
+        returnStack.last.map { id in summaries.first { $0.id == id }?.title ?? "Teia" }
     }
 
     func createNote() async {
         guard !isSaving, let store else { return }
+        returnStack.removeAll()
         do {
             document = try await store.create(.init(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18)))
             try await refresh()
@@ -84,6 +106,7 @@ final class AppModel {
 
     func createWeb(including id: UUID? = nil) async {
         guard !isSaving, let store else { return }
+        returnStack.removeAll()
         do {
             var web = CanvasDocument(title: "Teia \(summaries.filter { $0.kind == .web }.count + 1)", kind: .web)
             if let id, let summary = summaries.first(where: { $0.id == id && $0.kind == .note }) {
@@ -234,6 +257,13 @@ final class AppModel {
         }
     }
 
+    /// Backspace at the start of a continuation box removes the last character of the previous
+    /// box with text (on an earlier page) and reflows the story; the caret goes there.
+    func backspaceAcrossFragments(_ blockID: UUID, group: String?) -> TextFlowFocus? {
+        guard let document, let merge = document.backspaceAcrossFragments(at: blockID) else { return nil }
+        return editText(merge.replacement, group: group, selection: NSRange(location: merge.caret, length: 0))
+    }
+
     func assetURL(_ hash: String) -> URL? { directory?.appendingPathComponent("assets").appendingPathComponent(hash) }
 
     func savePDF(_ data: Data, blockID: UUID, documentID: UUID) throws {
@@ -379,7 +409,17 @@ struct AppScreen: View {
                 }
                 .navigationTitle(document.title)
                 .navigationBarTitleDisplayMode(.inline)
+                // Opened from a Teia: "back" returns to it first, then to the list.
+                .navigationBarBackButtonHidden(model.returnTitle != nil)
                 .toolbar {
+                    if let title = model.returnTitle {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button { Task { await model.goBack() } } label: {
+                                HStack(spacing: 4) { Image(systemName: "chevron.backward").fontWeight(.semibold); Text(title).lineLimit(1) }
+                            }
+                            .accessibilityLabel("Voltar para \(title)").accessibilityIdentifier("backToTeia")
+                        }
+                    }
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         Button { Task { await model.history(undo: true) } } label: { Image(systemName: "arrow.uturn.backward") }.disabled(model.isSaving)
                         Button { Task { await model.history(undo: false) } } label: { Image(systemName: "arrow.uturn.forward") }.disabled(model.isSaving)

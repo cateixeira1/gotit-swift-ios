@@ -8,6 +8,8 @@ public struct TextFlowFocus {
     public var pageID: UUID
     public var range: NSRange
     public var text: RichText = .init("")
+    /// The box's new frame, so the view can grow before the host re-renders (no clipped line).
+    public var frame: LogicalRect?
 }
 
 /// One logical story, stored as linked rich-text fragments. TextKit measures actual
@@ -105,7 +107,9 @@ public struct TextFlowFocus {
             let removedIDs = Set(unused.map(\.id))
             if !document.blocks.contains(where: { document.pageID(for: $0.id) == page && !removedIDs.contains($0.id) }) { commands.append(.removePage(page)) }
         }
-        if let block = used.first(where: { $0.id == focus.blockID }), case .text(let rich) = block.content { focus.text = rich }
+        if let block = used.first(where: { $0.id == focus.blockID }), case .text(let rich) = block.content {
+            focus.text = rich; focus.frame = block.layout.frame
+        }
         return .init(commands: commands, focus: focus)
     }
 }

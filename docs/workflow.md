@@ -14,10 +14,11 @@ sobre prioridades a cada entrega.
 
 ## Reconhecimento de formas
 
-Retomar a calibração/múltiplos traços após os critérios 1–3, quando pressão,
-borracha, persistência e desempenho PencilKit tiverem sido verificados. Medir
-falsos positivos e preservar a tinta original; não ampliar reconhecimento durante
-as correções de entrada de texto.
+Antecipado em 07/11/2026 a pedido do usuário, depois do teste em aparelho (só
+convertia figuras quase perfeitas). Reescrito com múltiplos traços, segurar no fim
+e regras de contexto para não converter escrita; detalhes e taxas medidas em
+`native-editor.md`. Pendente: medir falsos positivos com traços reais do usuário
+(exportar amostras do aparelho) e ajustar os limites com esses dados.
 
 ## Equações manuscritas
 

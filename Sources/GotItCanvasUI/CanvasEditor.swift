@@ -101,7 +101,7 @@ final class FlowTextView: UITextView {
 }
 
 @MainActor
-public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate {
+public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate, UIPopoverPresentationControllerDelegate {
     private var configuration: CanvasEditor
     private let scroll = UIScrollView()
     private let surface = UIView()
@@ -1568,14 +1568,23 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
               shape.kind == .calendar, presentedViewController == nil else { return }
         let picker = DayPickerController(day: Stickers.day(from: shape.date) ?? Date()) { [weak self] day in self?.setDay(day, for: id) }
         let sheet = UINavigationController(rootViewController: picker)
-        sheet.modalPresentationStyle = .popover
-        if let anchor = blockViews[id], let popover = sheet.popoverPresentationController {
-            popover.sourceView = anchor; popover.sourceRect = anchor.bounds
-            popover.permittedArrowDirections = [.up, .down, .left, .right]
-            popover.adaptiveSheetPresentationController.detents = [.medium(), .large()]   // iPhone: a sheet
+        // On the iPhone a popover that adapted into a half-height sheet around the inline date
+        // picker hung the app (reproduced in the iPhone simulator); there it is a plain full sheet.
+        if traitCollection.horizontalSizeClass == .regular, let anchor = blockViews[id] {
+            sheet.modalPresentationStyle = .popover
+            sheet.preferredContentSize = CGSize(width: 340, height: 420)
+            if let popover = sheet.popoverPresentationController {
+                popover.sourceView = anchor; popover.sourceRect = anchor.bounds
+                popover.permittedArrowDirections = [.up, .down, .left, .right]
+                popover.delegate = self
+            }
+        } else {
+            sheet.modalPresentationStyle = .pageSheet
+            sheet.sheetPresentationController?.detents = [.large()]
         }
         present(sheet, animated: true)
     }
+    public func adaptivePresentationStyle(for controller: UIPresentationController, traitCollection: UITraitCollection) -> UIModalPresentationStyle { .none }
     private func setDay(_ day: Date, for id: UUID) {
         guard let block = configuration.document.blocks.first(where: { $0.id == id }),
               let changed = try? Stickers.settingDay(day, of: block), changed != block else { return }
@@ -1648,7 +1657,6 @@ final class DayPickerController: UIViewController {
             guard let self else { return }
             self.onPick(self.picker.date); self.dismiss(animated: true)
         })
-        preferredContentSize = CGSize(width: 340, height: 420)
     }
 }
 

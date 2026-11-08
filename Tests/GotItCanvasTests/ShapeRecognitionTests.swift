@@ -108,7 +108,9 @@ private func segment(_ a: CanvasPoint, _ b: CanvasPoint, seed: UInt64) -> [Canva
     let up = try #require(ShapeRecognizer.recognize([handDrawn([.init(x: 90, y: 0), .init(x: 170, y: 140), .init(x: 0, y: 136)], seed: 11, overshoot: 0.05)], intent: .automatic))
     #expect(up.kind == .triangle); #expect(up.rotationRadians == 0)
     let down = try #require(ShapeRecognizer.recognize([handDrawn([.init(x: 0, y: 0), .init(x: 160, y: 6), .init(x: 84, y: 130)], seed: 12)], intent: .automatic))
-    #expect(down.kind == .triangle); #expect(abs(down.rotationRadians - .pi) < 0.01)
+    // Pointing down is drawn by its corners, not by turning it upside down (its text stays upright).
+    #expect(down.kind == .triangle); #expect(down.rotationRadians == 0)
+    #expect(down.vertices?.contains { $0.y == 1 && abs($0.x - 0.5) < 1e-6 } == true)
 
     let diamond = try #require(ShapeRecognizer.recognize([handDrawn([.init(x: 100, y: 0), .init(x: 200, y: 70), .init(x: 104, y: 140), .init(x: 0, y: 66)], seed: 13)], intent: .automatic))
     #expect(diamond.kind == .diamond)
@@ -231,4 +233,102 @@ private func letter(_ name: String, at origin: CanvasPoint, size: Double, seed: 
     #expect(Double(triangles) / Double(trials) >= 0.85)
     #expect(boxWrong + circleWrong <= trials / 50)
     #expect(Double(letters) / Double(lettersTotal) <= 0.03)
+}
+
+// MARK: Triangles of any form
+
+private func side(_ a: CanvasPoint, _ b: CanvasPoint, bow: Double, noise: inout Noise, from: Double = 0, to: Double = 1) -> [CanvasPoint] {
+    let length = hypot(b.x - a.x, b.y - a.y)
+    let normal = CanvasPoint(x: -(b.y - a.y) / length, y: (b.x - a.x) / length)
+    let curve = bow * length * noise.next()
+    let steps = max(6, Int(length / 6))
+    return (0...steps).compactMap { step in
+        let t = Double(step) / Double(steps)
+        guard t >= from - 1e-9, t <= to + 1e-9 else { return nil }
+        let offset = curve * sin(.pi * t)
+        return .init(x: a.x + (b.x - a.x) * t + normal.x * offset + 1.5 * noise.next(), y: a.y + (b.y - a.y) * t + normal.y * offset + 1.5 * noise.next())
+    }
+}
+
+@Test func rightAndLopsidedTrianglesKeepTheirForm() throws {
+    var noise = Noise(state: 41)
+    // A right triangle: the corner stays a right angle and on the left.
+    let right = side(.init(x: 0, y: 0), .init(x: 0, y: 160), bow: 0.02, noise: &noise) + side(.init(x: 0, y: 160), .init(x: 220, y: 158), bow: 0.02, noise: &noise)
+        + side(.init(x: 220, y: 158), .init(x: 2, y: 2), bow: 0.02, noise: &noise)
+    let shape = try #require(ShapeRecognizer.recognize([right], intent: .automatic))
+    #expect(shape.kind == .triangle); #expect(shape.rotationRadians == 0)
+    let corners = try #require(shape.vertices)
+    #expect(corners.contains(.init(x: 0, y: 0))); #expect(corners.contains(.init(x: 0, y: 1))); #expect(corners.contains(.init(x: 1, y: 1)))
+    // Apex at a third of the base: kept there, not moved to the middle.
+    let lopsided = side(.init(x: 60, y: 0), .init(x: 200, y: 150), bow: 0.02, noise: &noise) + side(.init(x: 200, y: 150), .init(x: 0, y: 150), bow: 0.02, noise: &noise)
+        + side(.init(x: 0, y: 150), .init(x: 60, y: 2), bow: 0.02, noise: &noise)
+    let apex = try #require(ShapeRecognizer.recognize([lopsided], intent: .automatic)?.vertices?.first { $0.y == 0 })
+    #expect(abs(apex.x - 0.3) < 0.05)
+}
+
+@Test func trianglesWithAnOpenCornerOrCrookedSides() {
+    var noise = Noise(state: 99)
+    func r(_ range: ClosedRange<Double>) -> Double { range.lowerBound + (range.upperBound - range.lowerBound) * (noise.next() + 1) / 2 }
+    var counts: [String: Int] = [:], wrong = 0
+    let trials = 300
+    for trial in 0..<trials {
+        let w = r(90...300), h = r(80...240), tilt = r(-0.15...0.15)
+        func turn(_ p: CanvasPoint) -> CanvasPoint { .init(x: p.x * cos(tilt) - p.y * sin(tilt) + 200, y: p.x * sin(tilt) + p.y * cos(tilt) + 200) }
+        let apex = turn(.init(x: r(0...1) * w, y: 0)), right = turn(.init(x: w, y: h)), left = turn(.init(x: 0, y: h))
+        var n = Noise(state: UInt64(trial + 77))
+        let bow = r(0...0.06)
+        let cases: [(String, [[CanvasPoint]])] = [
+            ("any form", [side(apex, right, bow: bow, noise: &n) + side(right, left, bow: bow, noise: &n) + side(left, apex, bow: bow, noise: &n)]),
+            ("stops short of the start", [side(apex, right, bow: bow, noise: &n) + side(right, left, bow: bow, noise: &n) + side(left, apex, bow: bow, noise: &n, to: r(0.7...0.9))]),
+            ("both ends short", [side(apex, right, bow: bow, noise: &n, from: r(0.05...0.15)) + side(right, left, bow: bow, noise: &n) + side(left, apex, bow: bow, noise: &n, to: r(0.85...0.95))]),
+            ("corner open between two strokes", [side(apex, right, bow: bow, noise: &n, to: r(0.75...0.9)), side(right, left, bow: bow, noise: &n, from: r(0.0...0.1)) + side(left, apex, bow: bow, noise: &n)]),
+            ("crooked sides", [side(apex, right, bow: r(0.08...0.14), noise: &n) + side(right, left, bow: r(0.05...0.12), noise: &n) + side(left, apex, bow: r(0.08...0.14), noise: &n)]),
+            ("three strokes", [side(apex, right, bow: bow, noise: &n), side(right, left, bow: bow, noise: &n), side(left, apex, bow: bow, noise: &n)]),
+        ]
+        for (name, strokes) in cases {
+            switch ShapeRecognizer.recognize(strokes, intent: .automatic)?.kind {
+            case .triangle: counts[name, default: 0] += 1
+            case nil: break
+            default: wrong += 1
+            }
+        }
+    }
+    print("TRIANGLES " + counts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)/\(trials)" }.joined(separator: ", ") + ", other kind \(wrong)")
+    for (name, count) in counts { #expect(Double(count) / Double(trials) >= 0.9, "\(name)") }
+    #expect(counts.count == 6)
+    #expect(wrong == 0)
+}
+
+@Test func straightLettersAndArchesAreNotTriangles() {
+    var noise = Noise(state: 5)
+    func r(_ range: ClosedRange<Double>) -> Double { range.lowerBound + (range.upperBound - range.lowerBound) * (noise.next() + 1) / 2 }
+    var letters = 0, arches = 0
+    for trial in 0..<300 {
+        var n = Noise(state: UInt64(trial + 500))
+        let s = r(40...120)
+        func strokes(_ pts: [(Double, Double)]) -> [CanvasPoint] {
+            (0..<(pts.count - 1)).flatMap { i in side(.init(x: pts[i].0 * s, y: pts[i].1 * s), .init(x: pts[i + 1].0 * s, y: pts[i + 1].1 * s), bow: 0.03, noise: &n) }
+        }
+        let shapes: [[[CanvasPoint]]] = [
+            [strokes([(0, 0), (1, 0), (0, 1), (1, 1)])],                          // Z
+            [strokes([(0, 1), (0, 0), (0.8, 1), (0.8, 0)])],                      // N
+            [strokes([(0.7, 0), (0, 0.7), (1, 0.7)]), strokes([(0.7, 0.05), (0.7, 1)])],   // 4
+            [strokes([(0.7, 1), (0.7, 0), (0, 0.7), (1, 0.7)])],                  // 4 in one stroke
+            [strokes([(0, 1), (0.5, 0), (1, 1)]), strokes([(0.25, 0.55), (0.75, 0.55)])],  // A
+            [strokes([(0, 0), (0.5, 1), (1, 0)])],                                // V
+            [strokes([(0, 0), (0.25, 1), (0.5, 0.3), (0.75, 1), (1, 0)])],        // W
+            [strokes([(0, 1), (0.1, 0), (0.5, 0.7), (0.9, 0), (1, 1)])],          // M
+            [strokes([(0, 0), (1, 0), (0.4, 1)])],                                // 7
+            [strokes([(0.1, 0.2), (0.5, 0), (0.9, 0.2), (0, 1), (1, 1)])],        // 2
+        ]
+        letters += shapes.filter { ShapeRecognizer.recognize($0, intent: .automatic)?.kind == .triangle }.count
+        // A half disc or half ellipse ("D" lying down) has two corners and a round top.
+        let w = r(90...300), h = r(80...240)
+        let half = (0...60).map { i -> CanvasPoint in let t = .pi * Double(i) / 60; return .init(x: 200 + w / 2 * cos(t), y: 200 - h * sin(t)) }
+            + side(.init(x: 200 - w / 2, y: 200), .init(x: 200 + w / 2, y: 200), bow: 0.02, noise: &n)
+        if ShapeRecognizer.recognize([half], intent: .automatic)?.kind == .triangle { arches += 1 }
+    }
+    print("NOT TRIANGLES letters \(letters)/3000, half discs \(arches)/300")
+    #expect(letters == 0)
+    #expect(arches <= 20)     // only very tall, pointed arches
 }

@@ -226,13 +226,45 @@ struct EditorWorkspace: View {
     private static let stickerEmoji = [
         "⭐️", "✅", "❗️", "❓", "⚠️", "📌", "📎", "💡", "🔥", "🎯", "🚩", "🛑",
         "❤️", "👍", "👏", "🎉", "😀", "😂", "😍", "🤔", "🙏", "💪", "👀", "✨",
-        "📅", "⏰", "📝", "📚", "⚖️", "🏥", "💊", "🩺", "📞", "✉️", "💰", "📈",
+        "⏰", "📝", "📚", "⚖️", "🏥", "💊", "🩺", "📞", "✉️", "💰", "📈",
         "🏠", "🚗", "✈️", "☕️", "🍰", "🐱", "☀️", "🌧️", "🔒", "🔑", "➡️", "⬇️",
     ]
 
     private var stickerPicker: some View {
         NavigationStack {
             ScrollView {
+                HStack(spacing: 18) {
+                    Button {
+                        showStickers = false; model.insertStickyNote(pageID: pageID, documentID: document.id)
+                    } label: {
+                        VStack(spacing: 6) {
+                            ZStack(alignment: .topLeading) {
+                                Rectangle().fill(Color(red: 1, green: 0.95, blue: 0.48))
+                                    .frame(width: 74, height: 74).shadow(color: .black.opacity(0.22), radius: 3, y: 3)
+                                Text("Escreva…").font(.custom("Noteworthy-Bold", size: 12)).foregroundStyle(.black.opacity(0.6)).padding(8).padding(.top, 6)
+                            }
+                            Text("Post-it").font(.caption)
+                        }
+                    }.buttonStyle(.plain).accessibilityLabel("Post-it").accessibilityIdentifier("stickyNoteSticker")
+                    Button {
+                        showStickers = false; model.insertCalendar(pageID: pageID, documentID: document.id)
+                    } label: {
+                        VStack(spacing: 6) {
+                            VStack(spacing: 0) {
+                                Text(Date().formatted(.dateTime.month(.abbreviated).locale(Locale(identifier: "pt_BR"))).replacingOccurrences(of: ".", with: "").uppercased())
+                                    .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity, minHeight: 22).background(Color(red: 0.9, green: 0.27, blue: 0.23))
+                                Text(Date().formatted(.dateTime.day()))
+                                    .font(.system(size: 32, weight: .semibold)).foregroundStyle(.black.opacity(0.85))
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity).background(.white)
+                            }
+                            .frame(width: 66, height: 74).clipShape(RoundedRectangle(cornerRadius: 9))
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.12)))
+                            .shadow(color: .black.opacity(0.2), radius: 3, y: 3)
+                            Text("Calendário").font(.caption)
+                        }
+                    }.buttonStyle(.plain).accessibilityLabel("Calendário").accessibilityIdentifier("calendarSticker")
+                }.padding(.top, 12)
                 Button { showStickers = false; beginImport(sticker: true, pdf: false) } label: {
                     Label("Usar uma imagem da galeria", systemImage: "photo.on.rectangle").frame(maxWidth: .infinity)
                 }.buttonStyle(.bordered).padding(.horizontal).padding(.top, 8)

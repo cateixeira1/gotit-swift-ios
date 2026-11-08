@@ -182,7 +182,13 @@ public struct RichText: Codable, Equatable, Sendable {
     public var plainText: String { runs.map(\.text).joined() }
 }
 
-public enum ShapeKind: String, Codable, Sendable { case rectangle, ellipse, diamond, triangle, line, arrow }
+public enum ShapeKind: String, Codable, Sendable {
+    case rectangle, ellipse, diamond, triangle, line, arrow
+    /// A paper note stuck on the page, with a text inside; `fill` is the paper colour.
+    case stickyNote
+    /// A desk-calendar sticker showing one day (`Shape.date`).
+    case calendar
+}
 public extension ShapeKind {
     /// Shapes with an inside: usable as image masks and as text-wrap contours.
     static let closedMasks: [ShapeKind] = [.rectangle, .ellipse, .diamond, .triangle]
@@ -194,9 +200,19 @@ public struct Shape: Codable, Equatable, Sendable {
     public var fill: String?
     public var lineWidth: Double
     public var originalStroke: InkStroke?
-    public init(kind: ShapeKind, stroke: String = "#000000", fill: String? = nil, lineWidth: Double = 1, originalStroke: InkStroke? = nil) {
+    /// Corners as fractions of the frame (0...1), for a triangle of any form. Nil: upright, apex centred.
+    public var vertices: [CanvasPoint]?
+    /// Day shown by a calendar sticker, "yyyy-MM-dd".
+    public var date: String?
+    public init(kind: ShapeKind, stroke: String = "#000000", fill: String? = nil, lineWidth: Double = 1, originalStroke: InkStroke? = nil,
+                vertices: [CanvasPoint]? = nil, date: String? = nil) {
         self.kind = kind; self.stroke = stroke; self.fill = fill; self.lineWidth = lineWidth
-        self.originalStroke = originalStroke
+        self.originalStroke = originalStroke; self.vertices = vertices; self.date = date
+    }
+    /// The triangle's corners as fractions of its frame.
+    public var triangleCorners: [CanvasPoint] {
+        if let vertices, vertices.count == 3, vertices.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) { return vertices }
+        return [.init(x: 0.5, y: 0), .init(x: 1, y: 1), .init(x: 0, y: 1)]
     }
 }
 
@@ -223,7 +239,7 @@ public enum BlockContent: Codable, Equatable, Sendable {
     public var allowsChildren: Bool {
         switch self {
         case .container: true
-        case .shape(let shape): shape.kind != .line && shape.kind != .arrow
+        case .shape(let shape): shape.kind != .line && shape.kind != .arrow && shape.kind != .calendar
         default: false
         }
     }

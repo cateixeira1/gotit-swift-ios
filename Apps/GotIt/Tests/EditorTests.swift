@@ -2,6 +2,7 @@ import XCTest
 import PencilKit
 import PDFKit
 import GotItDomain
+import GotItCanvas
 @testable import GotItCanvasUI
 @testable import GotItApp
 
@@ -226,6 +227,55 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(model.returnStack.isEmpty)
         await model.open(note)                     // from the list: no way "back" to a Teia
         XCTAssertTrue(model.returnStack.isEmpty)
+    }
+
+    func testEveryTeiaCardIsShownWhenTheTeiaOpensAgain() throws {
+        var web = CanvasDocument(title: "Teia", kind: .web)
+        // Spread over the page, one partly and one wholly past its right edge (dragged aside).
+        let spots: [(Double, Double)] = [(24, 24), (330, 24), (24, 600), (330, 620), (420, 860), (640, 300)]
+        for (index, spot) in spots.enumerated() {
+            web.blocks.append(CanvasBlock(order: index, layout: .init(mode: .absolute, frame: .init(x: spot.0, y: spot.1, width: 240, height: 190)),
+                                          content: .noteReference(.init(documentID: UUID()))))
+        }
+        let editors = try web.pages.map { CanvasEditor(document: try web.pageDocument($0.id), onCommands: { _ in }) }
+        let controller = PagedCanvasViewController(configuration: PagedCanvasEditor(
+            pages: editors, tool: .select, session: EditorSession(), focusPageID: web.pages.first?.id, onVisiblePage: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        let page = try XCTUnwrap(controller.children.compactMap { $0 as? CanvasViewController }.first)
+        XCTAssertEqual(page.realizedBlockViewCount, spots.count)
+        window.isHidden = true
+    }
+
+    func testStickyNoteAndCalendarAreDrawnLikePaper() throws {
+        func pixel(_ image: UIImage, _ x: Int, _ y: Int) throws -> [CGFloat] {
+            let cg = try XCTUnwrap(image.cgImage)
+            var data = [UInt8](repeating: 0, count: 4)
+            let context = try XCTUnwrap(CGContext(data: &data, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(cg, in: CGRect(x: -CGFloat(x), y: -CGFloat(cg.height - 1 - y), width: CGFloat(cg.width), height: CGFloat(cg.height)))
+            return data.map { CGFloat($0) / 255 }
+        }
+        func draw(_ block: CanvasBlock, size: CGSize) -> UIImage {
+            let view = CanvasObjectView(frame: CGRect(origin: .zero, size: size)); view.block = block
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = false
+            return UIGraphicsImageRenderer(size: size, format: format).image { _ in view.draw(view.bounds) }
+        }
+        let note = try CommandEngine.applying(Stickers.stickyNote(at: .init(x: 0, y: 0), order: 0), to: CanvasDocument(title: "S"))
+        let paper = try XCTUnwrap(note.blocks.first { $0.parentID == nil })
+        let drawnNote = draw(paper, size: CGSize(width: 200, height: 200))
+        let middle = try pixel(drawnNote, 100, 120)
+        XCTAssertGreaterThan(middle[0], 0.85); XCTAssertGreaterThan(middle[1], 0.8); XCTAssertLessThan(middle[2], 0.65)   // yellow paper
+        XCTAssertLessThan(try pixel(drawnNote, 199, 199)[3], 0.1)                                                       // lifted corner
+        let calendar = try CommandEngine.applying(Stickers.calendar(at: .init(x: 0, y: 0), order: 0), to: CanvasDocument(title: "C"))
+        let drawnCalendar = draw(try XCTUnwrap(calendar.blocks.first), size: CGSize(width: 132, height: 148))
+        let band = try pixel(drawnCalendar, 12, 45)
+        XCTAssertGreaterThan(band[0], 0.7); XCTAssertLessThan(band[1], 0.45)                                           // red month band
+        let body = try pixel(drawnCalendar, 10, 125)
+        XCTAssertGreaterThan(body[0], 0.95); XCTAssertGreaterThan(body[1], 0.95)                                        // white page
     }
 
     func testOffscreenBlocksAreNotInstantiated() {

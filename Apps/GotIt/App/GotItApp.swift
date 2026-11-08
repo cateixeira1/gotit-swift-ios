@@ -343,6 +343,20 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// Drawn stickers: a yellow post-it with a text box, or a calendar showing today. Inserted at a
+    /// fixed spot of the page and selected, like the emoji stickers.
+    func insertStickyNote(pageID: UUID, documentID: UUID) {
+        guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
+        enqueue(Stickers.stickyNote(at: .init(x: 40, y: 80), order: nextRootOrder(in: current)), pageID: pageID, documentID: documentID)
+    }
+    func insertCalendar(pageID: UUID, documentID: UUID) {
+        guard let current = document, current.id == documentID, current.pages.contains(where: { $0.id == pageID }) else { return }
+        enqueue(Stickers.calendar(at: .init(x: 40, y: 80), order: nextRootOrder(in: current)), pageID: pageID, documentID: documentID)
+    }
+    private func nextRootOrder(in document: CanvasDocument) -> Int {
+        (document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
+    }
+
     func importPDF(_ url: URL, pageID: UUID, documentID: UUID) {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }

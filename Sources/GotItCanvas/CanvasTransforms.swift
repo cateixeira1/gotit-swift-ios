@@ -85,6 +85,10 @@ public extension CanvasTransforms {
 
     /// Whether a block's content keeps its aspect ratio when resized with the handles.
     static func keepsAspectRatio(_ content: BlockContent) -> Bool {
-        switch content { case .image, .sticker, .pdf, .video: true; default: false }
+        switch content {
+        case .image, .sticker, .pdf, .video: true
+        case .shape(let shape): shape.kind == .calendar
+        default: false
+        }
     }
 }

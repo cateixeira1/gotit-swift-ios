@@ -45,8 +45,16 @@ public enum PagePreview {
                 } else {
                     let view = CanvasObjectView(frame: CGRect(origin: .zero, size: rect.size))
                     view.block = block; view.asset = block.content.assetHash.flatMap(asset)
-                    if case .sticker = block.content { context.cgContext.setShadow(offset: CGSize(width: 0, height: 4), blur: 5, color: UIColor.black.withAlphaComponent(0.24).cgColor) }
+                    switch block.content {
+                    case .sticker: context.cgContext.setShadow(offset: CGSize(width: 0, height: 4), blur: 5, color: UIColor.black.withAlphaComponent(0.24).cgColor)
+                    case .shape(let shape) where shape.kind == .stickyNote || shape.kind == .calendar:
+                        context.cgContext.setShadow(offset: CGSize(width: 0, height: 3), blur: 4, color: UIColor.black.withAlphaComponent(0.22).cgColor)
+                    default: break
+                    }
+                    // One shadow for the whole object, not one per stroke of its drawing.
+                    context.cgContext.beginTransparencyLayer(auxiliaryInfo: nil)
                     view.draw(view.bounds)
+                    context.cgContext.endTransparencyLayer()
                 }
                 context.cgContext.restoreGState()
             }

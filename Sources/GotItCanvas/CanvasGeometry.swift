@@ -121,7 +121,10 @@ public enum TextFlowEngine {
                 case .diamond:
                     polygon = [.init(x: local.center.x, y: local.y), .init(x: local.x + local.width, y: local.center.y),
                                .init(x: local.center.x, y: local.y + local.height), .init(x: local.x, y: local.center.y)]
-                case .triangle: polygon = [.init(x: local.center.x, y: local.y), .init(x: local.x + local.width, y: local.y + local.height), .init(x: local.x, y: local.y + local.height)]
+                case .triangle:
+                    var corners: [CanvasPoint] = [.init(x: 0.5, y: 0), .init(x: 1, y: 1), .init(x: 0, y: 1)]
+                    if case .shape(let shape) = object.content { corners = shape.triangleCorners }
+                    polygon = corners.map { .init(x: local.x + $0.x * local.width, y: local.y + $0.y * local.height) }
                 default: polygon = corners(local)
                 }
                 polygon = polygon.map { rotate($0, around: frame.center, angle: presentation.rotationRadians) }

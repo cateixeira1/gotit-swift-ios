@@ -113,7 +113,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var awaitingShape: [Double] = []
     private var shapeCheckGeneration = 0
     /// The last figure made without an explicit gesture; undone if writing continues beside it.
-    private var lastConversion: (shapeID: UUID, strokes: [PKStroke], bounds: LogicalRect, at: Double)?
+    private var lastConversion: Conversion?
+    private typealias Conversion = (shapeID: UUID, strokes: [PKStroke], bounds: LogicalRect, at: Double)
+    /// Strokes drawn right beside the last figure. At the next pause they decide: another figure
+    /// keeps it (boxes side by side), writing turns it back into ink (the "o" of a word).
+    private var suspect: (conversion: Conversion, keys: Set<Double>)?
     /// Document revision when each text view last sent its content. A configuration that is not
     /// newer than that is stale (SwiftUI can re-render before the host's update arrives) and must
     /// not overwrite what the user is typing, or the caret jumps behind the last letters.
@@ -199,7 +203,15 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if embedded { scroll.frame = view.bounds; return }
+        if embedded {
+            // The first render happens before the page has its real size (in viewDidLoad), so it
+            // only realized the objects near the top-left corner; a Teia reopened on its way back
+            // from a note showed only its first card. Render again once the size is known.
+            let resized = scroll.frame.size != view.bounds.size
+            scroll.frame = view.bounds
+            if resized { render() }
+            return
+        }
         ruler.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 28)
         scroll.frame = CGRect(x: 0, y: 28, width: view.bounds.width, height: max(0, view.bounds.height - 28))
         if !fitted, scroll.bounds.width > 0 { fitted = true; fitPage() }
@@ -234,12 +246,15 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             if added.count == 1, let block = added.first {
                 switch block.content {
                 case .image, .sticker, .pdf, .table: selectedObjectID = block.id; croppingID = nil
+                case .shape(let shape) where shape.kind == .stickyNote || shape.kind == .calendar: selectedObjectID = block.id; croppingID = nil
                 default: break
                 }
             }
         }
         knownBlockIDs = Set(configuration.document.blocks.map(\.id))
-        let visible = scroll.convert(scroll.bounds, to: surface).insetBy(dx: -80, dy: -80)
+        // An embedded page is already realized only when it is near the screen (PagedCanvasViewController),
+        // so everything on it is shown, also objects moved past its edge (a Teia card dragged aside).
+        let visible = embedded ? CGRect.infinite : scroll.convert(scroll.bounds, to: surface).insetBy(dx: -80, dy: -80)
         let ids = Set(configuration.document.blocks.compactMap { block -> UUID? in
             guard let frame = frames[block.id] else { return nil }
             let bounds = CanvasLayoutEngine.rotatedBounds(frame, radians: block.effectivePresentation.rotationRadians)
@@ -263,7 +278,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 }
                 if richText.plainText.isEmpty, !textView.isFirstResponder {
                     let style = (try? configuration.document.resolvedStyle(for: block.id)) ?? .init()
-                    textView.typingAttributes = [.font: UIFont.systemFont(ofSize: style.fontSize ?? 18), .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
+                    let size = style.fontSize ?? 18
+                    let font = style.fontName.flatMap { UIFont(name: $0, size: size) } ?? UIFont.systemFont(ofSize: size)
+                    textView.typingAttributes = [.font: font, .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
                 }
                 let rendered = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init())
                 let stale = textView.isFirstResponder && (sentRevision[block.id].map { configuration.document.revision <= $0 } ?? false)
@@ -293,10 +310,21 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 object.block = block
                 object.asset = block.content.assetHash.flatMap(configuration.image)
                 if case .noteReference(let ref) = block.content { object.note = configuration.note(ref.documentID) }
-                if case .sticker = block.content {
+                object.layer.shadowPath = nil
+                switch block.content {
+                case .sticker:
                     object.layer.shadowColor = UIColor.black.cgColor; object.layer.shadowOpacity = 0.38
                     object.layer.shadowOffset = CGSize(width: 0, height: 6); object.layer.shadowRadius = 8
-                } else { object.layer.shadowOpacity = 0 }
+                case .shape(let shape) where shape.kind == .stickyNote:
+                    // Glued at the top: the shadow is under the loose bottom edge and the lifted corner.
+                    object.layer.shadowColor = UIColor.black.cgColor; object.layer.shadowOpacity = 0.3
+                    object.layer.shadowOffset = CGSize(width: 0, height: 4); object.layer.shadowRadius = 5
+                    object.layer.shadowPath = StickerArt.stickyNoteShadow(for: CGRect(x: 0, y: 0, width: logical.width, height: logical.height)).cgPath
+                case .shape(let shape) where shape.kind == .calendar:
+                    object.layer.shadowColor = UIColor.black.cgColor; object.layer.shadowOpacity = 0.28
+                    object.layer.shadowOffset = CGSize(width: 0, height: 4); object.layer.shadowRadius = 6
+                default: object.layer.shadowOpacity = 0
+                }
                 object.setNeedsDisplay()
                 blockView = object
             }
@@ -618,7 +646,6 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let scale = screenScale
         var taps: [(key: Double, point: CGPoint)] = []
         var held: [Double] = []
-        var extra: [DocumentCommand] = []
         for stroke in fresh {
             let drawn = sample(stroke, releasedAt: toolEndedAt)
             let key = Self.key(stroke)
@@ -627,7 +654,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 taps.append((key, CGPoint(x: box.x + box.width / 2, y: box.y + box.height / 2))); continue
             }
             if let conversion = lastConversion, InkIntent.continuesWriting(after: conversion.bounds, convertedAt: conversion.at, with: drawn) {
-                extra += revert(conversion)
+                let earlier = suspect?.conversion.shapeID == conversion.shapeID ? suspect?.keys ?? [] : []
+                suspect = (conversion, earlier.union([key]))
             }
             recentInk[key] = drawn
             if InkIntent.holdDuration(drawn, screenScale: scale) >= InkIntent.holdToSnap { held.append(key) }
@@ -641,7 +669,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             ink.drawing = PKDrawing(strokes: ink.drawing.strokes.filter { !removed.contains(Self.key($0)) })
             applyingDrawing = false
         }
-        saveDrawing(extra)               // the ink itself is kept first: undo then restores it
+        saveDrawing()                    // the ink itself is kept first: undo then restores it
         for key in held { snapFigure(endingWith: key) }
         if let tap = taps.last { handleFingerTap(at: tap.point) }
         scheduleShapeCheck()
@@ -667,8 +695,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     private func scheduleShapeCheck() {
-        guard !awaitingShape.isEmpty else { return }
-        guard configuration.document.canvas.recognizeDiagrams else { awaitingShape.removeAll(); return }
+        guard !awaitingShape.isEmpty || suspect != nil else { return }
+        guard configuration.document.canvas.recognizeDiagrams else { awaitingShape.removeAll(); suspect = nil; return }
         shapeCheckGeneration += 1
         let generation = shapeCheckGeneration
         Task { @MainActor [weak self] in
@@ -679,28 +707,67 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     /// After a pause: strokes drawn together are one candidate. Many strokes, writing on the same
-    /// line, small strokes, or strokes inside an object (a label in a box) stay ink.
+    /// line, small strokes, or strokes inside an object (a label in a box) stay ink. Strokes that run
+    /// from one figure to another are connectors: the figures convert first, then those lines
+    /// become straight connectors between them.
     private func checkAwaitingShapes() {
         let pending = awaitingShape.compactMap { key in recentInk[key].map { (key: key, ink: $0) } }
             .filter { item in ink.drawing.strokes.contains { Self.key($0) == item.key } }
         awaitingShape.removeAll()
+        var converted = Set<Double>()
+        defer { resolveSuspect(converted: converted) }
         guard !pending.isEmpty else { return }
         let scale = screenScale
         let minimum = max(36, 40 / max(scale, 0.01))      // at least 40 screen points (about 7 mm) at any zoom
-        for group in InkIntent.groups(pending.map(\.ink.bounds), padding: max(6, 10 / max(scale, 0.01))) where group.count <= 4 {
-            let members = group.map { pending[$0] }
+        let padding = max(6, 10 / max(scale, 0.01))
+        let tolerance = max(24, 22 / max(scale, 0.01))   // how far from a figure a connector may end
+        var working = configuration.document
+        let shapeFrames = configuration.document.blocks.filter { $0.content.allowsChildren }.compactMap { frames[$0.id] }
+        let lineKeys = Set(InkIntent.connectorStrokes(pending.map(\.ink), figures: shapeFrames, padding: padding, tolerance: tolerance).map { pending[$0].key })
+        let figureStrokes = pending.filter { !lineKeys.contains($0.key) }
+
+        func neighbourGroups(excluding keys: Set<Double>) -> [[InkSample]] {
+            let others = recentInk.filter { !keys.contains($0.key) && !lineKeys.contains($0.key) }.map(\.value)
+            return InkIntent.groups(others.map(\.bounds), padding: padding).map { $0.map { others[$0] } }
+        }
+        func tryFigure(_ members: [(key: Double, ink: InkSample)]) -> Bool {
+            guard !members.isEmpty, members.count <= 4 else { return false }
             let keys = Set(members.map(\.key))
-            let points = members.map(\.ink.points)
             let bounds = InkIntent.union(members.map(\.ink.bounds))
-            guard max(bounds.width, bounds.height) >= minimum, !liesInsideObject(bounds) else { continue }
-            let neighbours = recentInk.filter { !keys.contains($0.key) }.map(\.value)
-            guard !InkIntent.isNextToWriting(bounds, neighbours: neighbours) else { continue }
+            guard max(bounds.width, bounds.height) >= minimum, !liesInsideObject(bounds) else { return false }
+            guard !InkIntent.isNextToWriting(bounds, neighbourGroups: neighbourGroups(excluding: keys)) else { return false }
             // Every stroke of a figure is a real part of its outline, not a dot or a tick.
             let total = members.reduce(0) { $0 + $1.ink.length }
-            if members.count > 1, members.contains(where: { $0.ink.length < 0.15 * total }) { continue }
-            guard let figure = ShapeRecognizer.recognize(points, intent: .automatic) else { continue }
-            convert(figure, strokes: keys, automatic: true)
+            if members.count > 1, members.contains(where: { $0.ink.length < 0.15 * total }) { return false }
+            guard let figure = ShapeRecognizer.recognize(members.map(\.ink.points), intent: .automatic),
+                  let commands = convert(figure, strokes: keys, automatic: true, in: working, tolerance: tolerance) else { return false }
+            if let updated = try? CommandEngine.applying(commands, to: working) { working = updated }
+            converted.formUnion(keys)
+            return true
         }
+        for group in InkIntent.groups(figureStrokes.map(\.ink.bounds), padding: padding) {
+            _ = tryFigure(group.map { figureStrokes[$0] })
+        }
+        // Lines between figures, including figures converted just now.
+        for item in pending where !converted.contains(item.key) && (lineKeys.contains(item.key) || ShapeRecognizer.isConnectorStroke(item.ink.points)) {
+            let box = item.ink.bounds
+            let line = RecognizedShape(kind: .line, frame: box, originalPoints: item.ink.points)
+            guard let commands = convert(line, strokes: [item.key], automatic: true, in: working, tolerance: tolerance) else { continue }
+            if let updated = try? CommandEngine.applying(commands, to: working) { working = updated }
+            converted.insert(item.key)
+        }
+    }
+
+    /// Decides about strokes drawn beside the last figure: kept as a figure when they formed or
+    /// started another figure (or were erased), turned back into ink when they were writing.
+    private func resolveSuspect(converted: Set<Double>) {
+        guard let pendingSuspect = suspect else { return }
+        suspect = nil
+        if !pendingSuspect.keys.isDisjoint(with: converted) { return }
+        let alive = pendingSuspect.keys.filter { key in ink.drawing.strokes.contains { Self.key($0) == key } }
+        let followers = alive.compactMap { recentInk[$0] }
+        if followers.isEmpty || InkIntent.followerIsFigure(followers) { return }
+        saveDrawing(revert(pendingSuspect.conversion))
     }
 
     private func liesInsideObject(_ rect: LogicalRect) -> Bool {
@@ -717,10 +784,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     /// Replaces strokes by a figure in one save, after the ink itself was saved: one undo brings the
     /// strokes back. Free lines become shapes only on a deliberate gesture; otherwise only lines
     /// joining two figures (connectors) convert.
-    private func convert(_ figure: RecognizedShape, strokes keys: Set<Double>, automatic: Bool) {
+    @discardableResult
+    private func convert(_ figure: RecognizedShape, strokes keys: Set<Double>, automatic: Bool,
+                         in document: CanvasDocument? = nil, tolerance: Double = 24) -> [DocumentCommand]? {
         do {
-            guard let commands = try DiagramCommands.insert(figure, in: configuration.document, stroke: configuration.inkColor.hex,
-                                                             lineWidth: configuration.inkWidth, allowFreeLines: !automatic) else { return }
+            guard let commands = try DiagramCommands.insert(figure, in: document ?? configuration.document, stroke: configuration.inkColor.hex,
+                                                             lineWidth: configuration.inkWidth, allowFreeLines: !automatic,
+                                                             connectionTolerance: tolerance) else { return nil }
             let removed = ink.drawing.strokes.filter { keys.contains(Self.key($0)) }
             applyingDrawing = true
             ink.drawing = PKDrawing(strokes: ink.drawing.strokes.filter { !keys.contains(Self.key($0)) })
@@ -732,12 +802,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 let f = figure.frame
                 lastConversion = (block.id, removed, f, Date().timeIntervalSinceReferenceDate)
             }
+            if let current = suspect, !current.keys.isDisjoint(with: keys) { suspect = nil }   // the follower was a figure
             saveDrawing(commands)
-        } catch { configuration.onError(error) }
+            return commands
+        } catch { configuration.onError(error); return nil }
     }
 
     /// Writing went on right beside a figure made a moment ago: it was a letter. Puts the strokes back.
-    private func revert(_ conversion: (shapeID: UUID, strokes: [PKStroke], bounds: LogicalRect, at: Double)) -> [DocumentCommand] {
+    private func revert(_ conversion: Conversion) -> [DocumentCommand] {
         lastConversion = nil
         guard configuration.document.blocks.contains(where: { $0.id == conversion.shapeID }) else { return [] }
         applyingDrawing = true
@@ -1077,6 +1149,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if wasSelected, connectingFrom == nil, case .table = object.block?.content {
             beginEditingCell(object, at: point); return
         }
+        if wasSelected, connectingFrom == nil, case .shape(let shape) = object.block?.content, shape.kind == .calendar {
+            pickDay(for: id); return
+        }
         if let source = connectingFrom {
             connectingFrom = nil
             if source != id { configuration.onCommands([.setRelation(.init(sourceID: source, targetID: id, kind: .connector, style: .init()))]) }
@@ -1271,7 +1346,20 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ]
         if case .pdf = block.content { actions.insert(UIAction(title: "Abrir PDF") { [weak self] _ in self?.configuration.onOpenPDF(id) }, at: 0) }
         if case .table(let table) = block.content { actions.insert(contentsOf: tableMenu(block, table), at: 0) }
-        if case .shape = block.content {
+        if case .shape(let shape) = block.content, shape.kind == .stickyNote {
+            let current = StickyNoteColor(hex: shape.fill) ?? .yellow
+            actions.insert(UIMenu(title: "Cor do post-it", image: UIImage(systemName: "paintpalette"), children: StickyNoteColor.allCases.map { color in
+                UIAction(title: color.title, image: Self.swatch(color.hex), state: color == current ? .on : .off) { [weak self] _ in
+                    guard let self, let changed = try? Stickers.settingColor(color, of: block) else { return }
+                    self.configuration.onCommands([.replaceBlock(changed)])
+                }
+            }), at: 0)
+        } else if case .shape(let shape) = block.content, shape.kind == .calendar {
+            actions.insert(contentsOf: [
+                UIAction(title: "Alterar data…", image: UIImage(systemName: "calendar")) { [weak self] _ in self?.pickDay(for: id) },
+                UIAction(title: "Hoje", image: UIImage(systemName: "calendar.badge.clock")) { [weak self] _ in self?.setDay(Date(), for: id) },
+            ], at: 0)
+        } else if case .shape = block.content {
             actions.append(UIMenu(title: "Preenchimento", children: colors.map { name, color in
                 UIAction(title: name, handler: update { if case .shape(var shape) = $0.content { shape.fill = color; $0.content = .shape(shape) } })
             }))
@@ -1301,6 +1389,32 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         }
         actions.append(UIAction(title: "Excluir", attributes: .destructive) { [weak self] _ in self?.configuration.onCommands([.removeSubtree(id)]) })
         return UIMenu(children: actions)
+    }
+
+    /// A calendar sticker shows the day picked here (today when it was inserted).
+    private func pickDay(for id: UUID) {
+        guard let block = configuration.document.blocks.first(where: { $0.id == id }), case .shape(let shape) = block.content,
+              shape.kind == .calendar, presentedViewController == nil else { return }
+        let picker = DayPickerController(day: Stickers.day(from: shape.date) ?? Date()) { [weak self] day in self?.setDay(day, for: id) }
+        let sheet = UINavigationController(rootViewController: picker)
+        sheet.modalPresentationStyle = .popover
+        if let anchor = blockViews[id], let popover = sheet.popoverPresentationController {
+            popover.sourceView = anchor; popover.sourceRect = anchor.bounds
+            popover.permittedArrowDirections = [.up, .down, .left, .right]
+            popover.adaptiveSheetPresentationController.detents = [.medium(), .large()]   // iPhone: a sheet
+        }
+        present(sheet, animated: true)
+    }
+    private func setDay(_ day: Date, for id: UUID) {
+        guard let block = configuration.document.blocks.first(where: { $0.id == id }),
+              let changed = try? Stickers.settingDay(day, of: block), changed != block else { return }
+        configuration.onCommands([.replaceBlock(changed)])
+    }
+    private static func swatch(_ hex: String) -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20)).image { _ in
+            UIColor(hex: hex).setFill(); UIBezierPath(roundedRect: CGRect(x: 1, y: 1, width: 18, height: 18), cornerRadius: 4).fill()
+            UIColor.black.withAlphaComponent(0.2).setStroke(); UIBezierPath(roundedRect: CGRect(x: 1, y: 1, width: 18, height: 18), cornerRadius: 4).stroke()
+        }.withRenderingMode(.alwaysOriginal)
     }
 
     private func resize(_ block: CanvasBlock) {
@@ -1333,11 +1447,46 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 }
 
+/// Date picker for a calendar sticker: the day under the finger is applied with "Concluir".
+@MainActor
+final class DayPickerController: UIViewController {
+    private let picker = UIDatePicker()
+    private let onPick: (Date) -> Void
+    init(day: Date, onPick: @escaping (Date) -> Void) {
+        self.onPick = onPick
+        super.init(nibName: nil, bundle: nil)
+        picker.datePickerMode = .date
+        picker.preferredDatePickerStyle = .inline
+        picker.locale = Locale(identifier: "pt_BR")
+        picker.date = day
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Data do calendário"
+        view.backgroundColor = .systemBackground
+        picker.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(picker)
+        NSLayoutConstraint.activate([
+            picker.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            picker.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            picker.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+        ])
+        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Hoje", primaryAction: UIAction { [weak self] _ in self?.picker.setDate(Date(), animated: true) })
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
+            guard let self else { return }
+            self.onPick(self.picker.date); self.dismiss(animated: true)
+        })
+        preferredContentSize = CGSize(width: 340, height: 420)
+    }
+}
+
 private extension ShapeKind {
     var title: String {
         switch self {
         case .rectangle: "Retângulo"; case .ellipse: "Elipse"; case .diamond: "Losango"
         case .triangle: "Triângulo"; case .line: "Linha"; case .arrow: "Seta"
+        case .stickyNote: "Post-it"; case .calendar: "Calendário"
         }
     }
 }

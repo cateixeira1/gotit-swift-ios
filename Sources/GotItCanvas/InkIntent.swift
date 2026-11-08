@@ -70,12 +70,52 @@ public enum InkIntent {
     /// Handwriting on the same line, beside the candidate: then a loop is a letter, not an ellipse.
     /// Neighbours that are figures themselves (an unconverted box) do not count as writing.
     public static func isNextToWriting(_ candidate: LogicalRect, neighbours: [InkSample]) -> Bool {
-        neighbours.contains { other in
-            let box = other.bounds
-            guard sameLine(candidate, box), box.height <= 2 * max(candidate.height, 1) else { return false }
-            if let kind = ShapeRecognizer.recognize([other.points], intent: .automatic)?.kind, kind != .line { return false }
+        isNextToWriting(candidate, neighbourGroups: neighbours.map { [$0] })
+    }
+
+    /// The same, with neighbouring strokes already grouped: a group that together forms a figure (a
+    /// box drawn in two or four strokes, next to the candidate) is not writing.
+    public static func isNextToWriting(_ candidate: LogicalRect, neighbourGroups: [[InkSample]]) -> Bool {
+        neighbourGroups.contains { group in
+            let beside = group.contains { other in
+                let box = other.bounds
+                return sameLine(candidate, box) && box.height <= 2 * max(candidate.height, 1)
+            }
+            guard beside else { return false }
+            if let kind = ShapeRecognizer.recognize(group.map(\.points), intent: .automatic)?.kind, kind != .line { return false }
             return true
         }
+    }
+
+    /// Strokes drawn after a figure converted, beside it, decide whether the figure was a letter:
+    /// another figure (even a rough one, or one still missing a side) keeps it; writing does not.
+    public static func followerIsFigure(_ strokes: [InkSample]) -> Bool {
+        guard !strokes.isEmpty else { return true }
+        if let kind = ShapeRecognizer.recognize(strokes.map(\.points), intent: .deliberate)?.kind, kind != .line { return true }
+        return false
+    }
+
+    /// Strokes that run from one figure to another: drawn connectors. A figure is an existing
+    /// shape (`figures`) or a group of the other strokes; both ends must land on different ones.
+    /// A side of a box drawn in several strokes has both ends on the same group, so it stays a side.
+    public static func connectorStrokes(_ strokes: [InkSample], figures: [LogicalRect], padding: Double, tolerance: Double) -> Set<Int> {
+        var result = Set<Int>()
+        for index in strokes.indices where ShapeRecognizer.isConnectorStroke(strokes[index].points) {
+            let others = strokes.indices.filter { $0 != index }
+            let groupBoxes = groups(others.map { strokes[$0].bounds }, padding: padding).map { union($0.map { strokes[others[$0]].bounds }) }
+            let boxes = figures + groupBoxes
+            func landing(_ point: CanvasPoint) -> Int? {
+                boxes.indices.filter { i in
+                    let b = boxes[i]
+                    return point.x >= b.x - tolerance && point.x <= b.x + b.width + tolerance &&
+                        point.y >= b.y - tolerance && point.y <= b.y + b.height + tolerance
+                }.min { boxes[$0].width * boxes[$0].height < boxes[$1].width * boxes[$1].height }
+            }
+            guard let first = strokes[index].points.first, let last = strokes[index].points.last,
+                  let from = landing(first), let to = landing(last), from != to else { continue }
+            result.insert(index)
+        }
+        return result
     }
 
     /// Writing that continues right beside a figure that was just converted: it was a letter.

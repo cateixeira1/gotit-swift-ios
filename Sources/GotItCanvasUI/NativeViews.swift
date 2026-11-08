@@ -145,19 +145,29 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
         default: return UIBezierPath(rect: area)
         }
     }
+    private func corners(_ fractions: [CanvasPoint], in area: CGRect) -> [CGPoint] {
+        fractions.map { CGPoint(x: area.minX + $0.x * area.width, y: area.minY + $0.y * area.height) }
+    }
 
     override func draw(_ rect: CGRect) {
         guard let block else { return }
         switch block.content {
         case .shape(let shape):
+            if shape.kind == .stickyNote { StickerArt.drawStickyNote(in: bounds, color: UIColor(hex: shape.fill ?? "#FFF27A")); accessibilityLabel = "Post-it"; return }
+            if shape.kind == .calendar {
+                let day = Stickers.day(from: shape.date) ?? Date()
+                StickerArt.drawCalendar(in: bounds, day: day)
+                accessibilityLabel = "Calendário, " + day.formatted(.dateTime.day().month(.wide).year().locale(Locale(identifier: "pt_BR")))
+                return
+            }
             let area = bounds.insetBy(dx: shape.lineWidth / 2, dy: shape.lineWidth / 2)
             let path: UIBezierPath
             switch shape.kind {
             case .ellipse: path = UIBezierPath(ovalIn: area)
-            case .rectangle: path = UIBezierPath(rect: area)
+            case .rectangle, .stickyNote, .calendar: path = UIBezierPath(rect: area)
             case .diamond:
                 path = polygon([CGPoint(x: area.midX, y: area.minY), .init(x: area.maxX, y: area.midY), .init(x: area.midX, y: area.maxY), .init(x: area.minX, y: area.midY)])
-            case .triangle: path = polygon([CGPoint(x: area.midX, y: area.minY), .init(x: area.maxX, y: area.maxY), .init(x: area.minX, y: area.maxY)])
+            case .triangle: path = polygon(corners(shape.triangleCorners, in: area))
             case .line, .arrow:
                 path = UIBezierPath()
                 let first = shape.originalStroke?.points.first ?? .init(x: 0, y: 0)
@@ -218,6 +228,110 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
         let path = UIBezierPath()
         for (index, point) in points.enumerated() { if index == 0 { path.move(to: point) } else { path.addLine(to: point) } }
         path.close(); return path
+    }
+}
+
+/// Drawn stickers. The sticky note is paper glued along its top edge, its lower right corner
+/// lifting a little; the calendar follows the look of the calendar emoji (red band with the month,
+/// binder rings, a big day number), but shows the day the user picks.
+@MainActor enum StickerArt {
+    static func shade(_ color: UIColor, _ factor: CGFloat) -> UIColor {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return UIColor(red: r * factor, green: g * factor, blue: b * factor, alpha: a)
+    }
+    static func curl(for bounds: CGRect) -> CGFloat { min(bounds.width, bounds.height) * 0.12 }
+
+    static func drawStickyNote(in bounds: CGRect, color: UIColor) {
+        guard let context = UIGraphicsGetCurrentContext(), bounds.width > 4, bounds.height > 4 else { return }
+        let w = bounds.width, h = bounds.height, c = curl(for: bounds)
+        let paper = UIBezierPath()
+        paper.move(to: .zero)
+        paper.addLine(to: CGPoint(x: w, y: 0))
+        paper.addLine(to: CGPoint(x: w, y: h - c))
+        paper.addQuadCurve(to: CGPoint(x: w - c, y: h), controlPoint: CGPoint(x: w - c * 0.22, y: h - c * 0.22))
+        paper.addLine(to: CGPoint(x: 0, y: h))
+        paper.close()
+        context.saveGState()
+        paper.addClip()
+        color.setFill(); UIRectFill(bounds)
+        // Light falls from the glued edge: a touch brighter at the top, a touch darker at the bottom.
+        let colors = [UIColor.white.withAlphaComponent(0.25).cgColor, UIColor.white.withAlphaComponent(0).cgColor,
+                      UIColor.black.withAlphaComponent(0.07).cgColor] as CFArray
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.3, 1]) {
+            context.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: h), options: [])
+        }
+        // The glued strip is a little more opaque.
+        UIColor.black.withAlphaComponent(0.04).setFill()
+        UIRectFill(CGRect(x: 0, y: 0, width: w, height: h * 0.12))
+        context.restoreGState()
+        // The back of the lifted corner.
+        let fold = UIBezierPath()
+        fold.move(to: CGPoint(x: w, y: h - c))
+        fold.addQuadCurve(to: CGPoint(x: w - c, y: h), controlPoint: CGPoint(x: w - c * 0.22, y: h - c * 0.22))
+        fold.addQuadCurve(to: CGPoint(x: w, y: h - c), controlPoint: CGPoint(x: w - c * 0.9, y: h - c * 0.9))
+        shade(color, 0.84).setFill(); fold.fill()
+        UIColor.black.withAlphaComponent(0.08).setStroke(); fold.lineWidth = 0.5; fold.stroke()
+    }
+
+    /// Shadow under paper glued at the top: thin at the top edge, deeper under the loose bottom.
+    static func stickyNoteShadow(for bounds: CGRect) -> UIBezierPath {
+        let w = bounds.width, h = bounds.height, c = curl(for: bounds)
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: 3, y: h * 0.1))
+        path.addLine(to: CGPoint(x: w - 3, y: h * 0.1))
+        path.addLine(to: CGPoint(x: w - 1, y: h - c * 1.2))
+        path.addQuadCurve(to: CGPoint(x: w - c * 1.2, y: h + 2), controlPoint: CGPoint(x: w - c * 0.1, y: h + 1))
+        path.addQuadCurve(to: CGPoint(x: 1, y: h + 1), controlPoint: CGPoint(x: w * 0.45, y: h + 5))
+        path.close()
+        return path
+    }
+
+    static func drawCalendar(in bounds: CGRect, day: Date) {
+        guard let context = UIGraphicsGetCurrentContext(), bounds.width > 8, bounds.height > 8 else { return }
+        let w = bounds.width, h = bounds.height
+        let page = CGRect(x: 1, y: h * 0.07, width: w - 2, height: h * 0.93 - 1)
+        let body = UIBezierPath(roundedRect: page, cornerRadius: w * 0.12)
+        UIColor.white.setFill(); body.fill()
+        // Red band with the month.
+        let band = CGRect(x: page.minX, y: page.minY, width: page.width, height: page.height * 0.3)
+        context.saveGState()
+        body.addClip()
+        let red = [UIColor(red: 0.96, green: 0.36, blue: 0.31, alpha: 1).cgColor, UIColor(red: 0.84, green: 0.2, blue: 0.17, alpha: 1).cgColor] as CFArray
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: red, locations: [0, 1]) {
+            context.addRect(band); context.clip()
+            context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: band.minY), end: CGPoint(x: 0, y: band.maxY), options: [])
+        }
+        context.restoreGState()
+        // A faint line where the page below shows.
+        UIColor.black.withAlphaComponent(0.06).setFill()
+        UIRectFill(CGRect(x: page.minX + w * 0.06, y: page.maxY - h * 0.035, width: page.width - w * 0.12, height: 1))
+        UIColor.black.withAlphaComponent(0.14).setStroke(); body.lineWidth = 1; body.stroke()
+        // Binder rings across the top edge.
+        for x in [w * 0.3, w * 0.7] {
+            let ring = UIBezierPath(roundedRect: CGRect(x: x - w * 0.035, y: 0, width: w * 0.07, height: h * 0.15), cornerRadius: w * 0.035)
+            UIColor(red: 0.42, green: 0.45, blue: 0.5, alpha: 1).setFill(); ring.fill()
+            UIColor.white.withAlphaComponent(0.35).setFill()
+            UIBezierPath(roundedRect: CGRect(x: x - w * 0.018, y: h * 0.01, width: w * 0.018, height: h * 0.11), cornerRadius: w * 0.009).fill()
+        }
+        let locale = Locale(identifier: "pt_BR")
+        let formatter = DateFormatter(); formatter.locale = locale
+        formatter.dateFormat = "MMM"
+        let month = formatter.string(from: day).replacingOccurrences(of: ".", with: "").uppercased(with: locale)
+        formatter.dateFormat = "EEEE"
+        let weekday = formatter.string(from: day)
+        formatter.dateFormat = "d"
+        let number = formatter.string(from: day)
+        let centered = NSMutableParagraphStyle(); centered.alignment = .center
+        func draw(_ text: String, size: CGFloat, weight: UIFont.Weight, color: UIColor, centerY: CGFloat) {
+            let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color, .paragraphStyle: centered]
+            let height = (text as NSString).size(withAttributes: attributes).height
+            (text as NSString).draw(in: CGRect(x: page.minX, y: centerY - height / 2, width: page.width, height: height), withAttributes: attributes)
+        }
+        draw(month, size: band.height * 0.5, weight: .bold, color: .white, centerY: band.midY + band.height * 0.06)
+        let rest = page.height - band.height
+        draw(number, size: rest * 0.56, weight: .semibold, color: UIColor(red: 0.12, green: 0.14, blue: 0.18, alpha: 1), centerY: band.maxY + rest * 0.43)
+        draw(weekday, size: rest * 0.13, weight: .medium, color: UIColor(red: 0.42, green: 0.45, blue: 0.5, alpha: 1), centerY: band.maxY + rest * 0.83)
     }
 }
 

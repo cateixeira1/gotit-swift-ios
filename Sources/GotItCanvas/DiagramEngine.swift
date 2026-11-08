@@ -7,8 +7,11 @@ public struct RecognizedShape: Equatable, Sendable {
     public var frame: LogicalRect
     public var originalPoints: [CanvasPoint]
     public var rotationRadians: Double
-    public init(kind: ShapeKind, frame: LogicalRect, originalPoints: [CanvasPoint], rotationRadians: Double = 0) {
+    /// Triangle corners as fractions of `frame` (see `Shape.vertices`).
+    public var vertices: [CanvasPoint]?
+    public init(kind: ShapeKind, frame: LogicalRect, originalPoints: [CanvasPoint], rotationRadians: Double = 0, vertices: [CanvasPoint]? = nil) {
         self.kind = kind; self.frame = frame; self.originalPoints = originalPoints; self.rotationRadians = rotationRadians
+        self.vertices = vertices
     }
 }
 
@@ -35,10 +38,10 @@ public enum DiagramCommands {
     /// Commands for a recognized figure. A line between two shapes becomes a connector; a line
     /// elsewhere becomes a line shape only when `allowFreeLines` (a deliberate gesture), else nil.
     public static func insert(_ recognized: RecognizedShape, in document: CanvasDocument, stroke: String? = nil,
-                              lineWidth: Double? = nil, allowFreeLines: Bool = true) throws -> [DocumentCommand]? {
+                              lineWidth: Double? = nil, allowFreeLines: Bool = true, connectionTolerance: Double = 24) throws -> [DocumentCommand]? {
         let points = recognized.originalPoints
         if recognized.kind == .line {
-            if var relation = try connection(for: points, document: document) {
+            if var relation = try connection(for: points, document: document, tolerance: connectionTolerance) {
                 relation.originalStroke = InkStroke(points: points)
                 if let stroke { relation.style = .init(color: stroke, width: lineWidth ?? 2) }
                 return [.setRelation(relation)]
@@ -52,6 +55,7 @@ public enum DiagramCommands {
             shape.originalStroke = InkStroke(points: points.map { .init(x: $0.x - minX, y: $0.y - minY) })
             if let stroke { shape.stroke = stroke }
             if let lineWidth { shape.lineWidth = lineWidth }
+            shape.vertices = recognized.vertices
             block.content = .shape(shape)
             if recognized.rotationRadians != 0 {
                 var presentation = block.effectivePresentation; presentation.rotationRadians = recognized.rotationRadians
@@ -78,7 +82,11 @@ public enum DiagramCommands {
                 guard block.content.allowsChildren, let frame = frames[block.id] else { return false }
                 return LogicalRect(x: frame.x - tolerance, y: frame.y - tolerance, width: frame.width + tolerance * 2, height: frame.height + tolerance * 2).contains(point)
             }
-            return candidates.count == 1 ? candidates[0].id : nil
+            // A figure inside a container (or overlapping a bigger one) is the one meant.
+            return candidates.min { a, b in
+                let fa = frames[a.id]!, fb = frames[b.id]!
+                return fa.width * fa.height < fb.width * fb.height
+            }?.id
         }
         guard let source = match(start), let target = match(end), source != target else { return nil }
         return BlockRelation(sourceID: source, targetID: target, kind: .connector, style: .init())

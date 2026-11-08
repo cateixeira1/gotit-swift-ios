@@ -28,13 +28,18 @@ import os
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             for pages in [1, 10, 30] {
                 progress("Digitação numa história de \(pages) página(s)…")
-                var (document, story) = try await longStory(pages: pages)
+                var (document, story) = try await longStory(pages: pages, paragraphs: true)
                 let made = document.pages.count
                 let end = try await typing(in: &document, story: story, atStart: false, keys: 25)
                 let start = try await typing(in: &document, story: story, atStart: true, keys: 12)
                 lines.append(Line(title: "Digitar no fim · \(made) página(s)", value: summary(end)))
                 lines.append(Line(title: "Digitar no início · \(made) página(s)", value: summary(start)))
             }
+            // Worst case: one paragraph 30 pages long, every line moves when a letter is added at its start.
+            progress("Digitação num parágrafo único de 30 páginas…")
+            var (single, singleStory) = try await longStory(pages: 30, paragraphs: false)
+            let worst = try await typing(in: &single, story: singleStory, atStart: true, keys: 6)
+            lines.append(Line(title: "Digitar no início de um parágrafo único · \(single.pages.count) páginas", value: summary(worst)))
             progress("Gravação de cada tecla…")
             lines += try await saving(in: folder)
             progress("Desenho…")
@@ -58,14 +63,16 @@ import os
     // MARK: Workloads
 
     /// A story long enough to fill about `pages` A4 pages at 18 pt, already paginated.
-    private static func longStory(pages: Int) async throws -> (CanvasDocument, UUID) {
+    private static func longStory(pages: Int, paragraphs: Bool) async throws -> (CanvasDocument, UUID) {
         var document = CanvasDocument(title: "Medição", defaultStyle: .init(fontSize: 18))
         var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: document.canvas.size.width - 48, height: 44)),
                                 content: .text(.init("")))
         block.textFlowID = block.id
         document.blocks = [block]
         let sentence = "Esta é uma frase de teste, com acentuação, números como 1234 e pontuação; ela se repete até encher as páginas. "
-        block.content = .text(RichText(String(repeating: sentence, count: pages * 22)))
+        // About 22 sentences per page; with paragraphs, a new one every 5 sentences.
+        let body = (0..<(pages * 22)).map { index in sentence + (paragraphs && index % 5 == 4 ? "\n" : "") }.joined()
+        block.content = .text(RichText(body))
         let result = try TextPagination.reflow(block, in: document, selection: NSRange(location: 0, length: 0))
         document = try CommandEngine.applying(result.commands, to: document)
         await Task.yield()
@@ -92,7 +99,7 @@ import os
 
     /// One keystroke on a 30-page note: the recovery journal, then the SQLite commit with history.
     private static func saving(in folder: URL) async throws -> [Line] {
-        var (document, story) = try await longStory(pages: 30)
+        var (document, story) = try await longStory(pages: 30, paragraphs: true)
         let store = try SQLiteStore(url: folder.appendingPathComponent("medicao.sqlite"))
         var revision = try await store.create(document).revision
         let journal = try PendingEditJournal(url: folder.appendingPathComponent("medicao.jsonl"))

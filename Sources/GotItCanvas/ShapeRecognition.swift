@@ -515,13 +515,17 @@ public enum ShapeRecognizer {
                 if value > bestArea { bestArea = value; best = [i, j, k] }
             } } }
         } else {
-            for i in 0..<n { for j in (i + 1)..<n { for k in (j + 1)..<n {
-                let first = triangle(i, j, k)
-                for l in (k + 1)..<n {
-                    let value = first + triangle(i, k, l)
-                    if value > bestArea { bestArea = value; best = [i, j, k, l] }
+            // A quadrilateral i<j<k<l is two triangles on the diagonal i–k, and the best j and the
+            // best l can be chosen separately: O(n³) instead of trying every four corners (O(n⁴)).
+            for i in 0..<n {
+                for k in stride(from: i + 2, to: n - 1, by: 1) {
+                    var bestJ = i + 1, areaJ = -1.0
+                    for j in (i + 1)..<k { let value = triangle(i, j, k); if value > areaJ { areaJ = value; bestJ = j } }
+                    var bestL = k + 1, areaL = -1.0
+                    for l in (k + 1)..<n { let value = triangle(i, k, l); if value > areaL { areaL = value; bestL = l } }
+                    if areaJ + areaL > bestArea { bestArea = areaJ + areaL; best = [i, bestJ, k, bestL] }
                 }
-            } } }
+            }
         }
         return (bestArea, best.map { hull[$0] })
     }

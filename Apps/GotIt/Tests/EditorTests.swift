@@ -316,8 +316,12 @@ final class EditorTests: XCTestCase {
     func testTypingIsOneUndoStepAndAPasteIsItsOwn() throws {
         var groups: [String?] = []
         let (window, text) = try typingHarness { _, group in groups.append(group) }
-        text.insertText("a"); text.insertText("b")
-        text.insertText("texto colado")              // several characters at once: a paste
+        // The keyboard asks the delegate before inserting; programmatic insertText does not.
+        func key(_ string: String) {
+            if text.delegate?.textView?(text, shouldChangeTextIn: text.selectedRange, replacementText: string) ?? true { text.insertText(string) }
+        }
+        key("a"); key("b")
+        key("texto colado")                           // several characters at once: a paste
         XCTAssertEqual(groups.count, 3)
         XCTAssertNotNil(groups[0])
         XCTAssertEqual(groups[0], groups[1])
@@ -387,6 +391,59 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(lines.contains { $0.title == "Memória" })
         XCTAssertGreaterThanOrEqual(steps.count, 5)
         XCTAssertEqual(DevicePerformance.summary([3, 1, 2]), "mediana 2,0 ms · p95 3,0 ms · máx 3,0 ms")
+    }
+
+    /// Laying out only from the page before the edit, and stopping where pages line up again, gives
+    /// exactly what laying out the whole story gives, for typing, new lines, pastes and deletions.
+    func testIncrementalReflowMatchesTheFullLayout() throws {
+        var document = CanvasDocument(title: "Reflow", defaultStyle: .init(fontSize: 18))
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: document.canvas.size.width - 48, height: 44)),
+                                content: .text(.init("")))
+        block.textFlowID = block.id
+        document.blocks = [block]
+        let sentence = "Uma frase com palavras de tamanhos variados para quebrar as linhas em lugares diferentes. "
+        let story = (0..<60).map { String(repeating: sentence, count: 1 + $0 % 4) }.joined(separator: "\n")
+        block.content = .text(RichText(story))
+        document = try CommandEngine.applying(TextPagination.reflow(block, in: document, selection: .init(location: 0, length: 0), incremental: false).commands, to: document)
+        XCTAssertGreaterThan(document.pages.count, 5)
+        var seed: UInt64 = 7
+        func random(_ bound: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(max(bound, 1)))
+        }
+        func layout(_ d: CanvasDocument) -> [String] {
+            d.textFlowFragments(story: block.id).map { fragment in
+                let text: String; if case .text(let rich) = fragment.content { text = rich.plainText } else { text = "?" }
+                return "\(text)|\(fragment.layout.frame)"
+            }
+        }
+        for step in 0..<40 {
+            let fragments = document.textFlowFragments(story: block.id)
+            var target = fragments[random(fragments.count)]
+            guard case .text(let rich) = target.content else { continue }
+            let plain = rich.plainText as NSString
+            let location = random(plain.length + 1)
+            let insertions = ["a", "palavra-bem-comprida ", "\n", sentence + sentence, ""]
+            let insert = insertions[random(insertions.count)]
+            let edited: String, caret: Int
+            if insert.isEmpty, location > 0 {
+                edited = plain.replacingCharacters(in: NSRange(location: location - 1, length: 1), with: ""); caret = location - 1
+            } else {
+                edited = plain.replacingCharacters(in: NSRange(location: location, length: 0), with: insert); caret = location + (insert as NSString).length
+            }
+            target.content = .text(RichText(edited))
+            let selection = NSRange(location: caret, length: 0)
+            let quick = try TextPagination.reflow(target, in: document, selection: selection)
+            let full = try TextPagination.reflow(target, in: document, selection: selection, incremental: false)
+            let a = try CommandEngine.applying(quick.commands, to: document)
+            let b = try CommandEngine.applying(full.commands, to: document)
+            XCTAssertEqual(layout(a), layout(b), "step \(step): \(insert.isEmpty ? "delete" : insert.debugDescription) at \(location)")
+            XCTAssertEqual(a.pages.count, b.pages.count, "step \(step)")
+            XCTAssertEqual(quick.focus.blockID, full.focus.blockID, "step \(step)")
+            XCTAssertEqual(quick.focus.range, full.focus.range, "step \(step)")
+            XCTAssertLessThanOrEqual(quick.commands.count, full.commands.count)
+            document = b
+        }
     }
 
     func testOffscreenBlocksAreNotInstantiated() {

@@ -332,3 +332,20 @@ private func side(_ a: CanvasPoint, _ b: CanvasPoint, bow: Double, noise: inout 
     #expect(letters == 0)
     #expect(arches <= 20)     // only very tall, pointed arches
 }
+
+/// The O(n³) search finds the same largest quadrilateral as trying every four corners.
+@Test func largestQuadrilateralMatchesTheExhaustiveSearch() {
+    var noise = Noise(state: 314)
+    for _ in 0..<40 {
+        let points = (0..<60).map { _ in CanvasPoint(x: 200 * noise.next(), y: 140 * noise.next()) }
+        let hull = ShapeRecognizer.convexHull(points)
+        guard hull.count >= 4 else { continue }
+        func area(_ a: CanvasPoint, _ b: CanvasPoint, _ c: CanvasPoint) -> Double { abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) / 2 }
+        var exhaustive = 0.0
+        let n = hull.count
+        for i in 0..<n { for j in (i + 1)..<n { for k in (j + 1)..<n { for l in (k + 1)..<n {
+            exhaustive = max(exhaustive, area(hull[i], hull[j], hull[k]) + area(hull[i], hull[k], hull[l]))
+        } } } }
+        #expect(abs(ShapeRecognizer.largestPolygon(hull, vertices: 4).area - exhaustive) < 1e-6)
+    }
+}

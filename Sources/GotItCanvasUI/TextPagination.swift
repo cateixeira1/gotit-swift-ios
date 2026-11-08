@@ -21,16 +21,35 @@ public struct TextFlowFocus {
         public var commands: [DocumentCommand]
         public var focus: TextFlowFocus
     }
-    public static func reflow(_ replacement: CanvasBlock, in document: CanvasDocument, selection: NSRange) throws -> Result {
+    /// Lays the story out again after `replacement` changed. Pages before the edited one cannot
+    /// change, except the one just before it (a word shortened at the top of a page may move back
+    /// up), so layout starts there; it stops as soon as a page ends where it ended before (shifted by
+    /// the edit), because everything after it is then laid out exactly as before. Typing on page 30
+    /// therefore lays out two pages, not thirty. `incremental: false` lays out the whole story.
+    public static func reflow(_ replacement: CanvasBlock, in document: CanvasDocument, selection: NSRange,
+                              incremental: Bool = true) throws -> Result {
         let story = replacement.textFlowID ?? replacement.id
         let pageIndices = Dictionary(uniqueKeysWithValues: document.pages.enumerated().map { ($0.element.id, $0.offset) })
         let fragments = document.blocks.filter { $0.id == replacement.id || $0.textFlowID == story }.sorted {
             (pageIndices[document.pageID(for: $0.id) ?? document.id] ?? 0) < (pageIndices[document.pageID(for: $1.id) ?? document.id] ?? 0)
         }
         guard let first = fragments.first, first.parentID == nil, let firstPage = document.pageID(for: first.id) else { throw DocumentError.invalid("Missing text story") }
+        func length(_ block: CanvasBlock) -> Int {
+            if case .text(let rich) = block.content { return (rich.plainText as NSString).length }; return 0
+        }
+        let edited = fragments.firstIndex { $0.id == replacement.id } ?? 0
+        let startIndex = incremental ? max(0, edited - 1) : 0
+        let delta = length(replacement) - length(fragments[edited])
+        // Where each unchanged fragment after the edit ended before, in this layout's coordinates.
+        var oldEnds: [Int: Int] = [:]
+        var running = 0
+        for (index, fragment) in fragments.enumerated() where index >= startIndex {
+            running += length(fragment)
+            if index >= edited { oldEnds[index] = running }
+        }
         let text = NSMutableAttributedString(string: "")
         var globalCaret = selection.location
-        for fragment in fragments {
+        for fragment in fragments[startIndex...] {
             let item = fragment.id == replacement.id ? replacement : fragment
             guard case .text(let rich) = item.content else { throw DocumentError.invalid("Invalid text story") }
             if fragment.id == replacement.id { globalCaret += text.length }
@@ -40,7 +59,9 @@ public struct TextFlowFocus {
         let manager = NSLayoutManager(); storage.addLayoutManager(manager)
         var commands: [DocumentCommand] = [], used: [CanvasBlock] = []
         var focus = TextFlowFocus(blockID: first.id, pageID: firstPage, range: .init(location: 0, length: 0))
-        var offset = 0, index = 0, previousPage = firstPage
+        var focusFound = false
+        var offset = 0, index = startIndex, previousPage = document.pageID(for: fragments[startIndex].id) ?? firstPage
+        var stoppedEarly = false
         let nextOrder = (document.blocks.map(\.order).max() ?? 0) + 1
         repeat {
             var fragment: CanvasBlock
@@ -91,15 +112,31 @@ public struct TextFlowFocus {
             } else {
                 fragment.layout.frame.height = available
             }
-            commands.append(index < fragments.count ? .replaceBlock(fragment) : .insertBlock(fragment))
+            if index >= fragments.count { commands.append(.insertBlock(fragment)) }
+            else if fragment != fragments[index] { commands.append(.replaceBlock(fragment)) }   // unchanged pages are not rewritten
             used.append(fragment)
             if globalCaret >= range.location && (globalCaret < end || end == storage.length) {
                 focus = .init(blockID: fragment.id, pageID: page,
                     range: .init(location: min(range.length, max(0, globalCaret - range.location)), length: min(selection.length, max(0, end - globalCaret))))
+                focusFound = true
             }
-            offset = end; previousPage = page; index += 1
+            offset = end; previousPage = page
+            // This page ends where it ended before: the rest of the story is laid out as it was.
+            if incremental, index >= edited, index + 1 < fragments.count, let before = oldEnds[index], end == before + delta, end < storage.length {
+                if !focusFound, globalCaret >= end, let next = fragments.dropFirst(index + 1).first {
+                    focus = .init(blockID: next.id, pageID: document.pageID(for: next.id) ?? page,
+                                  range: .init(location: min(length(next), globalCaret - end), length: 0))
+                    if case .text(let rich) = next.content { focus.text = rich }
+                    focus.frame = next.layout.frame
+                    focusFound = true
+                }
+                stoppedEarly = true
+                break
+            }
+            index += 1
         } while offset < storage.length
-        let unused = fragments.dropFirst(used.count)
+        if stoppedEarly { return .init(commands: commands, focus: focusWithText(focus, used: used)) }
+        let unused = fragments.dropFirst(startIndex + used.count)
         for fragment in unused { commands.append(.removeSubtree(fragment.id)) }
         for fragment in unused {
             guard let page = document.pageID(for: fragment.id), document.pages.first(where: { $0.id == page })?.textFlowID == story else { continue }
@@ -107,10 +144,15 @@ public struct TextFlowFocus {
             let removedIDs = Set(unused.map(\.id))
             if !document.blocks.contains(where: { document.pageID(for: $0.id) == page && !removedIDs.contains($0.id) }) { commands.append(.removePage(page)) }
         }
+        return .init(commands: commands, focus: focusWithText(focus, used: used))
+    }
+
+    private static func focusWithText(_ focus: TextFlowFocus, used: [CanvasBlock]) -> TextFlowFocus {
+        var focus = focus
         if let block = used.first(where: { $0.id == focus.blockID }), case .text(let rich) = block.content {
             focus.text = rich; focus.frame = block.layout.frame
         }
-        return .init(commands: commands, focus: focus)
+        return focus
     }
 }
 #endif

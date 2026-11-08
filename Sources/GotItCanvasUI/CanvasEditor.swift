@@ -291,7 +291,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 if richText.plainText.isEmpty, !textView.isFirstResponder {
                     let style = (try? configuration.document.resolvedStyle(for: block.id)) ?? .init()
                     let size = style.fontSize ?? 18
-                    let font = style.fontName.flatMap { UIFont(name: $0, size: size) } ?? UIFont.systemFont(ofSize: size)
+                    let font = TextBridge.font(named: style.fontName, size: size)
                     textView.typingAttributes = [.font: font, .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
                 }
                 let rendered = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init())

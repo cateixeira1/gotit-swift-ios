@@ -10,11 +10,24 @@ extension NSAttributedString.Key {
 
 @MainActor
 enum TextBridge {
+    /// The system font's internal names (".SFUI-Regular" and the like) must not be looked up by
+    /// name: CoreText substitutes another font (its log names Times New Roman), so text saved in
+    /// the system font came back with other widths and line breaks. Text in the system font
+    /// therefore stores no font name, and such names in older documents mean the system font.
+    static func font(named name: String?, size: CGFloat) -> UIFont {
+        guard let name, !name.hasPrefix("."), let font = UIFont(name: name, size: size) else { return .systemFont(ofSize: size) }
+        return font
+    }
+    static func storedName(of font: UIFont?) -> String? {
+        guard let name = font?.fontName, !name.hasPrefix(".") else { return nil }
+        return name
+    }
+
     static func attributed(_ rich: RichText, base: BlockStyle) -> NSAttributedString {
         let output = NSMutableAttributedString(string: "")
         for run in rich.runs {
             let style = base.merging(run.style)
-            var font = style.fontName.flatMap { UIFont(name: $0, size: style.fontSize ?? 18) } ?? UIFont.systemFont(ofSize: style.fontSize ?? 18)
+            var font = TextBridge.font(named: style.fontName, size: style.fontSize ?? 18)
             var traits = font.fontDescriptor.symbolicTraits
             if style.bold == true { traits.insert(.traitBold) } else { traits.remove(.traitBold) }
             if style.italic == true { traits.insert(.traitItalic) } else { traits.remove(.traitItalic) }
@@ -56,7 +69,7 @@ enum TextBridge {
             let list: TextListKind = paragraph?.textLists.first.map { $0.markerFormat == .decimal ? .numbered : .bullet } ?? .none
             let format = ParagraphFormat(lineSpacing: Double(paragraph?.lineSpacing ?? 0), paragraphSpacing: Double(paragraph?.paragraphSpacing ?? 0),
                                          headIndent: Double(paragraph?.headIndent ?? 0), firstLineIndent: Double(paragraph?.firstLineHeadIndent ?? 0), list: list)
-            let style = BlockStyle(fontName: font?.fontName, fontSize: font.map { Double($0.pointSize) },
+            let style = BlockStyle(fontName: TextBridge.storedName(of: font), fontSize: font.map { Double($0.pointSize) },
                 bold: font?.fontDescriptor.symbolicTraits.contains(.traitBold), italic: font?.fontDescriptor.symbolicTraits.contains(.traitItalic),
                 foreground: (attributes[.foregroundColor] as? UIColor)?.hex, background: (attributes[.backgroundColor] as? UIColor)?.hex,
                 alignment: alignment, underline: ((attributes[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0,

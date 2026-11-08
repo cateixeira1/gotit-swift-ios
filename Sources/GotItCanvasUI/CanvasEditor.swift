@@ -37,6 +37,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onError: (Error) -> Void
     /// 1-based page number, used for per-page accessibility identifiers in stacked layouts.
     public var pageNumber: Int?
+    /// A picture's background was removed: the host stores the new PNG and points the block at it.
+    public var onReplaceImage: ((UUID, Data) -> Void)?
 
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
@@ -49,8 +51,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
                 onCommands: @escaping ([DocumentCommand]) -> Void,
                 onOpenPDF: @escaping (UUID) -> Void = { _ in },
                 onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in },
-                pageNumber: Int? = nil) {
-        self.pageNumber = pageNumber
+                pageNumber: Int? = nil, onReplaceImage: ((UUID, Data) -> Void)? = nil) {
+        self.pageNumber = pageNumber; self.onReplaceImage = onReplaceImage
         self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
         self.drawingData = drawingData; self.onDrawing = onDrawing
         self.onOpenPDF = onOpenPDF
@@ -1461,6 +1463,53 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         } catch { configuration.onError(error) }
     }
 
+    // MARK: Background removal and vectorising
+
+    private var cutouts: [UUID: UIActivityIndicatorView] = [:]
+
+    /// Removes the picture's background (subject lifting for photos, paper for drawings); with
+    /// `vectorize`, its lines become pen strokes in its place (one undo step brings the picture back).
+    /// The work runs off the main thread; a spinner sits on the picture meanwhile.
+    func cutOut(_ id: UUID, vectorize: Bool) {
+        guard cutouts[id] == nil, let block = configuration.document.blocks.first(where: { $0.id == id }),
+              let hash = block.content.assetHash, let image = configuration.image(hash),
+              let source = ImageCutout.raster(image, maxSide: vectorize ? 1024 : 2048) else {
+            configuration.onError(DocumentError.invalid("Não foi possível ler esta imagem.")); return
+        }
+        let spinner = UIActivityIndicatorView(style: .large)
+        spinner.color = .systemBlue; spinner.accessibilityIdentifier = "cutoutProgress"
+        if let view = blockViews[id] { spinner.center = view.center }
+        surface.addSubview(spinner); spinner.startAnimating()
+        cutouts[id] = spinner
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> (ImageCutout.Cutout, Data?, [TracedStroke]) in
+                let cut = ImageCutout.removeBackground(source)
+                return vectorize ? (cut, nil, ImageVectorizer.trace(cut.image)) : (cut, ImageCutout.png(cut.image), [])
+            }.value
+            guard let self else { return }
+            self.cutouts.removeValue(forKey: id)?.removeFromSuperview()
+            self.finishCutout(id, cut: result.0, png: result.1, traced: result.2, vectorize: vectorize)
+        }
+    }
+
+    private func finishCutout(_ id: UUID, cut: ImageCutout.Cutout, png: Data?, traced: [TracedStroke], vectorize: Bool) {
+        // The picture may have been deleted meanwhile.
+        guard let block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
+        guard vectorize else {
+            guard let png else { configuration.onError(DocumentError.invalid("Não foi possível gravar a imagem sem fundo.")); return }
+            configuration.onReplaceImage?(id, png)
+            return
+        }
+        guard !traced.isEmpty else { configuration.onError(DocumentError.invalid("Nenhum traço foi encontrado nesta imagem.")); return }
+        let frame = frames[id] ?? block.layout.frame
+        let strokes = ImageCutout.pageStrokes(traced, imageSize: (cut.image.width, cut.image.height),
+                                              frame: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
+                                              crop: block.effectivePresentation.imageCrop, rotation: block.effectivePresentation.rotationRadians)
+        if selectedObjectID == id { selectedObjectID = nil; croppingID = nil }
+        applyingDrawing = true; ink.drawing = PKDrawing(strokes: ink.drawing.strokes + strokes); applyingDrawing = false
+        saveDrawing([.removeSubtree(id)])
+    }
+
     // MARK: Tables
 
     /// Taps on a table. The first cell of a row (column 0) or of a column (row 0) picks that line:
@@ -1684,6 +1733,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             })
         ]
         if case .pdf = block.content { actions.insert(UIAction(title: "Abrir PDF") { [weak self] _ in self?.configuration.onOpenPDF(id) }, at: 0) }
+        switch block.content {
+        case .image, .sticker:
+            actions.insert(UIMenu(title: "", options: .displayInline, children: [
+                UIAction(title: "Remover fundo", image: UIImage(systemName: "person.crop.rectangle.badge.plus")) { [weak self] _ in self?.cutOut(id, vectorize: false) },
+                UIAction(title: "Remover fundo e vetorizar traços", image: UIImage(systemName: "scribble.variable")) { [weak self] _ in self?.cutOut(id, vectorize: true) },
+            ]), at: 0)
+        default: break
+        }
         if case .table(let table) = block.content { actions.insert(contentsOf: tableMenu(block, table), at: 0) }
         if case .shape(let shape) = block.content, shape.kind == .stickyNote {
             let current = StickyNoteColor(hex: shape.fill) ?? .yellow

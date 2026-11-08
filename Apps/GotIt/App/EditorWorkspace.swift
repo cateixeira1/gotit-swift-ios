@@ -126,7 +126,10 @@ struct EditorWorkspace: View {
                 }
             },
             onOpenNote: { id in Task { await model.open(id, returningTo: document.kind == .web ? document.id : nil) } },
-            onError: { model.error = String(describing: $0) })
+            onError: { error in
+                if case .invalid(let text)? = error as? DocumentError { model.error = text } else { model.error = String(describing: error) }
+            },
+            onReplaceImage: { id, png in model.replaceImage(id, png: png, pageID: targetPage, documentID: targetDocument) })
     }
 
     private var formattingBar: some View {

@@ -184,6 +184,51 @@ final class EditorTests: XCTestCase {
         window.isHidden = true
     }
 
+    /// A drawing photographed on paper: "Remover fundo" clears the paper; "… e vetorizar" turns the
+    /// lines into pen strokes where the picture was and removes the picture, in one step.
+    func testPictureBackgroundIsRemovedAndItsLinesBecomeStrokes() async throws {
+        let size = CGSize(width: 200, height: 100)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+        let sketch = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor(white: 0.93, alpha: 1).setFill(); context.fill(CGRect(origin: .zero, size: size))
+            UIColor(red: 0.1, green: 0.1, blue: 0.5, alpha: 1).setStroke()
+            let line = UIBezierPath(); line.move(to: CGPoint(x: 20, y: 50)); line.addLine(to: CGPoint(x: 180, y: 50)); line.lineWidth = 6; line.stroke()
+        }
+        let hash = String(repeating: "a", count: 64)
+        let picture = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 100, y: 200, width: 200, height: 100)), content: .image(.init(hash: hash)))
+        let document = try CommandEngine.applying([.registerAsset(Asset(hash: hash, mediaType: "image/png", byteCount: 1)), .insertBlock(picture)],
+                                                  to: CanvasDocument(title: "Fundo"))
+        let replaced = expectation(description: "png"), drawn = expectation(description: "strokes")
+        var png: Data?, drawing: PKDrawing?, extra: [DocumentCommand] = []
+        let controller = CanvasViewController(configuration: CanvasEditor(document: document,
+            onDrawing: { save, commands in
+                if case .full(let data) = save { drawing = try? PKDrawing(data: data) }
+                extra = commands; drawn.fulfill()
+            },
+            image: { $0 == hash ? sketch : nil }, onCommands: { _ in }, onReplaceImage: { _, data in png = data; replaced.fulfill() }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+
+        controller.cutOut(picture.id, vectorize: false)
+        await fulfillment(of: [replaced], timeout: 30)
+        let cut = try XCTUnwrap(png.flatMap(UIImage.init(data:)).flatMap { ImageCutout.raster($0, maxSide: 400) })
+        XCTAssertEqual(cut.alpha(5 * cut.width + 5), 0, "paper is transparent")
+        XCTAssertGreaterThan(cut.alpha(50 * cut.width + 100), 200, "the line stays")
+
+        controller.cutOut(picture.id, vectorize: true)
+        await fulfillment(of: [drawn], timeout: 30)
+        XCTAssertEqual(extra, [.removeSubtree(picture.id)])
+        let strokes = try XCTUnwrap(drawing).strokes
+        XCTAssertEqual(strokes.count, 1)
+        let bounds = try XCTUnwrap(strokes.first).renderBounds
+        XCTAssertEqual(bounds.midY, 250, accuracy: 4)                       // where the line is on the page
+        XCTAssertEqual(bounds.minX, 120, accuracy: 8); XCTAssertEqual(bounds.maxX, 280, accuracy: 8)
+        window.isHidden = true
+    }
+
     func testTableDrawsCellsAndBordersAtItsFrameSize() throws {
         var table = CanvasTable(rows: 2, columns: 2, width: 200)
         table = try table.settingText(RichText("Data"), row: 0, column: 0)

@@ -490,6 +490,22 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// The picture without its background: a new PNG asset, same frame, crop and rotation.
+    /// The old picture stays registered, so undo brings it back.
+    func replaceImage(_ id: UUID, png: Data, pageID: UUID, documentID: UUID) {
+        do {
+            guard let current = document, current.id == documentID, var block = current.blocks.first(where: { $0.id == id }) else { return }
+            let asset = try storeAsset(png, mediaType: "image/png")
+            switch block.content {
+            case .image(var reference): reference.hash = asset.hash; block.content = .image(reference)
+            case .sticker(var reference): reference.hash = asset.hash; block.content = .sticker(reference)
+            default: return
+            }
+            enqueue((current.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.replaceBlock(block)],
+                    pageID: pageID, documentID: documentID)
+        } catch { self.error = String(describing: error) }
+    }
+
     /// Built-in stickers (rendered emoji): no picker, inserted at the first free spot and selected.
     func insertSticker(png data: Data, pageID: UUID, documentID: UUID) {
         do {

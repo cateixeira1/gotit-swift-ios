@@ -72,9 +72,14 @@ e ampliação do reconhecimento permanecem congelados.
   iPhone. **Backspace na fronteira implementado** (commit 4cb299b): na posição 0
   de um fragmento de continuação, apaga o último caractere (emoji/combinação
   inteiros) do fragmento anterior, pula páginas vazias e redistribui; composição
-  IME nunca é interceptada. Falta validar em aparelho. **Seleção única entre
-  fragmentos continua não implementada**: cada página é um `UITextView`; exige
-  mudar a arquitetura de texto. Não afirmar equivalência com Word.
+  IME nunca é interceptada. Falta validar em aparelho. **Seleção entre páginas**
+  (9fdbee9): continua um `UITextView` por página; numa história com mais de uma
+  página, uma seleção vira seleção da história, com destaque próprio em cada
+  página e duas alças arrastáveis para outras páginas (rolagem perto das bordas).
+  Digitar, apagar, colar, recortar, copiar (texto e RTF), formatar e "Selecionar
+  tudo" agem sobre a história inteira, editada como um texto só e redistribuída
+  num único desfazer (`StoryEditing`). Testes nativos de edição, desfazer e
+  destaque/alças; arrastar as alças só no aparelho. Não afirmar equivalência com Word.
 - **Reflow ao mover obstáculos conectado** (commit 7ec3fb3): inserir, remover,
   mover, redimensionar, girar ou mudar o contorno de um objeto, redimensionar a
   caixa da própria história ou mudar o padrão de contorno do canvas redistribui
@@ -104,7 +109,10 @@ e ampliação do reconhecimento permanecem congelados.
   guardado e, em notas existentes, é lido como a fonte do sistema.
 - **Histórico limitado por bytes** (commit 072324f): `historyByteLimit`, padrão
   32 MiB por nota, além dos 50 grupos; a entrada mais recente é sempre mantida.
-  Deltas de traços PencilKit (em vez de snapshot por gesto) continuam pendentes.
+  **Desenho por partes** (9fdbee9): um gesto que só acrescenta traços grava só esses
+  traços como mais uma parte (`AssetReference.parts`, até 24); apagar, mover ou
+  converter traços, ou a 25.ª parte, grava o desenho inteiro e libera base e partes
+  antigas. Notas antigas abrem sem mudança.
 - **Fila de recuperação ligada ao app** (0b56315): ver a seção abaixo.
 - **IME, colar e desfazer** (testes nativos, 0b56315/1cd14dd): o fim de uma
   composição (tecla morta, kana) passa a ser salvo na hora (antes podia esperar a

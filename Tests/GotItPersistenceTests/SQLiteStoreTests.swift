@@ -440,15 +440,82 @@ private func multimediaDocument() -> CanvasDocument {
 
 @Test @MainActor func journalSurvivesRestartAndRejectsCorruption() throws {
     let fixture = try DatabaseFixture(); defer { fixture.clean() }
-    let url = fixture.directory.appendingPathComponent("pending.json")
+    let url = fixture.directory.appendingPathComponent("pending.jsonl")
     let journal = try PendingEditJournal(url: url)
     let edit = PendingEdit(documentID: UUID(), expectedRevision: 7, commands: [.rename("Recovered")])
-    try journal.append(edit)
+    let next = PendingEdit(documentID: edit.documentID, expectedRevision: 8, commands: [.rename("Again")])
+    try journal.append(edit); try journal.append(next)
     let restored = try PendingEditJournal(url: url)
-    #expect(restored.entries == [edit])
+    #expect(restored.entries == [edit, next])
     try restored.removeFirst(edit.id)
+    #expect(try PendingEditJournal(url: url).entries == [next])
+    try restored.remove(next.id)
     #expect(try PendingEditJournal(url: url).entries.isEmpty)
-    try Data("invalid".utf8).write(to: url)
+    #expect(try Data(contentsOf: url).isEmpty)                    // nothing pending: the log starts over
+    // A malformed complete line is never skipped silently, and the file is left as it was.
+    try Data("invalid\n".utf8).write(to: url)
     #expect(throws: (any Error).self) { try PendingEditJournal(url: url) }
-    #expect(try Data(contentsOf: url) == Data("invalid".utf8))
+    #expect(try Data(contentsOf: url) == Data("invalid\n".utf8))
+}
+
+@Test @MainActor func aLastLineCutShortByACrashIsIgnored() throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let url = fixture.directory.appendingPathComponent("pending.jsonl")
+    let journal = try PendingEditJournal(url: url)
+    let edit = PendingEdit(documentID: UUID(), expectedRevision: 0, commands: [.rename("Kept")])
+    try journal.append(edit)
+    let handle = try FileHandle(forWritingTo: url); try handle.seekToEnd()
+    try handle.write(contentsOf: Data(#"{"edit":{"id":"#.utf8)); try handle.close()
+    #expect(try PendingEditJournal(url: url).entries == [edit])
+}
+
+@Test @MainActor func editsPendingWhenTheAppStoppedAreRecoveredOnce() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let url = fixture.directory.appendingPathComponent("pending.jsonl")
+    let store = try SQLiteStore(url: fixture.url)
+    let note = try await store.create(.init(title: "Antes"))
+    let journal = try PendingEditJournal(url: url)
+    // Committed, but the app stopped before taking it off the journal.
+    let committed = PendingEdit(documentID: note.id, expectedRevision: 0, commands: [.rename("Um")])
+    try journal.append(committed)
+    _ = try await store.execute(committed.commands, documentID: note.id, expectedRevision: 0, operationID: committed.id)
+    // Shown on screen, never committed.
+    let page = CanvasPage(title: "Página 2")
+    let shown = PendingEdit(documentID: note.id, expectedRevision: 1, commands: [.rename("Dois")])
+    let shownToo = PendingEdit(documentID: note.id, expectedRevision: 2, commands: [.appendPage(page)])
+    try journal.append(shown); try journal.append(shownToo)
+    try await store.close()
+
+    let reopened = try SQLiteStore(url: fixture.url)
+    let recovering = try PendingEditJournal(url: url)
+    #expect(recovering.entries.count == 3)
+    let touched = try await recovering.replay(into: reopened)
+    #expect(touched == [note.id])
+    let recovered = try await reopened.load(note.id)
+    #expect(recovered.title == "Dois")
+    #expect(recovered.pages.map(\.id).contains(page.id))
+    #expect(recovered.revision == 3)                               // the committed edit was not applied twice
+    #expect(try await reopened.historyState(documentID: note.id).retainedEntries == 3)
+    #expect(recovering.entries.isEmpty)
+    #expect(try PendingEditJournal(url: url).entries.isEmpty)
+    // Replaying again (another crash right after recovery) changes nothing.
+    #expect(try await recovering.replay(into: reopened).isEmpty)
+    try await reopened.close()
+}
+
+@Test @MainActor func editsThatCannotBeRecoveredAreSetAsideNotLost() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let url = fixture.directory.appendingPathComponent("pending.jsonl")
+    let store = try SQLiteStore(url: fixture.url)
+    let note = try await store.create(.init(title: "Nota"))
+    let journal = try PendingEditJournal(url: url)
+    try journal.append(PendingEdit(documentID: note.id, expectedRevision: 5, commands: [.rename("Fora de ordem")]))
+    await #expect(throws: DocumentError.self) { try await journal.replay(into: store) }
+    let kept = try journal.quarantine(now: Date(timeIntervalSince1970: 1_000))
+    #expect(kept.lastPathComponent == "pending-unrecovered-1000.jsonl")
+    #expect(try PendingEditJournal(url: kept).entries.count == 1)
+    #expect(journal.entries.isEmpty)
+    #expect(try PendingEditJournal(url: url).entries.isEmpty)
+    #expect(try await store.load(note.id).title == "Nota")
+    try await store.close()
 }

@@ -31,7 +31,18 @@ final class AppModel {
     var writeFailed = false
     private var store: SQLiteStore?
     private var directory: URL?
-    private var pending: [(UUID, Int64, [DocumentCommand], String?)] = []
+    /// Edits on screen that SQLite has not committed yet, in order.
+    private var pending: [PendingEdit] = []
+    /// Write-ahead copy of `pending` on disk, replayed at the next start if the app is closed or
+    /// killed first. Without it (unreadable or unwritable file) editing goes on, unprotected.
+    private var journal: PendingEditJournal?
+    private var journalWarned = false
+    /// Committed edits whose receipts can be dropped once the queue is empty.
+    private var committedOperations: [UUID] = []
+    #if DEBUG
+    /// UI tests: never commit, to check what a killed app recovers.
+    private var holdSaves = false
+    #endif
     private var nextAssetCleanup = Date.distantPast
     private let images = NSCache<NSString, UIImage>()
 
@@ -44,16 +55,48 @@ final class AppModel {
             if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
                 root = root.deletingLastPathComponent().appendingPathComponent("GotItUITests")
                 if ProcessInfo.processInfo.arguments.contains("--reset-test-data"), FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+                holdSaves = ProcessInfo.processInfo.arguments.contains("--hold-saves")
             }
             #endif
             try FileManager.default.createDirectory(at: root.appendingPathComponent("assets"), withIntermediateDirectories: true)
             directory = root
-            store = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
+            let repository = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
+            store = repository
+            await recoverPendingEdits(root: root, store: repository)
             try await collectUnusedAssets()
             try await refresh()
             if summaries.isEmpty { await createNote() }
             else if let first = summaries.first { await open(first.id) }
         } catch { self.error = String(describing: error) }
+    }
+
+    /// Re-applies edits that were on screen but not yet saved when the app last stopped. Edits that
+    /// cannot be applied are moved to a separate file, never dropped and never retried forever.
+    private func recoverPendingEdits(root: URL, store: SQLiteStore) async {
+        let url = root.appendingPathComponent("pending-edits.jsonl")
+        let opened: PendingEditJournal
+        do { opened = try PendingEditJournal(url: url) }
+        catch {
+            let kept = root.appendingPathComponent("pending-edits-unreadable-\(Int(Date().timeIntervalSince1970)).jsonl")
+            try? FileManager.default.moveItem(at: url, to: kept)
+            self.error = "A fila de recuperação estava ilegível e foi guardada à parte (\(kept.lastPathComponent)). As edições novas são salvas normalmente."
+            guard let fresh = try? PendingEditJournal(url: url) else { return }
+            opened = fresh
+        }
+        journal = opened
+        guard !opened.entries.isEmpty else { return }
+        let count = opened.entries.count
+        do { try await opened.replay(into: store) }
+        catch {
+            let kept = try? opened.quarantine()
+            self.error = "\(count) edição(ões) feitas pouco antes de o app fechar não puderam ser reaplicadas e foram guardadas em \(kept?.lastPathComponent ?? "um arquivo à parte"). \(error)"
+        }
+    }
+
+    private func journalProblem(_ error: Error) {
+        guard !journalWarned else { return }
+        journalWarned = true
+        self.error = "Não foi possível gravar a fila de recuperação; as edições continuam sendo salvas, mas sem proteção se o app fechar de repente. \(error)"
     }
 
     func refresh() async throws {
@@ -130,9 +173,12 @@ final class AppModel {
             guard document.revision < Int64.max else { throw DocumentError.invalid("Revision exhausted") }
             optimistic.revision = document.revision + 1
             optimistic.updatedAt = max(Date(), document.updatedAt)
+            let edit = PendingEdit(documentID: document.id, expectedRevision: document.revision, commands: commands, historyGroup: historyGroup)
+            // Written ahead of showing it: if the app is closed now, the next start re-applies it.
+            if let journal { do { try journal.append(edit) } catch { journalProblem(error) } }
             self.document = optimistic
+            pending.append(edit)
         } catch { self.error = String(describing: error); return }
-        pending.append((document.id, document.revision, commands, historyGroup))
         guard !isSaving else { return }
         isSaving = true
         Task { await drain() }
@@ -141,17 +187,34 @@ final class AppModel {
     private func drain() async {
         defer { isSaving = false }
         guard let store else { return }
+        #if DEBUG
+        if holdSaves { return }
+        #endif
         while !pending.isEmpty {
-            let (id, expectedRevision, commands, group) = pending.removeFirst()
+            let edit = pending.removeFirst()
             do {
-                guard document?.id == id else { throw DocumentError.invalid("Editor changed during save") }
-                let saved = try await store.execute(commands, documentID: id, expectedRevision: expectedRevision, historyGroup: group)
+                guard document?.id == edit.documentID else { throw DocumentError.invalid("Editor changed during save") }
+                let saved = try await store.execute(edit.commands, documentID: edit.documentID, expectedRevision: edit.expectedRevision,
+                                                    historyGroup: edit.historyGroup, operationID: journal == nil ? nil : edit.id)
                 if document?.revision == saved.revision { document = saved }
+                if let journal {
+                    do { try journal.remove(edit.id) } catch { journalProblem(error) }
+                    committedOperations.append(edit.id)
+                }
             } catch {
-                // Stop on a failed commit; do not pretend subsequent edits were saved.
-                writeFailed = true; pending.removeAll(); self.error = "Gravação interrompida. Copie o texto em edição antes de fechar. \(error)"
+                // Stop on a failed commit; do not pretend subsequent edits were saved. What is still
+                // in the journal is re-applied (or set aside) at the next start.
+                writeFailed = true; pending.removeAll()
+                self.error = journal == nil
+                    ? "Gravação interrompida. Copie o texto em edição antes de fechar. \(error)"
+                    : "Gravação interrompida. As edições ainda não gravadas ficaram na fila de recuperação e serão reaplicadas quando o app abrir de novo. \(error)"
                 return
             }
+        }
+        // Receipts only matter while their edit is in the journal; drop them in one write.
+        if !committedOperations.isEmpty {
+            let done = committedOperations; committedOperations = []
+            try? await store.acknowledgeOperations(done)
         }
         do { try await refresh(); try await collectUnusedAssets() } catch { self.error = String(describing: error) }
     }

@@ -83,6 +83,15 @@ final class FlowTextView: UITextView {
            backspaceAtStart?() == true { return }
         super.deleteBackward()
     }
+    /// Ending a composition (choosing a kana candidate, the accent of a dead key on a hardware
+    /// keyboard, leaving the box) changes no characters, so UIKit may not report a change; the
+    /// editor ignores changes while text is marked, and would keep the composed text unsaved until
+    /// the next key. Report it here (duplicates are dropped by the editor).
+    override func unmarkText() {
+        let wasMarked = markedTextRange != nil
+        super.unmarkText()
+        if wasMarked { delegate?.textViewDidChange?(self) }
+    }
 }
 
 @MainActor
@@ -122,6 +131,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     /// newer than that is stale (SwiftUI can re-render before the host's update arrives) and must
     /// not overwrite what the user is typing, or the caret jumps behind the last letters.
     private var sentRevision: [UUID: Int64] = [:]
+    /// What each text view last sent, so a repeated report of the same change is not a new edit.
+    private var sentText: [UUID: RichText] = [:]
+    private var sentSelection: [UUID: NSRange] = [:]
     private var loadedDrawingHash: String?
     private var fitted = false
     private var inkToolSignature = ""
@@ -289,6 +301,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 if !stale, textView.markedTextRange == nil, !rendered.isEqual(to: textView.attributedText ?? NSAttributedString(string: "")) {
                     let selection = textView.selectedRange
                     textView.attributedText = rendered
+                    sentText[block.id] = nil              // the view now shows the document (undo, another page)
                     let location = min(selection.location, rendered.length)
                     textView.selectedRange = NSRange(location: location, length: min(selection.length, rendered.length - location))
                 }
@@ -478,7 +491,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         guard let textView = blockViews[focus.blockID] as? UITextView, textView.window != nil else { return false }
         let base = (try? configuration.document.resolvedStyle(for: focus.blockID)) ?? .init()
         let rendered = TextBridge.attributed(focus.text, base: base)
-        if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered }
+        if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered; sentText[focus.blockID] = nil }
         if let frame = focus.frame { resize(textView, to: frame) }
         // Read the keys typed meanwhile before clearing the pending move (clearing drops the queue).
         let queued = configuration.session?.queuedInput ?? []
@@ -852,6 +865,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         guard let view = blockViews.removeValue(forKey: id) else { return }
         view.removeFromSuperview(); view.transform = .identity
         textIDs.removeValue(forKey: ObjectIdentifier(view))
+        sentText[id] = nil; sentSelection[id] = nil
         if let text = view as? UITextView {
             text.attributedText = nil; text.textContainer.exclusionPaths = []; text.typingAttributes = [:]
             text.undoManager?.removeAllActions()
@@ -971,10 +985,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public func textViewDidChange(_ textView: UITextView) {
         guard let id = textIDs[ObjectIdentifier(textView)], var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
-        block.content = .text(TextBridge.richText(textView.attributedText))
+        let rich = TextBridge.richText(textView.attributedText)
+        block.content = .text(rich)
         let group = pendingTyping ? typingGroup : nil
         pendingTyping = false
         guard textView.markedTextRange == nil else { return } // Do not split an IME composition.
+        // The same text reported twice (end of a composition) is one edit.
+        if let last = sentText[id], last == rich, textView.selectedRange == sentSelection[id] { return }
+        sentText[id] = rich; sentSelection[id] = textView.selectedRange
         sentRevision[id] = configuration.document.revision
         if let onTextCommands = configuration.onTextCommands {
             if let focus = onTextCommands(block, group, textView.selectedRange) {
@@ -984,6 +1002,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     let rendered = TextBridge.attributed(focus.text, base: (try? configuration.document.resolvedStyle(for: id)) ?? .init())
                     if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered }
                     if textView.selectedRange != focus.range { textView.selectedRange = focus.range }
+                    sentText[id] = TextBridge.richText(textView.attributedText); sentSelection[id] = textView.selectedRange
                     if let frame = focus.frame { resize(textView, to: frame) }
                 } else { handOff(focus) }
             }

@@ -278,6 +278,83 @@ final class EditorTests: XCTestCase {
         XCTAssertGreaterThan(body[0], 0.95); XCTAssertGreaterThan(body[1], 0.95)                                        // white page
     }
 
+    /// A text box on screen, first responder, reporting what the editor sends to the host.
+    private func typingHarness(onText: @escaping (String, String?) -> Void) throws -> (UIWindow, UITextView) {
+        var document = CanvasDocument(title: "Teclado")
+        document.blocks = [CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 300, height: 60)), content: .text(.init("")))]
+        let controller = CanvasViewController(configuration: CanvasEditor(document: document,
+            onTextCommands: { changed, group, _ in
+                if case .text(let text) = changed.content { onText(text.plainText, group) }
+                return nil
+            }, onCommands: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        func find(_ view: UIView) -> UITextView? { (view as? UITextView) ?? view.subviews.lazy.compactMap(find).first }
+        let text = try XCTUnwrap(find(controller.view))
+        XCTAssertTrue(text.becomeFirstResponder())
+        return (window, text)
+    }
+
+    func testEndingACompositionSendsTheComposedTextOnce() throws {
+        var sent: [String] = []
+        let (window, text) = try typingHarness { plain, _ in sent.append(plain) }
+        // A dead key on a hardware keyboard, or a kana being composed: marked text first.
+        text.setMarkedText("´", selectedRange: NSRange(location: 1, length: 0))
+        text.setMarkedText("é", selectedRange: NSRange(location: 1, length: 0))
+        XCTAssertTrue(sent.isEmpty, "nothing is saved in the middle of a composition")
+        text.unmarkText()
+        XCTAssertEqual(sent.last, "é")
+        XCTAssertEqual(sent.filter { $0 == "é" }.count, 1)
+        text.insertText(" ok")
+        XCTAssertEqual(sent.last, "é ok")
+        window.isHidden = true
+    }
+
+    func testTypingIsOneUndoStepAndAPasteIsItsOwn() throws {
+        var groups: [String?] = []
+        let (window, text) = try typingHarness { _, group in groups.append(group) }
+        text.insertText("a"); text.insertText("b")
+        text.insertText("texto colado")              // several characters at once: a paste
+        XCTAssertEqual(groups.count, 3)
+        XCTAssertNotNil(groups[0])
+        XCTAssertEqual(groups[0], groups[1])
+        XCTAssertNotEqual(groups[1], groups[2])
+        window.isHidden = true
+    }
+
+    func testUndoAfterTextFlowsOntoNewPagesRestoresOnePageAndRedoBringsThemBack() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let document = try XCTUnwrap(model.document)
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 300, height: 44)), content: .text(.init("")))
+        block.textFlowID = block.id
+        model.enqueue([.insertBlock(block)], pageID: try XCTUnwrap(document.pages.first?.id), documentID: document.id)
+        while model.isSaving { await Task.yield() }
+        var long = try XCTUnwrap(model.document?.blocks.first { $0.id == block.id })
+        let pasted = String(repeating: "palavra ", count: 700)
+        long.content = .text(RichText(pasted))
+        _ = model.editText(long, group: "colar", selection: NSRange(location: (pasted as NSString).length, length: 0))
+        while model.isSaving { await Task.yield() }
+        func story() throws -> String {
+            try XCTUnwrap(model.document).textFlowFragments(story: block.id).compactMap { fragment -> String? in
+                if case .text(let text) = fragment.content { return text.plainText }; return nil
+            }.joined()
+        }
+        let pages = try XCTUnwrap(model.document?.pages.count)
+        XCTAssertGreaterThan(pages, 1)
+        XCTAssertEqual(try story(), pasted)
+        await model.history(undo: true)              // the paste and its new pages are one step
+        XCTAssertEqual(model.document?.pages.count, 1)
+        XCTAssertEqual(try story(), "")
+        await model.history(undo: false)
+        XCTAssertEqual(model.document?.pages.count, pages)
+        XCTAssertEqual(try story(), pasted)
+    }
+
     func testOffscreenBlocksAreNotInstantiated() {
         var document = CanvasDocument(title: "Viewport")
         for i in 0..<1000 {

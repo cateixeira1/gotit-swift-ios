@@ -2,6 +2,36 @@ import XCTest
 
 @MainActor
 final class EditorUITests: XCTestCase {
+    /// An error alert blocks every tap after it; report its text instead of a confusing timeout.
+    private func failIfAlert(_ app: XCUIApplication, _ step: String, file: StaticString = #filePath, line: UInt = #line) {
+        let alert = app.alerts.firstMatch
+        guard alert.exists else { return }
+        let text = alert.staticTexts.allElementsBoundByIndex.map(\.label).joined(separator: " | ")
+        XCTFail("Alerta na etapa \(step): \(text)", file: file, line: line)
+    }
+
+    /// Edits on screen but never committed (saves held back) come back after the app is killed.
+    func testEditsShownBeforeTheAppIsKilledAreRecovered() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-testing", "--reset-test-data", "--hold-saves"]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
+        failIfAlert(app, "abertura")
+        if app.buttons["showPages"].exists { app.buttons["showPages"].tap() }
+        let addPage = app.buttons["addPage"]
+        XCTAssertTrue(addPage.waitForExistence(timeout: 10)); addPage.tap()
+        XCTAssertTrue(app.buttons["page-2"].waitForExistence(timeout: 10))
+        failIfAlert(app, "nova página")
+        app.terminate()
+        app.launchArguments = ["--ui-testing"]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
+        failIfAlert(app, "recuperação")
+        if app.buttons["showPages"].exists { app.buttons["showPages"].tap() }
+        XCTAssertTrue(app.buttons["page-2"].waitForExistence(timeout: 10), "A página criada antes de o app ser encerrado não foi recuperada")
+    }
+
     func testPagesDrawingAndReopenInAdaptiveEditor() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -28,6 +58,7 @@ final class EditorUITests: XCTestCase {
         XCTAssertEqual(recognize.value as? String, "0", "Freehand test requires recognition to be off")
         app.buttons["Aplicar"].tap()
         if app.buttons["showTools"].exists { app.buttons["showTools"].tap() }
+        failIfAlert(app, "opções do canvas")
         let pen = app.buttons["tool-pen"]
         XCTAssertTrue(pen.waitForExistence(timeout: 10)); pen.tap()
         // Pages are stacked; selecting page 2 scrolls it into view and it has its own canvas.
@@ -38,6 +69,7 @@ final class EditorUITests: XCTestCase {
         let start = drawing.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.25))
         let end = drawing.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.35))
         start.press(forDuration: 0.1, thenDragTo: end)
+        failIfAlert(app, "desenho")
         let ink = NSPredicate(format: "value != %@", "0 traços")
         expectation(for: ink, evaluatedWith: drawing)
         waitForExpectations(timeout: 10)

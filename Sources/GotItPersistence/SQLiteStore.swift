@@ -89,6 +89,14 @@ public actor SQLiteStore {
         try db.execute("DELETE FROM edit_receipts WHERE id = ?", [.text(id.uuidString)])
     }
 
+    /// Several acknowledgements in one transaction.
+    public func acknowledgeOperations(_ ids: [UUID]) throws {
+        guard !ids.isEmpty else { return }
+        try db.transaction {
+            for id in ids { try db.execute("DELETE FROM edit_receipts WHERE id = ?", [.text(id.uuidString)]) }
+        }
+    }
+
     @discardableResult
     public func undo(documentID: UUID, expectedRevision: Int64) throws -> CanvasDocument {
         try restore(documentID, expectedRevision: expectedRevision, undo: true)

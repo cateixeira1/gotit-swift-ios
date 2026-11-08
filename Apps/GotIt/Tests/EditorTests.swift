@@ -447,6 +447,39 @@ final class EditorTests: XCTestCase {
         window.isHidden = true
     }
 
+    /// Swipe to delete sends a note or Teia to the Lixeira; it can come back whole or go for good.
+    func testDeletedNotesAndTeiasGoToTheTrashAndCanComeBack() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let note = try XCTUnwrap(model.document)
+        model.enqueue([.insertBlock(CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 200, height: 44)), content: .text(.init("guardar"))))],
+                      pageID: note.pages[0].id, documentID: note.id)
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        await model.createWeb(including: note.id)
+        XCTAssertEqual(model.document?.kind, .web)
+        let web = try XCTUnwrap(model.document)
+        await model.moveToTrash(web.id)                 // the open Teia
+        XCTAssertNil(model.document)
+        await model.moveToTrash(note.id)
+        XCTAssertFalse(model.activeSummaries.contains { $0.id == note.id || $0.id == web.id })
+        XCTAssertEqual(model.trashedSummaries.prefix(2).map(\.id), [note.id, web.id], "most recent first")
+        await model.open(note.id)
+        XCTAssertNotNil(model.error, "a note in the Lixeira does not open"); model.error = nil
+        await model.restoreFromTrash(note.id)
+        XCTAssertTrue(model.activeSummaries.contains { $0.id == note.id })
+        await model.open(note.id)
+        let restored = try XCTUnwrap(model.document)
+        XCTAssertTrue(restored.blocks.contains { if case .text(let t) = $0.content { t.plainText == "guardar" } else { false } })
+        await model.deleteForever(web.id)
+        XCTAssertFalse(model.summaries.contains { $0.id == web.id })
+        await model.moveToTrash(note.id)
+        await model.emptyTrash()
+        XCTAssertTrue(model.trashedSummaries.isEmpty)
+        XCTAssertFalse(model.summaries.contains { $0.id == note.id })
+        XCTAssertNil(model.error)
+    }
+
     func testUndoAfterTextFlowsOntoNewPagesRestoresOnePageAndRedoBringsThemBack() async throws {
         let model = AppModel()
         await model.start()

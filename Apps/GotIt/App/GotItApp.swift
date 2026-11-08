@@ -65,8 +65,8 @@ final class AppModel {
             await recoverPendingEdits(root: root, store: repository)
             try await collectUnusedAssets()
             try await refresh()
-            if summaries.isEmpty { await createNote() }
-            else if let first = summaries.first { await open(first.id) }
+            if activeSummaries.isEmpty { await createNote() }
+            else if let first = activeSummaries.first { await open(first.id) }
         } catch { self.error = String(describing: error) }
     }
 
@@ -117,12 +117,72 @@ final class AppModel {
     /// (no origin) starts over.
     func open(_ id: UUID, returningTo origin: UUID? = nil) async {
         guard !isSaving, let store else { return }
+        if let summary = summaries.first(where: { $0.id == id }), summary.isTrashed {
+            error = "“\(summary.title)” está na Lixeira. Restaure para abrir."; return
+        }
         do {
             let loaded = try await store.load(id)
             if let origin, origin != id { returnStack.append(origin) } else if origin == nil { returnStack.removeAll() }
             document = loaded; selectedPageID = loaded.pages.first?.id
         }
+        catch DocumentError.missingDocument { self.error = "Esta nota foi apagada para sempre." }
         catch { self.error = String(describing: error) }
+    }
+
+    // MARK: Lixeira
+
+    var activeSummaries: [DocumentSummary] { summaries.filter { !$0.isTrashed } }
+    /// Most recently deleted first.
+    var trashedSummaries: [DocumentSummary] {
+        summaries.filter(\.isTrashed).sorted { ($0.trashedAt ?? .distantPast) > ($1.trashedAt ?? .distantPast) }
+    }
+
+    /// Saves still in flight finish first, so nothing typed just before is lost or misplaced.
+    private func waitForSaves() async {
+        for _ in 0..<200 where isSaving { try? await Task.sleep(for: .milliseconds(25)) }
+    }
+
+    /// Swipe to delete: the note or Teia goes to the Lixeira, whole, and can come back.
+    func moveToTrash(_ id: UUID) async {
+        await waitForSaves()
+        guard !isSaving, let store else { return }
+        do {
+            try await store.moveToTrash(id)
+            if document?.id == id { document = nil; selectedPageID = nil }
+            returnStack.removeAll { $0 == id }
+            try await refresh()
+        } catch { self.error = String(describing: error) }
+    }
+
+    func restoreFromTrash(_ id: UUID) async {
+        guard let store else { return }
+        do { try await store.restoreFromTrash(id); try await refresh() }
+        catch { self.error = String(describing: error) }
+    }
+
+    func deleteForever(_ id: UUID) async {
+        guard let store, let summary = summaries.first(where: { $0.id == id }) else { return }
+        do {
+            try await store.deleteDocument(id, expectedRevision: summary.revision)
+            forget(id)
+            try await refresh()
+        } catch { self.error = String(describing: error) }
+    }
+
+    func emptyTrash() async {
+        guard let store else { return }
+        do {
+            let gone = trashedSummaries.map(\.id)
+            try await store.emptyTrash()
+            for id in gone { forget(id) }
+            try await refresh()
+        } catch { self.error = String(describing: error) }
+    }
+
+    private func forget(_ id: UUID) {
+        noteMetadata[id] = nil; previewRevisions[id] = nil
+        if document?.id == id { document = nil; selectedPageID = nil }
+        returnStack.removeAll { $0 == id }
     }
 
     /// Back to the Teia this note was opened from.
@@ -537,13 +597,14 @@ struct AppScreen: View {
     @State private var showEquation = false
     @State private var showDiagnostics = false
     @State private var sharing: ShareFile?
+    @State private var showTrash = false
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $preferredColumn) {
             List {
                 Section {
                     Button("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
                     Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
-                    ForEach(model.summaries) { summary in
+                    ForEach(model.activeSummaries) { summary in
                         // A List row with two buttons fires both on a single tap (opening a note
                         // also created a Teia). One button per row; Teia is in the context menu.
                         Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
@@ -559,9 +620,26 @@ struct AppScreen: View {
                                     Task { await model.createWeb(including: summary.id); preferredColumn = .detail }
                                 }
                             }
+                            Button("Apagar", systemImage: "trash", role: .destructive) { Task { await model.moveToTrash(summary.id) } }
                         }
+                        // Swipe left: red with a trash can; swiping on, or tapping it, deletes.
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) { Task { await model.moveToTrash(summary.id) } } label: {
+                                Label("Apagar", systemImage: "trash")
+                            }
+                        }
+                        .accessibilityIdentifier("document-\(summary.title)")
                     }
                 } header: { Text("Todas as notas e Teias") }
+                Section {
+                    Button { showTrash = true } label: {
+                        HStack {
+                            Label("Lixeira", systemImage: "trash")
+                            Spacer()
+                            if !model.trashedSummaries.isEmpty { Text("\(model.trashedSummaries.count)").foregroundStyle(.secondary) }
+                        }
+                    }.accessibilityIdentifier("openTrash")
+                }
             }.navigationTitle("Got It!")
             .disabled(model.isSaving)
         } detail: {
@@ -591,7 +669,7 @@ struct AppScreen: View {
                             Button("Tamanho e opções do canvas") { showPage = true }
                             if document.kind == .note { Button("Teia desta nota") { Task { await model.createWeb(including: document.id) } } }
                             else {
-                                Menu("Adicionar nota à Teia") { ForEach(model.summaries.filter { $0.kind == .note }) { summary in Button(summary.title) { model.addNote(summary) } } }
+                                Menu("Adicionar nota à Teia") { ForEach(model.activeSummaries.filter { $0.kind == .note }) { summary in Button(summary.title) { model.addNote(summary) } } }
                             }
                             if document.canvas.solveEquations { Button("Resolver equação digitada") { showEquation = true } }
                             Divider()
@@ -614,6 +692,7 @@ struct AppScreen: View {
                 } message: { Text("Nesta demonstração, digite ou corrija a expressão. O reconhecimento de equações manuscritas ainda não está conectado.") }
             } else { ContentUnavailableView("Got It!", systemImage: "note.text", description: Text("Crie ou selecione uma nota.")) }
         }
+        .sheet(isPresented: $showTrash) { TrashView(model: model) }
         .alert("Aviso", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -630,6 +709,70 @@ struct AppScreen: View {
             let order = (document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1
             model.enqueue([.insertBlock(.init(order: order, layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 400, height: 100)), content: .text(.init("\(equation)\n\(output)"))))], pageID: model.activePageID ?? document.id, documentID: document.id)
         } catch { model.error = "Expressão não suportada ou ambígua. \(error)" }
+    }
+}
+
+/// Deleted notes and Teias, kept whole until restored or deleted for good.
+struct TrashView: View {
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmEmpty = false
+    @State private var deleting: DocumentSummary?
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.trashedSummaries.isEmpty {
+                    ContentUnavailableView("Lixeira vazia", systemImage: "trash",
+                        description: Text("Notas e Teias apagadas ficam aqui até você restaurá-las ou apagá-las para sempre."))
+                }
+                ForEach(model.trashedSummaries) { summary in
+                    HStack(spacing: 12) {
+                        if let preview = model.noteMetadata[summary.id]?.preview {
+                            Image(uiImage: preview).resizable().scaledToFit().frame(width: 44, height: 56)
+                        } else {
+                            Image(systemName: summary.kind == .web ? "point.3.connected.trianglepath.dotted" : "note.text")
+                                .frame(width: 44, height: 56).foregroundStyle(.secondary)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(summary.title).font(.headline)
+                            if let date = summary.trashedAt {
+                                Text("Apagada em \(date.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Restaurar") { Task { await model.restoreFromTrash(summary.id) } }
+                            .buttonStyle(.bordered).accessibilityIdentifier("restore-\(summary.title)")
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button { Task { await model.restoreFromTrash(summary.id) } } label: { Label("Restaurar", systemImage: "arrow.uturn.backward") }
+                            .tint(.green)
+                    }
+                    // Deleting for good asks first; no full swipe.
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button { deleting = summary } label: { Label("Apagar para sempre", systemImage: "trash.slash") }.tint(.red)
+                    }
+                    .contextMenu {
+                        Button("Restaurar", systemImage: "arrow.uturn.backward") { Task { await model.restoreFromTrash(summary.id) } }
+                        Button("Apagar para sempre", systemImage: "trash.slash", role: .destructive) { deleting = summary }
+                    }
+                }
+            }
+            .navigationTitle("Lixeira")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("OK") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Esvaziar", role: .destructive) { confirmEmpty = true }.disabled(model.trashedSummaries.isEmpty)
+                }
+            }
+            .confirmationDialog("Apagar para sempre?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                                titleVisibility: .visible, presenting: deleting) { summary in
+                Button("Apagar “\(summary.title)”", role: .destructive) { Task { await model.deleteForever(summary.id) } }
+            } message: { _ in Text("Esta ação não pode ser desfeita.") }
+            .confirmationDialog("Esvaziar a Lixeira?", isPresented: $confirmEmpty, titleVisibility: .visible) {
+                Button("Apagar \(model.trashedSummaries.count) item(ns) para sempre", role: .destructive) { Task { await model.emptyTrash() } }
+            } message: { Text("Esta ação não pode ser desfeita.") }
+        }
     }
 }
 

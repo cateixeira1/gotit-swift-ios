@@ -7,7 +7,7 @@ enum MigrationManager {
             guard let version = try db.execute("PRAGMA user_version").first?.first?.int else {
                 throw PersistenceError.corruptData("Missing schema version")
             }
-            guard version <= 6 else { throw PersistenceError.unsupportedSchema(version) }
+            guard version <= 7 else { throw PersistenceError.unsupportedSchema(version) }
             if version == 0 {
                 guard let url = Bundle.module.url(forResource: "001_document_core", withExtension: "sql") else {
                     throw PersistenceError.corruptData("Missing bundled migration")
@@ -45,6 +45,12 @@ enum MigrationManager {
             if version < 6 {
                 try db.script("CREATE TABLE IF NOT EXISTS edit_receipts (id TEXT PRIMARY KEY NOT NULL, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, expected_revision INTEGER NOT NULL, commands BLOB NOT NULL);")
                 try db.execute("PRAGMA user_version = 6")
+            }
+            // Version 7: the Lixeira. A trashed document keeps all its rows (and assets) until it is
+            // deleted for good; the row goes with the document.
+            if version < 7 {
+                try db.script("CREATE TABLE IF NOT EXISTS trash (document_id TEXT PRIMARY KEY NOT NULL REFERENCES documents(id) ON DELETE CASCADE, trashed_at INTEGER NOT NULL);")
+                try db.execute("PRAGMA user_version = 7")
             }
         }
         try db.execute("PRAGMA journal_mode = WAL")

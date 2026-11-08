@@ -8,6 +8,9 @@ public struct DocumentSummary: Equatable, Sendable, Identifiable {
     public let updatedAt: Date
     public let createdAt: Date
     public let kind: DocumentKind
+    /// When it went to the Lixeira; nil for documents in use.
+    public let trashedAt: Date?
+    public var isTrashed: Bool { trashedAt != nil }
 }
 
 /// Offline document repository. No async suspension occurs inside a database transaction.
@@ -52,9 +55,12 @@ public actor SQLiteStore {
     }
 
     public func listDocuments() throws -> [DocumentSummary] {
-        try db.execute("SELECT metadata FROM documents ORDER BY id").map { row in
+        try db.execute("SELECT documents.metadata, trash.trashed_at FROM documents LEFT JOIN trash ON trash.document_id = documents.id ORDER BY documents.id").map { row in
             let document: CanvasDocument = try decode(row[0])
-            return DocumentSummary(id: document.id, title: document.title, revision: document.revision, updatedAt: document.updatedAt, createdAt: document.createdAt, kind: document.kind)
+            // Milliseconds since 1970; NULL when the document is not in the Lixeira.
+            let trashedAt = row[1].int.map { Date(timeIntervalSince1970: Double($0) / 1000) }
+            return DocumentSummary(id: document.id, title: document.title, revision: document.revision, updatedAt: document.updatedAt,
+                                   createdAt: document.createdAt, kind: document.kind, trashedAt: trashedAt)
         }.sorted { $0.updatedAt == $1.updatedAt ? $0.id.uuidString < $1.id.uuidString : $0.updatedAt > $1.updatedAt }
     }
 
@@ -145,6 +151,41 @@ public actor SQLiteStore {
             try db.execute("DELETE FROM documents WHERE id = ?", [.text(id.uuidString)])
         }
         if cachedDocument?.id == id { cachedDocument = nil }
+    }
+
+    /// Moves a note or Teia to the Lixeira. Its contents and history stay as they are, so
+    /// restoring it brings back exactly what was there (undo included).
+    public func moveToTrash(_ id: UUID, at date: Date = Date()) throws {
+        try db.transaction {
+            _ = try readHeader(id)
+            try db.execute("INSERT OR REPLACE INTO trash(document_id, trashed_at) VALUES (?, ?)", [.text(id.uuidString), .integer(Int64((date.timeIntervalSince1970 * 1000).rounded()))])
+        }
+    }
+
+    public func restoreFromTrash(_ id: UUID) throws {
+        try db.transaction {
+            _ = try readHeader(id)
+            try db.execute("DELETE FROM trash WHERE document_id = ?", [.text(id.uuidString)])
+        }
+    }
+
+    /// Deletes for good everything in the Lixeira; returns how many documents went.
+    @discardableResult
+    public func emptyTrash() throws -> Int {
+        let count = try db.transaction {
+            let ids = try db.execute("SELECT document_id FROM trash")
+            try db.execute("DELETE FROM documents WHERE id IN (SELECT document_id FROM trash)")
+            return ids.count
+        }
+        cachedDocument = nil
+        return count
+    }
+
+    private func readHeader(_ id: UUID) throws -> CanvasDocument {
+        guard let row = try db.execute("SELECT metadata FROM documents WHERE id = ?", [.text(id.uuidString)]).first else {
+            throw DocumentError.missingDocument(id)
+        }
+        return try decode(row[0])
     }
 
     private func restore(_ id: UUID, expectedRevision: Int64, undo: Bool) throws -> CanvasDocument {

@@ -257,7 +257,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 6)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 7)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -517,5 +517,41 @@ private func multimediaDocument() -> CanvasDocument {
     #expect(journal.entries.isEmpty)
     #expect(try PendingEditJournal(url: url).entries.isEmpty)
     #expect(try await store.load(note.id).title == "Nota")
+    try await store.close()
+}
+
+@Test func trashKeepsDocumentsUntilEmptiedAndRestoresThemIntact() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let note = try await store.create(CanvasDocument(title: "Nota"))
+    let web = try await store.create(CanvasDocument(title: "Teia", kind: .web))
+    let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: 100, height: 40)), content: .text(.init("guardado")))
+    let edited = try await store.execute([.insertBlock(block)], documentID: note.id, expectedRevision: 0)
+    let when = Date(timeIntervalSince1970: 1_800_000_000.25)
+    try await store.moveToTrash(note.id, at: when)
+    try await store.moveToTrash(web.id)
+    var listed = try await store.listDocuments()
+    #expect(listed.allSatisfy { $0.isTrashed })
+    #expect(abs((listed.first { $0.id == note.id }?.trashedAt?.timeIntervalSince1970 ?? 0) - when.timeIntervalSince1970) < 0.002)
+    // Still loadable, with its history: restoring brings everything back.
+    try await store.restoreFromTrash(note.id)
+    listed = try await store.listDocuments()
+    #expect(listed.first { $0.id == note.id }?.isTrashed == false)
+    let reloaded = try await store.load(note.id)
+    #expect(reloaded == edited)
+    let history = try await store.historyState(documentID: note.id)
+    #expect(history.canUndo)
+    await #expect(throws: DocumentError.self) { try await store.moveToTrash(UUID()) }
+    // Emptying deletes only what is in the Lixeira, for good.
+    let emptied = try await store.emptyTrash()
+    #expect(emptied == 1)
+    listed = try await store.listDocuments()
+    #expect(listed.map(\.id) == [note.id])
+    await #expect(throws: DocumentError.self) { try await store.load(web.id) }
+    // Deleting a trashed document for good also clears its Lixeira row.
+    try await store.moveToTrash(note.id)
+    try await store.deleteDocument(note.id, expectedRevision: edited.revision)
+    let none = try await store.emptyTrash()
+    #expect(none == 0)
     try await store.close()
 }

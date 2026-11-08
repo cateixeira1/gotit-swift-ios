@@ -101,7 +101,7 @@ final class FlowTextView: UITextView {
 }
 
 @MainActor
-public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate, UIPopoverPresentationControllerDelegate {
+public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate, UIPopoverPresentationControllerDelegate, UIEditMenuInteractionDelegate {
     private var configuration: CanvasEditor
     private let scroll = UIScrollView()
     private let surface = UIView()
@@ -157,6 +157,16 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var cellEditor: UITextView?
     private var editingCell: (block: UUID, row: Int, column: Int)?
     private var selectionOverlay: SelectionHandles?
+    /// Row/column picked by tapping its first cell; shows its tint and resize handle.
+    private(set) var tableFocus: TableFocus?
+    private var tableChrome: TableChrome?
+    /// Previous tap on a first cell, to recognise a double tap without delaying single taps.
+    private var lastFirstCellTap: (block: UUID, row: Int, column: Int, time: CFTimeInterval)?
+    /// Duplicate/delete menu shown after a double tap on a first cell.
+    private(set) var lineMenu: UIMenu?
+    private lazy var lineMenuInteraction: UIEditMenuInteraction = {
+        let interaction = UIEditMenuInteraction(delegate: self); surface.addInteraction(interaction); return interaction
+    }()
     public var realizedBlockViewCount: Int { blockViews.count }
     public var recycledBlockViewCount: Int { textPool.count + objectPool.count }
     private var blockViews: [UUID: UIView] = [:]
@@ -468,6 +478,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             surface.addSubview(handles); selectionOverlay = handles
             }
         }
+        showTableChrome()
         // Block views are re-ordered by z-index above; the open cell editor must stay on top
         // or the table drawing hides what is being typed.
         if let cellEditor { surface.bringSubviewToFront(cellEditor) }
@@ -1316,9 +1327,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if croppingID != id { croppingID = nil }
         let wasSelected = selectedObjectID == id
         selectedObjectID = id
+        if tableFocus?.block != id { tableFocus = nil }
         render()
-        if wasSelected, connectingFrom == nil, case .table = object.block?.content {
-            beginEditingCell(object, at: point); return
+        if connectingFrom == nil, case .table(let table) = object.block?.content {
+            tapTable(object, table: table, at: point, wasSelected: wasSelected); return
         }
         if wasSelected, connectingFrom == nil, case .shape(let shape) = object.block?.content, shape.kind == .calendar {
             pickDay(for: id); return
@@ -1449,6 +1461,145 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         } catch { configuration.onError(error) }
     }
 
+    // MARK: Tables
+
+    /// Taps on a table. The first cell of a row (column 0) or of a column (row 0) picks that line:
+    /// one tap shows its resize handle, a quick second tap offers duplicate/delete, a slower
+    /// second tap edits the cell. Any other cell: first tap selects, second tap edits.
+    private func tapTable(_ object: CanvasObjectView, table: CanvasTable, at point: CGPoint, wasSelected: Bool) {
+        guard let id = object.id else { return }
+        let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
+        guard let hit = table.cell(at: .init(x: Double(point.x / sx), y: Double(point.y / sy))) else { return }
+        guard let picked = TableFocus.picked(block: id, row: hit.row, column: hit.column) else {
+            lastFirstCellTap = nil
+            if tableFocus != nil { tableFocus = nil; render() }
+            if wasSelected { beginEditingCell(object, at: point) }
+            return
+        }
+        let now = CACurrentMediaTime()
+        if let last = lastFirstCellTap, last.block == id, last.row == hit.row, last.column == hit.column, now - last.time < 0.4 {
+            lastFirstCellTap = nil
+            if cellEditor != nil { commitCell() }
+            tableFocus = picked; render()
+            presentLineMenu(for: picked, at: object.convert(point, to: surface))
+            return
+        }
+        lastFirstCellTap = (id, hit.row, hit.column, now)
+        if wasSelected, tableFocus == picked { beginEditingCell(object, at: point); return }
+        if cellEditor != nil { commitCell() }
+        tableFocus = picked; render()
+    }
+
+    enum TableLineAction: Equatable { case duplicateRow(Int), deleteRow(Int), duplicateColumn(Int), deleteColumn(Int), addRow, addColumn }
+
+    func applyTableAction(_ action: TableLineAction, to blockID: UUID) {
+        guard let block = configuration.document.blocks.first(where: { $0.id == blockID }), case .table = block.content else { return }
+        do {
+            let updated = try block.updatingTable { table in
+                switch action {
+                case .duplicateRow(let row): return try table.duplicatingRow(at: row)
+                case .deleteRow(let row): return try table.removingRow(at: row)
+                case .duplicateColumn(let column): return try table.duplicatingColumn(at: column)
+                case .deleteColumn(let column): return try table.removingColumn(at: column)
+                case .addRow: return try table.insertingRow(at: table.rowCount)
+                case .addColumn: return try table.insertingColumn(at: table.columnCount)
+                }
+            }
+            // The focus follows the copy; a deleted line leaves nothing picked.
+            switch action {
+            case .duplicateRow(let row): tableFocus = TableFocus(block: blockID, row: row + 1, column: nil)
+            case .duplicateColumn(let column): tableFocus = TableFocus(block: blockID, row: nil, column: column + 1)
+            case .deleteRow, .deleteColumn: tableFocus = nil
+            case .addRow, .addColumn: break
+            }
+            configuration.onCommands([.replaceBlock(updated)])
+        } catch { configuration.onError(error) }
+    }
+
+    /// Actions for the picked line; the corner cell is the first of both a row and a column.
+    func lineActions(for focus: TableFocus) -> [(title: String, symbol: String, destructive: Bool, action: TableLineAction)] {
+        guard let block = configuration.document.blocks.first(where: { $0.id == focus.block }), case .table(let table) = block.content else { return [] }
+        var actions: [(String, String, Bool, TableLineAction)] = []
+        if let row = focus.row {
+            actions.append(("Duplicar linha", "plus.square.on.square", false, .duplicateRow(row)))
+            if table.rowCount > 1 { actions.append(("Excluir linha", "trash", true, .deleteRow(row))) }
+        }
+        if let column = focus.column {
+            actions.append(("Duplicar coluna", "plus.square.on.square", false, .duplicateColumn(column)))
+            if table.columnCount > 1 { actions.append(("Excluir coluna", "trash", true, .deleteColumn(column))) }
+        }
+        return actions.map { (title: $0.0, symbol: $0.1, destructive: $0.2, action: $0.3) }
+    }
+
+    private func presentLineMenu(for focus: TableFocus, at point: CGPoint) {
+        let actions = lineActions(for: focus)
+        guard !actions.isEmpty else { return }
+        lineMenu = UIMenu(children: actions.map { item in
+            UIAction(title: item.title, image: UIImage(systemName: item.symbol), attributes: item.destructive ? .destructive : []) { [weak self] _ in
+                self?.applyTableAction(item.action, to: focus.block)
+            }
+        })
+        lineMenuInteraction.presentEditMenu(with: UIEditMenuConfiguration(identifier: "tableLine" as NSString, sourcePoint: point))
+    }
+
+    public func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                                    suggestedActions: [UIMenuElement]) -> UIMenu? {
+        interaction === lineMenuInteraction ? lineMenu : UIMenu(children: suggestedActions)
+    }
+
+    /// "+" buttons and the picked line's tint and handle over the selected table.
+    private func showTableChrome() {
+        tableChrome?.removeFromSuperview(); tableChrome = nil
+        guard let id = selectedObjectID, let object = blockViews[id] as? CanvasObjectView, croppingID != id,
+              let block = configuration.document.blocks.first(where: { $0.id == id }), case .table(let table) = block.content else {
+            tableFocus = nil; return
+        }
+        if let focus = tableFocus, focus.block != id
+            || focus.row.map({ !table.rowHeights.indices.contains($0) }) == true
+            || focus.column.map({ !table.columnWidths.indices.contains($0) }) == true { tableFocus = nil }
+        let chrome = TableChrome(table: table, focus: tableFocus)
+        chrome.bounds = object.bounds; chrome.center = object.center; chrome.transform = object.transform
+        chrome.onAddRow = { [weak self] in self?.applyTableAction(.addRow, to: id) }
+        chrome.onAddColumn = { [weak self] in self?.applyTableAction(.addColumn, to: id) }
+        let originCenter = object.center
+        chrome.onResize = { [weak self, weak object, weak chrome] axis, index, size, ended in
+            guard let self, let object, let chrome else { return }
+            do {
+                let updated = try block.updatingTable {
+                    try (axis == .row ? $0.settingRowHeight(size, at: index) : $0.settingColumnWidth(size, at: index))
+                }
+                if ended {
+                    if updated != block { self.configuration.onCommands([.replaceBlock(updated)]) } else { self.render() }
+                    return
+                }
+                guard case .table(let next) = updated.content else { return }
+                // Live preview: the origin stays put, so the center moves by half the growth (in the table's axes).
+                let old = block.layout.frame, new = updated.layout.frame
+                let shift = CGPoint(x: (new.width - old.width) / 2, y: (new.height - old.height) / 2)
+                    .applying(CGAffineTransform(rotationAngle: block.effectivePresentation.rotationRadians))
+                object.block = updated
+                object.bounds.size = CGSize(width: new.width, height: new.height)
+                object.center = CGPoint(x: originCenter.x + shift.x, y: originCenter.y + shift.y)
+                object.setNeedsDisplay()
+                chrome.table = next; chrome.bounds = object.bounds; chrome.center = object.center
+                if let handles = self.selectionOverlay { handles.bounds = object.bounds; handles.center = object.center; handles.setNeedsLayout() }
+            } catch { self.configuration.onError(error) }
+        }
+        surface.addSubview(chrome); tableChrome = chrome
+    }
+
+    /// Test hooks: a finger tap in the middle of a cell, and the chrome currently shown.
+    func tapTableCell(_ id: UUID, row: Int, column: Int) {
+        guard let object = blockViews[id] as? CanvasObjectView, case .table(let table) = object.block?.content else { return }
+        let f = table.frame(row: row, column: column)
+        let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
+        handleObjectTap(object, at: CGPoint(x: (f.x + f.width / 2) * sx, y: (f.y + f.height / 2) * sy))
+    }
+    var tableChromeForTesting: TableChrome? { tableChrome }
+    var editingCellForTesting: (row: Int, column: Int)? { editingCell.map { ($0.row, $0.column) } }
+
+    /// Long press on a table: add lines first (the most common need), then the row and the
+    /// column under the finger, then the cell and the table's look.
     private func tableMenu(_ block: CanvasBlock, _ table: CanvasTable) -> [UIMenuElement] {
         var cell = (row: 0, column: 0)
         if let object = blockViews[block.id] as? CanvasObjectView, let location = object.menuLocation {
@@ -1463,17 +1614,35 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             }
         }
         let colors: [(String, String?)] = [("Sem cor", nil), ("Cinza", "#F3F4F6"), ("Amarelo", "#FEF3C7"), ("Verde", "#DCFCE7"), ("Azul", "#DBEAFE"), ("Rosa", "#FCE7F3")]
-        return [UIMenu(title: "Tabela (linha \(cell.row + 1), coluna \(cell.column + 1))", image: UIImage(systemName: "tablecells"), children: [
+        let add = UIMenu(title: "", options: .displayInline, children: [
+            edit("Nova linha", "plus.rectangle") { try $0.insertingRow(at: $0.rowCount) },
+            edit("Nova coluna", "plus.rectangle.portrait") { try $0.insertingColumn(at: $0.columnCount) },
             UIAction(title: "Editar célula", image: UIImage(systemName: "pencil")) { [weak self] _ in
                 guard let self, let object = self.blockViews[block.id] as? CanvasObjectView else { return }
                 let f = table.frame(row: cell.row, column: cell.column)
                 let sx = object.bounds.width / max(1, table.width), sy = object.bounds.height / max(1, table.height)
                 self.beginEditingCell(object, at: CGPoint(x: (f.x + f.width / 2) * sx, y: (f.y + f.height / 2) * sy))
             },
+        ])
+        let row = UIMenu(title: "Linha \(cell.row + 1)", image: UIImage(systemName: "rectangle.split.1x2"), children: [
             edit("Inserir linha acima", "arrow.up.to.line") { try $0.insertingRow(at: cell.row) },
             edit("Inserir linha abaixo", "arrow.down.to.line") { try $0.insertingRow(at: cell.row + 1) },
+            edit("Duplicar linha", "plus.square.on.square") { try $0.duplicatingRow(at: cell.row) },
+            UIAction(title: "Ajustar altura", image: UIImage(systemName: "arrow.up.and.down")) { [weak self] _ in
+                self?.tableFocus = TableFocus(block: block.id, row: cell.row, column: nil); self?.selectedObjectID = block.id; self?.render()
+            },
+            edit("Excluir linha", "trash", destructive: true) { try $0.removingRow(at: cell.row) },
+        ])
+        let column = UIMenu(title: "Coluna \(cell.column + 1)", image: UIImage(systemName: "rectangle.split.2x1"), children: [
             edit("Inserir coluna à esquerda", "arrow.left.to.line") { try $0.insertingColumn(at: cell.column) },
             edit("Inserir coluna à direita", "arrow.right.to.line") { try $0.insertingColumn(at: cell.column + 1) },
+            edit("Duplicar coluna", "plus.square.on.square") { try $0.duplicatingColumn(at: cell.column) },
+            UIAction(title: "Ajustar largura", image: UIImage(systemName: "arrow.left.and.right")) { [weak self] _ in
+                self?.tableFocus = TableFocus(block: block.id, row: nil, column: cell.column); self?.selectedObjectID = block.id; self?.render()
+            },
+            edit("Excluir coluna", "trash", destructive: true) { try $0.removingColumn(at: cell.column) },
+        ])
+        let look = UIMenu(title: "Aparência", image: UIImage(systemName: "paintbrush"), children: [
             edit(table.headerRow ? "Remover cabeçalho" : "Primeira linha como cabeçalho", "rectangle.topthird.inset.filled") { var t = $0; t.headerRow.toggle(); return t },
             UIMenu(title: "Cor da célula", children: colors.map { name, color in
                 edit(name) { var t = $0; t.cells[cell.row][cell.column].background = color; return t }
@@ -1481,9 +1650,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             UIMenu(title: "Bordas", children: [("Sem borda", 0.0), ("Fina", 1.0), ("Média", 2.0)].map { name, width in
                 edit(name) { var t = $0; t.borderWidth = width; return t }
             }),
-            edit("Excluir linha", "minus.square", destructive: true) { try $0.removingRow(at: cell.row) },
-            edit("Excluir coluna", "minus.square", destructive: true) { try $0.removingColumn(at: cell.column) },
-        ])]
+        ])
+        return [UIMenu(title: "Tabela", options: .displayInline, children: [add, row, column, look])]
     }
 
     private var nextOrder: Int { (configuration.document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1 }

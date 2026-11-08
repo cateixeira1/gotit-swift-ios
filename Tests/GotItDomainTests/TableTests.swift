@@ -87,3 +87,34 @@ private func table(_ block: CanvasBlock) throws -> CanvasTable {
     #expect(try table(block).plainText == "Data\tEvento 👍🏽\n\t")
     #expect(try JSONDecoder().decode(CanvasBlock.self, from: JSONEncoder().encode(block)) == block)
 }
+
+@Test func duplicatingCopiesARowOrColumnNextToIt() throws {
+    var block = try tableBlock(rows: 2, columns: 2, width: 200).updatingTable {
+        var t = try $0.settingText(RichText("Nome"), row: 0, column: 1).settingText(RichText("Ana"), row: 1, column: 1)
+        t.cells[1][1].background = "#DCFCE7"
+        return try t.settingRowHeight(60, at: 1)
+    }
+    block = try block.updatingTable { try $0.duplicatingRow(at: 1) }
+    var grid = try table(block)
+    #expect(grid.rowCount == 3 && grid.rowHeights == [36, 60, 60])
+    #expect(grid.cells[2][1] == grid.cells[1][1])
+    #expect(block.layout.frame.height == 156)
+    block = try block.updatingTable { try $0.duplicatingColumn(at: 1) }
+    grid = try table(block)
+    #expect(grid.columnCount == 3 && grid.cells.map { $0[2].text.plainText } == ["Nome", "Ana", "Ana"])
+    #expect(block.layout.frame.width == 300)
+    #expect(throws: DocumentError.self) { try grid.duplicatingRow(at: 3) }
+    #expect(throws: DocumentError.self) { try grid.duplicatingColumn(at: -1) }
+    _ = try CommandEngine.applying([.insertBlock(block)], to: CanvasDocument(title: "T"))
+}
+
+@Test func oneRowOrColumnCanBeResizedWithinLimits() throws {
+    let grid = try table(tableBlock())
+    let wide = try grid.settingColumnWidth(250, at: 0)
+    #expect(wide.columnWidths == [250, 100, 100] && wide.width == 450)
+    #expect(try grid.settingColumnWidth(1, at: 2).columnWidths[2] == CanvasTable.minimumColumnWidth)
+    #expect(try grid.settingRowHeight(5, at: 1).rowHeights[1] == CanvasTable.minimumRowHeight)
+    #expect(try grid.settingRowHeight(1e9, at: 1).rowHeights[1] == CanvasTable.maximumLineSize)
+    #expect(throws: DocumentError.self) { try grid.settingRowHeight(.nan, at: 0) }
+    #expect(throws: DocumentError.self) { try grid.settingColumnWidth(80, at: 3) }
+}

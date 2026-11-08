@@ -92,6 +92,38 @@ public struct CanvasTable: Codable, Equatable, Sendable {
         return copy
     }
 
+    /// A copy of the row (texts, colours and height) right below it.
+    public func duplicatingRow(at index: Int) throws -> CanvasTable {
+        guard rowHeights.indices.contains(index), rowCount < Self.maximumRows else { throw DocumentError.invalid("Invalid row duplication") }
+        var copy = self
+        copy.rowHeights.insert(rowHeights[index], at: index + 1)
+        copy.cells.insert(cells[index], at: index + 1)
+        return copy
+    }
+
+    /// A copy of the column (texts, colours and width) right after it.
+    public func duplicatingColumn(at index: Int) throws -> CanvasTable {
+        guard columnWidths.indices.contains(index), columnCount < Self.maximumColumns else { throw DocumentError.invalid("Invalid column duplication") }
+        var copy = self
+        copy.columnWidths.insert(columnWidths[index], at: index + 1)
+        for row in copy.cells.indices { copy.cells[row].insert(cells[row][index], at: index + 1) }
+        return copy
+    }
+
+    public static let maximumLineSize = 4000.0
+
+    /// Manual size of one row (resize handle); the table grows or shrinks by the difference.
+    public func settingRowHeight(_ height: Double, at index: Int) throws -> CanvasTable {
+        guard rowHeights.indices.contains(index), height.isFinite else { throw DocumentError.invalid("Invalid row height") }
+        var copy = self; copy.rowHeights[index] = min(Self.maximumLineSize, max(Self.minimumRowHeight, height)); return copy
+    }
+
+    /// Manual size of one column (resize handle); the table grows or shrinks by the difference.
+    public func settingColumnWidth(_ width: Double, at index: Int) throws -> CanvasTable {
+        guard columnWidths.indices.contains(index), width.isFinite else { throw DocumentError.invalid("Invalid column width") }
+        var copy = self; copy.columnWidths[index] = min(Self.maximumLineSize, max(Self.minimumColumnWidth, width)); return copy
+    }
+
     public func settingText(_ text: RichText, row: Int, column: Int) throws -> CanvasTable {
         guard cells.indices.contains(row), cells[row].indices.contains(column) else { throw DocumentError.invalid("Missing table cell") }
         var copy = self; copy.cells[row][column].text = text; return copy

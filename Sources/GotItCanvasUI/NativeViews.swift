@@ -84,7 +84,8 @@ enum TextBridge {
 
 /// Draws a table the same way at any frame size: the grid is scaled to the view bounds.
 @MainActor enum TableRendering {
-    static func base(header: Bool) -> BlockStyle { BlockStyle(fontSize: 16, bold: header ? true : nil, foreground: "#111827") }
+    /// Cell text is justified unless the user picks another alignment for it.
+    static func base(header: Bool) -> BlockStyle { BlockStyle(fontSize: 16, bold: header ? true : nil, foreground: "#111827", alignment: .justified) }
 
     static func draw(_ table: CanvasTable, in bounds: CGRect) {
         let sx = bounds.width / max(1, table.width), sy = bounds.height / max(1, table.height)

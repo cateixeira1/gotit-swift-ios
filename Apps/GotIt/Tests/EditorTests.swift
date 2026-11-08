@@ -109,6 +109,81 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(paginated.blocks.allSatisfy { $0.textFlowID == block.id })
     }
 
+    /// The table gestures: one tap on the first cell of a line picks it (tint, resize handle),
+    /// a quick second tap offers duplicate/delete, a slow one edits; "+" adds rows and columns.
+    func testTableLinesArePickedResizedDuplicatedAndAdded() throws {
+        let grid = CanvasTable(rows: 3, columns: 3, width: 300)
+        let table = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 40, y: 40, width: grid.width, height: grid.height)), content: .table(grid))
+        var document = try CommandEngine.applying([.insertBlock(table)], to: CanvasDocument(title: "Tabela"))
+        var controller: CanvasViewController!
+        func editor() -> CanvasEditor {
+            CanvasEditor(document: document, onCommands: { commands in
+                document = try! CommandEngine.applying(commands, to: document)
+                controller.configure(editor())
+            })
+        }
+        controller = CanvasViewController(configuration: editor())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        func current() throws -> CanvasTable {
+            guard case .table(let t) = try XCTUnwrap(document.blocks.first { $0.id == table.id }).content else { throw CancellationError() }
+            return t
+        }
+        func pause() { RunLoop.current.run(until: Date().addingTimeInterval(0.5)) }
+
+        controller.tapTableCell(table.id, row: 1, column: 1)            // selects: "+" buttons, nothing picked
+        var chrome = try XCTUnwrap(controller.tableChromeForTesting)
+        XCTAssertNil(controller.tableFocus)
+        XCTAssertTrue(chrome.rowHandle.isHidden && chrome.columnHandle.isHidden)
+        pause()
+        controller.tapTableCell(table.id, row: 0, column: 2)            // first cell of column 3
+        XCTAssertEqual(controller.tableFocus, TableFocus(block: table.id, row: nil, column: 2))
+        chrome = try XCTUnwrap(controller.tableChromeForTesting)
+        chrome.layoutIfNeeded()
+        XCTAssertFalse(chrome.columnHandle.isHidden); XCTAssertTrue(chrome.rowHandle.isHidden)
+        XCTAssertEqual(chrome.columnHandle.frame.midX, 300, accuracy: 1)   // on the column's right edge
+        chrome.onResize?(.column, 2, 160, true)
+        XCTAssertEqual(try current().columnWidths, [100, 100, 160])
+        XCTAssertEqual(document.blocks.first { $0.id == table.id }?.layout.frame.width, 360)
+
+        pause()
+        controller.tapTableCell(table.id, row: 2, column: 0)            // first cell of row 3
+        controller.tapTableCell(table.id, row: 2, column: 0)            // quick second tap
+        XCTAssertEqual(controller.tableFocus, TableFocus(block: table.id, row: 2, column: nil))
+        XCTAssertEqual(controller.lineMenu?.children.map(\.title), ["Duplicar linha", "Excluir linha"])
+        XCTAssertNil(controller.editingCellForTesting)
+        controller.applyTableAction(.duplicateRow(2), to: table.id)
+        XCTAssertEqual(try current().rowCount, 4)
+        XCTAssertEqual(controller.tableFocus?.row, 3, "the copy is picked")
+
+        let corner = try XCTUnwrap(TableFocus.picked(block: table.id, row: 0, column: 0))
+        XCTAssertEqual(controller.lineActions(for: corner).map { $0.title }, ["Duplicar linha", "Excluir linha", "Duplicar coluna", "Excluir coluna"])
+        XCTAssertNil(TableFocus.picked(block: table.id, row: 1, column: 1))
+
+        pause()
+        controller.tapTableCell(table.id, row: 1, column: 0)
+        XCTAssertNil(controller.editingCellForTesting, "the tap that picks the line does not open the keyboard")
+        pause()
+        controller.tapTableCell(table.id, row: 1, column: 0)            // slow second tap: edit the text
+        XCTAssertEqual(controller.editingCellForTesting?.row, 1)
+        let cellEditor = try XCTUnwrap(controller.view.firstResponderView as? UITextView)
+        XCTAssertEqual((cellEditor.typingAttributes[.paragraphStyle] as? NSParagraphStyle)?.alignment, .justified)
+        cellEditor.resignFirstResponder()
+
+        chrome = try XCTUnwrap(controller.tableChromeForTesting)
+        chrome.addRow.sendActions(for: .touchUpInside)
+        chrome = try XCTUnwrap(controller.tableChromeForTesting)
+        chrome.addColumn.sendActions(for: .touchUpInside)
+        XCTAssertEqual(try current().rowCount, 5); XCTAssertEqual(try current().columnCount, 4)
+        controller.applyTableAction(.deleteColumn(3), to: table.id)
+        XCTAssertEqual(try current().columnCount, 3)
+        XCTAssertEqual(TableRendering.base(header: false).alignment, .justified)
+        window.isHidden = true
+    }
+
     func testTableDrawsCellsAndBordersAtItsFrameSize() throws {
         var table = CanvasTable(rows: 2, columns: 2, width: 200)
         table = try table.settingText(RichText("Data"), row: 0, column: 0)
@@ -649,4 +724,8 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(view.document?.index(for: try XCTUnwrap(model.results.first?.pages.first)), 1)
     }
 
+}
+
+private extension UIView {
+    var firstResponderView: UIView? { isFirstResponder ? self : subviews.lazy.compactMap(\.firstResponderView).first }
 }

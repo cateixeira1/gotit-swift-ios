@@ -82,13 +82,35 @@ e ampliação do reconhecimento permanecem congelados.
   disparam. Detecção pura com testes; layout TextKit verificado só por compilação
   e testes de UI existentes, não em aparelho.
 - Medir latência e memória em aparelho físico, especialmente histórias longas.
-  O layout/diff ainda percorre o documento; não há índice espacial incremental.
-  Conexões e a camada PencilKit não usam o pool de views de blocos.
+  **Medição no aparelho disponível** (08/11, commit 51c9e7d): menu da nota →
+  "Medir desempenho do aparelho", com dados temporários; o usuário copia o
+  resultado. O mesmo código roda no CI (simulador, build Debug, não é aparelho):
+  antes da paginação incremental, uma tecla custava ~190 ms numa história de 34
+  páginas e 30–37 ms numa de 12. **Paginação incremental** (1cd14dd): começa na
+  página anterior à editada e para na primeira página que termina onde terminava;
+  teste nativo compara 40 edições aleatórias com a paginação completa. Depois
+  (b33b14b, simulador Debug): 37 páginas com parágrafos, tecla no fim mediana
+  11 ms, no início 16 ms; parágrafo único de 34 páginas, mediana ~30 ms e p95
+  ~320 ms. Gravação SQLite por tecla (30 páginas, fora da thread principal) mediana
+  ~4 ms; fila de recuperação 0,3 ms; formas 23 ms por traço (eram 107 ms; busca do
+  maior quadrilátero passou de O(n⁴) a O(n³)). Faltam os números do aparelho.
+  O layout/diff do documento inteiro ainda é percorrido a cada edição (é o que resta
+  nos ~11 ms); não há índice espacial incremental. Conexões e a camada PencilKit
+  não usam o pool de views de blocos.
+- **Fonte do sistema preservada** (a1b9ce3): o texto salvo guardava o nome
+  interno da fonte do sistema (".SFUI-…"), que o CoreText não resolve por nome e
+  substitui por outra fonte; ao redesenhar, as quebras de linha e de página mudavam
+  (página 1 passava de 2.024 para 2.296 caracteres no teste). Agora esse nome não é
+  guardado e, em notas existentes, é lido como a fonte do sistema.
 - **Histórico limitado por bytes** (commit 072324f): `historyByteLimit`, padrão
   32 MiB por nota, além dos 50 grupos; a entrada mais recente é sempre mantida.
   Deltas de traços PencilKit (em vez de snapshot por gesto) continuam pendentes.
-- Persistir fila de comandos pendentes para recuperação de encerramento abrupto:
-  reaberto (ver abaixo).
+- **Fila de recuperação ligada ao app** (0b56315): ver a seção abaixo.
+- **IME, colar e desfazer** (testes nativos, 0b56315/1cd14dd): o fim de uma
+  composição (tecla morta, kana) passa a ser salvo na hora (antes podia esperar a
+  próxima tecla) e relatos repetidos do mesmo texto contam uma vez; digitação
+  agrupada e colagem como passo próprio; desfazer/refazer de uma colagem que criou
+  páginas. Simulados no simulador; teclado real e IME no aparelho ainda por validar.
 - **Recorte com alças** (efef958): "Recortar com alças" usa os quatro cantos para
   aparar ou revelar a imagem sem mover nem reescalar os pixels visíveis, nunca
   além do original; o diálogo numérico continua como "Recorte exato (%)".
@@ -113,21 +135,35 @@ A próxima entrega deve fechar esses critérios, sem retomar Teia/equações ant
 que o núcleo de edição tenha sido validado.
 
 
-## Continuação: recuperação de gravações (parcial)
+## Recuperação de gravações (08/11/2026)
 
-O esquema v6 acrescenta recibos de operações na mesma transação do documento, e
-`PendingEditJournal` oferece uma fila em arquivo atômico, ambos com testes. A
-ligação dessa fila ao host (`GotItApp`) foi **desativada**: com ela, o teste de
-interface de desenho falhou 2 de 2 vezes no iPhone (contador permanece em
-"0 traços"), enquanto o commit anterior passou 3 de 3 e o mesmo código com a
-ligação removida passou na execução 42268105571. A causa exata não foi isolada
-(não há Xcode no ambiente de desenvolvimento); a evidência é correlacional.
+Primeira tentativa (06/11): com a fila ligada ao host, o teste de interface de
+desenho falhou 2 de 2 vezes no iPhone e a ligação foi removida (47ed923), sem
+causa isolada. Segunda versão (0b56315):
 
-Consequência: o critério "persistir fila de comandos pendentes para recuperação
-de encerramento abrupto" continua **aberto**. Cada edição já é confirmada no
-SQLite (WAL) em transação própria; o risco restante é a janela entre a edição
-otimista e o commit. Reintroduzir a ligação somente com um teste de interface
-que reproduza a falha e depois de depurá-la em simulador local.
+- `PendingEditJournal` virou um log só de acréscimos (uma linha por edição ou por
+  confirmação, esvaziado quando nada está pendente). Uma última linha cortada por
+  queda é ignorada (sua edição ainda não tinha aparecido); qualquer outra linha
+  danificada impede a leitura e o arquivo é preservado.
+- O app grava cada edição na fila antes de mostrá-la e a retira depois do commit.
+  Diferenças em relação à primeira tentativa: um problema na fila nunca bloqueia a
+  edição (um aviso só), a fila em memória comanda a gravação, o documento salvo é
+  aplicado antes de qualquer outro `await` e os recibos são apagados numa única
+  transação quando a fila esvazia.
+- Ao abrir, `replay(into:)` reaplica o que estava pendente usando os recibos: uma
+  edição que o SQLite já tinha confirmado não é aplicada duas vezes. O que não puder
+  ser aplicado vai para um arquivo à parte (`quarantine`), nunca é descartado.
+- Testes: núcleo (reinício, linha cortada, recuperação única com edição já
+  confirmada + duas pendentes, quarentena) e interface: com as gravações retidas
+  (`--hold-saves`), uma página criada sobrevive ao app ser encerrado. O teste de
+  desenho que falhava em 06/11 passou em iPad e iPhone com a fila ligada
+  (execuções de 51c9e7d e b33b14b).
+- Limite: cobre o app fechado ou encerrado; queda de energia no mesmo instante não
+  (sem fsync por tecla). Não testado em aparelho.
+
+O CI reexecuta uma vez um teste que falhe no simulador (`-retry-tests-on-failure`),
+depois de uma falha de inicialização do XCUITest ("Failed to get background
+assertion"); a primeira falha fica no pacote de resultados.
 
 A estratégia de retomada dos recursos adiados está em [workflow.md](workflow.md).
 Teia entra após catálogo/indexação; equações após estabilização da tinta e

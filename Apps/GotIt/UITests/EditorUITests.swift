@@ -32,6 +32,44 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["page-2"].waitForExistence(timeout: 10), "A página criada antes de o app ser encerrado não foi recuperada")
     }
 
+    private func insertSticker(_ app: XCUIApplication, _ identifier: String) {
+        if app.buttons["showTools"].exists { app.buttons["showTools"].tap() }
+        let sticker = app.buttons["Sticker"]
+        XCTAssertTrue(sticker.waitForExistence(timeout: 10)); sticker.tap()
+        let choice = app.buttons[identifier]
+        XCTAssertTrue(choice.waitForExistence(timeout: 10)); choice.tap()
+    }
+
+    /// Post-it and calendar: insert, type in the post-it, double-tap the calendar and pick a day;
+    /// the app must stay responsive throughout (both froze on the device on 08/11).
+    func testPostItAndCalendarStayResponsive() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-testing", "--reset-test-data"]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
+        insertSticker(app, "stickyNoteSticker")
+        let note = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Post-it'")).firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 10)); failIfAlert(app, "post-it")
+        note.tap(); note.tap()
+        app.typeText("Comprar pão")
+        XCTAssertTrue(app.textViews.containing(NSPredicate(format: "value CONTAINS 'Comprar'")).firstMatch.waitForExistence(timeout: 10))
+        insertSticker(app, "calendarSticker")
+        let calendar = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Calendário,'")).firstMatch
+        XCTAssertTrue(calendar.waitForExistence(timeout: 10)); failIfAlert(app, "calendário")
+        calendar.doubleTap()
+        XCTAssertTrue(app.navigationBars["Data do calendário"].waitForExistence(timeout: 10), "o seletor de data não abriu")
+        app.navigationBars["Data do calendário"].buttons.element(boundBy: 1).tap()
+        XCTAssertTrue(calendar.waitForExistence(timeout: 10))
+        calendar.doubleTap(); calendar.doubleTap()
+        if app.navigationBars["Data do calendário"].waitForExistence(timeout: 5) { app.navigationBars["Data do calendário"].buttons.element(boundBy: 1).tap() }
+        // Still responsive: the options menu opens.
+        let options = app.buttons["documentOptions"]
+        XCTAssertTrue(options.waitForExistence(timeout: 10))
+        options.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.buttons["Medir desempenho do aparelho"].waitForExistence(timeout: 10))
+    }
+
     func testPagesDrawingAndReopenInAdaptiveEditor() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

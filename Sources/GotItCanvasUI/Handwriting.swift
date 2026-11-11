@@ -42,10 +42,11 @@ public enum HandwritingFonts {
 public enum HandwritingReader {
     public struct Reading: Sendable { public var text: String; public var confidence: Float; public var lines: Int }
 
-    public static func read(_ image: CGImage, languages: [String]) -> Reading? {
+    /// `correction` off for formulas: language correction turns "x2" or "1O" into words.
+    public static func read(_ image: CGImage, languages: [String], correction: Bool = true) -> Reading? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = correction
         request.recognitionLanguages = languages
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
         guard (try? handler.perform([request])) != nil, let observations = request.results, !observations.isEmpty else { return nil }

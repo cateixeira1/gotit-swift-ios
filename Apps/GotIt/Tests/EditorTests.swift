@@ -587,6 +587,14 @@ final class EditorTests: XCTestCase {
         let reading = try XCTUnwrap(HandwritingReader.read(try XCTUnwrap(picture.cgImage), languages: ["pt-BR"]))
         XCTAssertTrue(reading.text.lowercased().contains("amanh"), reading.text)
         XCTAssertEqual(reading.lines, 1)
+        // A formula written in the same font is read without language correction and answered.
+        let formula = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: size))
+            NSAttributedString(string: "12 + 7 =", attributes: [.font: UIFont(name: "Caveat-Regular", size: 64)!, .foregroundColor: UIColor.black])
+                .draw(at: CGPoint(x: 12, y: 18))
+        }
+        let math = try XCTUnwrap(HandwritingReader.read(try XCTUnwrap(formula.cgImage), languages: ["en-US"], correction: false))
+        XCTAssertEqual(HandwrittenMath.normalize(math.text).flatMap(HandwrittenMath.answer), "19", math.text)
     }
 
     /// An audio block shows its length and plays or pauses with a tap.

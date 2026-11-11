@@ -686,7 +686,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
     public func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         usingTool = false; toolEndedAt = Date()
-        if configuration.session?.handwritingToText == true, configuration.tool != .eraser {
+        if readsWriting, configuration.tool != .eraser {
             handwritingTimer?.invalidate()
             handwritingTimer = Timer.scheduledTimer(withTimeInterval: 1.8, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated { self?.convertHandwriting() }
@@ -745,7 +745,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 suspect = (conversion, earlier.union([key]))
             }
             recentInk[key] = drawn
-            if configuration.session?.handwritingToText == true { handwritingKeys.insert(key) }
+            if readsWriting { handwritingKeys.insert(key) }
             if InkIntent.holdDuration(drawn, screenScale: scale) >= InkIntent.holdToSnap { held.append(key) }
             else { awaitingShape.append(key) }
         }
@@ -1679,11 +1679,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var handwritingKeys: Set<Double> = []
     private var readingHandwriting = false
 
-    /// A moment after the pen stops, what was written becomes text in the chosen font, where it
-    /// was written and about as large; one undo step brings the writing back. Strokes that do not
-    /// read as text (a drawing, a scribble) stay as they are.
+    /// Writing is read after a pause when it may become text, or may be a formula to answer.
+    private var readsWriting: Bool {
+        configuration.session?.handwritingToText == true || (configuration.document.canvas.solveEquations && configuration.document.kind == .note)
+    }
+
+    /// A moment after the pen stops, the writing is read on the device. A formula ("12+7=",
+    /// "2x+4=10") is answered beside it, in the handwriting font and in blue, when "Resolver
+    /// equações" is on (the default); the writing stays. Otherwise, with "Escrita vira texto" on,
+    /// the writing becomes text in the chosen font, where it was written and about as large.
+    /// Each is one undo step. Strokes that read as neither stay as they are.
     func convertHandwriting() {
-        guard !readingHandwriting, !usingTool, let session = configuration.session, session.handwritingToText else { return }
+        guard !readingHandwriting, !usingTool, let session = configuration.session, readsWriting else { return }
         let keys = handwritingKeys
         handwritingKeys.removeAll()
         let strokes = ink.drawing.strokes.filter { keys.contains(Self.key($0)) }
@@ -1699,36 +1706,63 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let images = pictures.map(\.image)
         let language = [Locale.current.language.languageCode?.identifier == "pt" ? Locale.current.identifier.replacingOccurrences(of: "_", with: "-") : "pt-BR", "en-US"]
         let font = session.handwritingFont
+        let solve = configuration.document.canvas.solveEquations, toText = session.handwritingToText
         Task { [weak self] in
-            let readings = await Task.detached(priority: .userInitiated) { images.map { HandwritingReader.read($0, languages: language) } }.value
+            // Per group: (answer to a formula, text reading) — only what is needed is read.
+            let readings = await Task.detached(priority: .userInitiated) {
+                images.map { image -> (answer: String?, text: HandwritingReader.Reading?) in
+                    if solve, let math = HandwritingReader.read(image, languages: ["en-US"], correction: false),
+                       let formula = HandwrittenMath.normalize(math.text), let answer = HandwrittenMath.answer(formula) {
+                        return (answer, nil)
+                    }
+                    return (nil, toText ? HandwritingReader.read(image, languages: language) : nil)
+                }
+            }.value
             guard let self else { return }
             self.readingHandwriting = false
             guard !self.usingTool else { self.handwritingKeys.formUnion(keys); return }
             var removed = Set<Double>()
             var commands: [DocumentCommand] = []
             var order = (self.configuration.document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? 0) + 1
+            let alive = Set(self.ink.drawing.strokes.map(Self.key))
+            let pageWidth = CGFloat(self.configuration.document.canvas.size.width)
             for (picture, reading) in zip(pictures, readings) {
-                guard let reading, reading.confidence >= 0.35, reading.text.contains(where: { $0.isLetter || $0.isNumber }) else { continue }
                 // Still there (not erased or turned into a shape meanwhile).
-                let alive = Set(self.ink.drawing.strokes.map(Self.key))
                 let groupKeys = picture.strokes.map(Self.key)
                 guard groupKeys.allSatisfy(alive.contains) else { continue }
-                let lineHeight = picture.bounds.height / CGFloat(max(1, reading.lines))
+                if let answer = reading.answer {
+                    let size = min(96, max(12, (picture.bounds.height * 0.8).rounded()))
+                    let width = max(40, CGFloat(answer.count) * size * 0.55 + 16)
+                    let beside = picture.bounds.maxX + 10 + width <= pageWidth - 8
+                    let frame = beside ? CGRect(x: picture.bounds.maxX + 10, y: picture.bounds.minY - size * 0.1, width: width, height: max(picture.bounds.height, size * 1.4))
+                                       : CGRect(x: picture.bounds.minX, y: picture.bounds.maxY + 6, width: width, height: size * 1.4)
+                    commands.append(.insertBlock(CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(x: frame.minX, y: frame.minY, width: frame.width, height: frame.height)),
+                                                             style: .init(fontName: font, fontSize: size, foreground: "#1D4ED8"),
+                                                             content: .text(RichText(answer)), presentation: .init(wrap: .none))))
+                    order += 1
+                    continue
+                }
+                guard let text = reading.text, text.confidence >= 0.35, text.text.contains(where: { $0.isLetter || $0.isNumber }) else { continue }
+                let lineHeight = picture.bounds.height / CGFloat(max(1, text.lines))
                 let size = min(96, max(10, (lineHeight * 0.78).rounded()))
                 let block = CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(
                         x: picture.bounds.minX, y: picture.bounds.minY - size * 0.15,
                         width: max(picture.bounds.width * 1.15, 60), height: max(picture.bounds.height, size * 1.4))),
                     style: .init(fontName: font, fontSize: size, foreground: "#111827"),
-                    content: .text(RichText(reading.text)), presentation: .init(wrap: .none))
+                    content: .text(RichText(text.text)), presentation: .init(wrap: .none))
                 order += 1
                 commands.append(.insertBlock(block))
                 removed.formUnion(groupKeys)
             }
             guard !commands.isEmpty else { return }
-            self.applyingDrawing = true
-            self.ink.drawing = PKDrawing(strokes: self.ink.drawing.strokes.filter { !removed.contains(Self.key($0)) })
-            self.applyingDrawing = false
-            self.saveDrawing(commands)
+            if !removed.isEmpty {
+                self.applyingDrawing = true
+                self.ink.drawing = PKDrawing(strokes: self.ink.drawing.strokes.filter { !removed.contains(Self.key($0)) })
+                self.applyingDrawing = false
+                self.saveDrawing(commands)
+            } else {
+                self.configuration.onCommands(commands)
+            }
         }
     }
 

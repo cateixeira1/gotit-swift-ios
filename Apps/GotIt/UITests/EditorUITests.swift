@@ -71,7 +71,8 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(app.textViews.containing(NSPredicate(format: "value CONTAINS 'Comprar'")).firstMatch.waitForExistence(timeout: 10))
         // Close the keyboard (it covers the bottom toolbar on iPhone).
         let done = app.buttons["Concluir"]
-        if done.waitForExistence(timeout: 3) { done.tap() }
+        // iOS 26 keyboard bars cannot be "scrolled to visible" by AX: tap the spot.
+        if done.waitForExistence(timeout: 3) { done.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
         insertSticker(app, "calendarSticker")
         let calendar = app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Calendário,'")).firstMatch
         XCTAssertTrue(calendar.waitForExistence(timeout: 10)); failIfAlert(app, "calendário")

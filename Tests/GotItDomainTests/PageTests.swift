@@ -127,3 +127,19 @@ import Testing
     let decoded = try JSONDecoder().decode(CanvasSettings.self, from: JSONSerialization.data(withJSONObject: json))
     #expect(decoded.margins == nil && decoded.pageMargins == .legacy)
 }
+
+@Test func paperForTheNoteAndForOnePageOrHalf() throws {
+    var document = CanvasDocument(title: "Papel")
+    let page = try #require(document.pages.first)
+    var settings = document.canvas
+    settings.paper = PaperStyle(kind: .notebook, size: PaperStyle.notebookLine)
+    document = try CommandEngine.applying([.setCanvasSettings(settings)], to: document)
+    let squares = PaperFill(style: PaperStyle(kind: .grid, size: PageMargins.centimeters(0.5)), region: .bottomHalf)
+    document = try CommandEngine.applying([.setPagePaper(page.id, squares)], to: document)
+    #expect(document.paperFills(on: page.id).map(\.style.kind) == [.notebook, .grid])
+    #expect(squares.rect(on: .a4).y == CanvasSize.a4.height / 2)
+    #expect(try document.pageDocument(page.id).pages.first?.paper == squares, "the page keeps its paper in its projection")
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.setPagePaper(page.id, PaperFill(style: PaperStyle(kind: .checker, size: 1)))], to: document) }
+    document = try CommandEngine.applying([.setPagePaper(page.id, nil)], to: document)
+    #expect(document.paperFills(on: page.id).count == 1)
+}

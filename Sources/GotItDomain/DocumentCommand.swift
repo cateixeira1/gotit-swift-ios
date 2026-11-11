@@ -17,6 +17,8 @@ public enum DocumentCommand: Codable, Equatable, Sendable {
     case appendPage(CanvasPage)
     case insertPage(CanvasPage, after: UUID)
     case removePage(UUID)
+    /// Paper of one page (nil: only the note's paper).
+    case setPagePaper(UUID, PaperFill?)
     case insertBlock(CanvasBlock)
     case replaceBlock(CanvasBlock)
     case removeSubtree(UUID)
@@ -42,6 +44,10 @@ public enum CommandEngine {
             case .insertPage(let page, let previous):
                 guard let index = document.pages.firstIndex(where: { $0.id == previous }) else { throw DocumentError.invalid("Missing previous page") }
                 document.pages.insert(page, at: index + 1)
+            case .setPagePaper(let id, let paper):
+                guard let index = document.pages.firstIndex(where: { $0.id == id }) else { throw DocumentError.invalid("Missing page") }
+                try paper?.style.validate()
+                document.pages[index].paper = paper
             case .removePage(let id):
                 guard document.pages.count > 1, !document.blocks.contains(where: { document.pageID(for: $0.id) == id }) else { throw DocumentError.invalid("Page is not empty") }
                 document.pages.removeAll { $0.id == id }

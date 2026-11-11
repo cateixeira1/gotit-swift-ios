@@ -20,7 +20,8 @@ public enum PagePreview {
             context.cgContext.scaleBy(x: scale, y: scale)
             if document.kind == .note {
                 let index = document.pages.first.flatMap { page in pageIndex(page.id) } ?? 0
-                PageBandsView.draw(document.canvas, pageIndex: index, pageCount: max(1, pageCount ?? 1), image: asset)
+                PageBandsView.draw(document.canvas, pageIndex: index, pageCount: max(1, pageCount ?? 1), image: asset,
+                                   fills: document.pages.first.map { document.paperFills(on: $0.id) } ?? [])
             }
             for block in document.paintOrder() {
                 guard let frame = frames[block.id] else { continue }

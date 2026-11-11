@@ -42,6 +42,8 @@ public struct CanvasSettings: Codable, Equatable, Sendable {
     public var header: PageBand?
     public var footer: PageBand?
     public var pageNumbers: PageNumbering?
+    /// Paper of every page of the note (nil: plain).
+    public var paper: PaperStyle?
     public init(size: CanvasSize = .a4, displayUnit: CanvasUnit = .centimeters,
                 pixelsPerInch: Double = 96, textAvoidsObjects: Bool = true,
                 recognizeDiagrams: Bool = true, solveEquations: Bool = true,

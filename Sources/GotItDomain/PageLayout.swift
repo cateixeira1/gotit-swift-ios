@@ -108,8 +108,56 @@ public extension CanvasSettings {
             guard band.height.isFinite, band.height > 0, band.height <= size.height / 3 else { throw DocumentError.invalid("Invalid header or footer height") }
         }
         if let numbers = pageNumbers, !(0...100_000).contains(numbers.startAt) { throw DocumentError.invalid("Invalid first page number") }
+        try paper?.validate()
     }
 
     /// Pictures used by the header and footer.
     var bandAssetHashes: [String] { [header?.image, footer?.image].compactMap { $0 } }
+}
+
+/// The look of the paper: plain, a notebook (yellow, ruled, brown top), squared (grid lines) or
+/// a checkerboard of white and light grey squares. Squares are always square; `size` is their side
+/// (or the line spacing of the notebook) in points.
+public struct PaperStyle: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable, CaseIterable { case plain, notebook, grid, checker }
+    public var kind: Kind
+    public var size: Double
+    public init(kind: Kind, size: Double = PageMargins.centimeters(0.5)) { self.kind = kind; self.size = size }
+    public static let minimumSize = PageMargins.centimeters(0.3)
+    public static let maximumSize = PageMargins.centimeters(2)
+    public static let notebookLine = PageMargins.centimeters(0.8)
+    public static let notebookTop = PageMargins.centimeters(1.2)
+}
+
+/// Paper on part of one page.
+public struct PaperFill: Codable, Equatable, Sendable {
+    public enum Region: String, Codable, Sendable, CaseIterable { case full, topHalf, bottomHalf }
+    public var style: PaperStyle
+    public var region: Region
+    public init(style: PaperStyle, region: Region = .full) { self.style = style; self.region = region }
+
+    public func rect(on size: CanvasSize) -> LogicalRect {
+        switch region {
+        case .full: LogicalRect(x: 0, y: 0, width: size.width, height: size.height)
+        case .topHalf: LogicalRect(x: 0, y: 0, width: size.width, height: size.height / 2)
+        case .bottomHalf: LogicalRect(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
+        }
+    }
+}
+
+public extension CanvasDocument {
+    /// What to paint on a page, bottom first: the note's paper over the whole page, then the
+    /// page's own paper (whole or half).
+    func paperFills(on pageID: UUID) -> [PaperFill] {
+        var fills: [PaperFill] = []
+        if let note = canvas.paper, note.kind != .plain { fills.append(PaperFill(style: note)) }
+        if let own = pages.first(where: { $0.id == pageID })?.paper { fills.append(own) }
+        return fills
+    }
+}
+
+extension PaperStyle {
+    func validate() throws {
+        guard size.isFinite, size >= PaperStyle.minimumSize - 1e-9, size <= PaperStyle.maximumSize + 1e-9 else { throw DocumentError.invalid("Invalid paper square size") }
+    }
 }

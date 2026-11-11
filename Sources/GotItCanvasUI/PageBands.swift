@@ -8,6 +8,8 @@ import GotItDomain
     var pageIndex = 0 { didSet { if pageIndex != oldValue { setNeedsDisplay() } } }
     var pageCount = 1 { didSet { if pageCount != oldValue { setNeedsDisplay() } } }
     var image: (String) -> UIImage? = { _ in nil }
+    /// Paper painted under everything (notebook, squares, checkerboard).
+    var fills: [PaperFill] = [] { didSet { if fills != oldValue { setNeedsDisplay() } } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -20,11 +22,12 @@ import GotItDomain
     var numberLabel: String? { settings.pageNumbers?.label(index: pageIndex, count: pageCount) }
 
     override func draw(_ rect: CGRect) {
-        Self.draw(settings, pageIndex: pageIndex, pageCount: pageCount, image: image)
+        Self.draw(settings, pageIndex: pageIndex, pageCount: pageCount, image: image, fills: fills)
     }
 
     /// Draws into the current context, in page coordinates (also used for page thumbnails).
-    static func draw(_ settings: CanvasSettings, pageIndex: Int, pageCount: Int, image: (String) -> UIImage?) {
+    static func draw(_ settings: CanvasSettings, pageIndex: Int, pageCount: Int, image: (String) -> UIImage?, fills: [PaperFill] = []) {
+        for fill in fills { paint(fill, settings: settings) }
         let m = settings.pageMargins
         if let header = settings.header, let strip = settings.headerRect { draw(header, in: strip, inset: m, image: image) }
         if let footer = settings.footer, let strip = settings.footerRect { draw(footer, in: strip, inset: m, image: image) }
@@ -40,6 +43,58 @@ import GotItDomain
             }
             text.draw(at: CGPoint(x: x, y: place.y + (place.height - size.height) / 2))
         }
+    }
+
+    /// Paper in its region: notebook (yellow, ruled, red margin, brown top), squares or checkerboard.
+    static func paint(_ fill: PaperFill, settings: CanvasSettings) {
+        let r = fill.rect(on: settings.size)
+        let rect = CGRect(x: r.x, y: r.y, width: r.width, height: r.height)
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        context.saveGState(); context.clip(to: rect)
+        let step = CGFloat(max(PaperStyle.minimumSize, fill.style.size))
+        switch fill.style.kind {
+        case .plain:
+            UIColor.white.setFill(); context.fill(rect)
+        case .notebook:
+            UIColor(hex: "#FFF3AE").setFill(); context.fill(rect)
+            let top = rect.minY == 0 ? CGFloat(PaperStyle.notebookTop) : 0
+            let line = CGFloat(PaperStyle.notebookLine)
+            UIColor(hex: "#9DBEDD").setStroke()
+            let rules = UIBezierPath(); rules.lineWidth = 0.7
+            var y = rect.minY + top + line
+            while y < rect.maxY { rules.move(to: CGPoint(x: rect.minX, y: y)); rules.addLine(to: CGPoint(x: rect.maxX, y: y)); y += line }
+            rules.stroke()
+            let marginX = CGFloat(settings.textArea.x) - 10
+            UIColor(hex: "#E06666").setStroke()
+            let margin = UIBezierPath(); margin.lineWidth = 0.9
+            margin.move(to: CGPoint(x: marginX, y: rect.minY + top)); margin.addLine(to: CGPoint(x: marginX, y: rect.maxY))
+            margin.move(to: CGPoint(x: marginX - 3, y: rect.minY + top)); margin.addLine(to: CGPoint(x: marginX - 3, y: rect.maxY))
+            margin.stroke()
+            if top > 0 {
+                // The brown binding at the top of a legal pad, with a darker edge.
+                UIColor(hex: "#7A4A2B").setFill(); context.fill(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: top))
+                UIColor(hex: "#5C361E").setFill(); context.fill(CGRect(x: rect.minX, y: rect.minY + top - 2, width: rect.width, height: 2))
+            }
+        case .grid:
+            UIColor.white.setFill(); context.fill(rect)
+            UIColor(hex: "#CFD7E1").setStroke()
+            let grid = UIBezierPath(); grid.lineWidth = 0.5
+            var x = rect.minX
+            while x <= rect.maxX { grid.move(to: CGPoint(x: x, y: rect.minY)); grid.addLine(to: CGPoint(x: x, y: rect.maxY)); x += step }
+            var y = rect.minY
+            while y <= rect.maxY { grid.move(to: CGPoint(x: rect.minX, y: y)); grid.addLine(to: CGPoint(x: rect.maxX, y: y)); y += step }
+            grid.stroke()
+        case .checker:
+            UIColor.white.setFill(); context.fill(rect)
+            UIColor(hex: "#ECEFF3").setFill()
+            var row = 0, y = rect.minY
+            while y < rect.maxY {
+                var x = rect.minX + CGFloat(row % 2) * step
+                while x < rect.maxX { context.fill(CGRect(x: x, y: y, width: step, height: step)); x += 2 * step }
+                y += step; row += 1
+            }
+        }
+        context.restoreGState()
     }
 
     /// Picture fitted in the strip (between the side margins), text below it or centred alone.
@@ -113,5 +168,12 @@ import GotItDomain
     }
 
     func hide() { isHidden = true; lines.path = nil }
+}
+
+/// Paper drawing for previews outside the editor (the paper picker).
+@MainActor public enum PaperPreviewDrawing {
+    public static func draw(_ style: PaperStyle, settings: CanvasSettings) {
+        PageBandsView.paint(PaperFill(style: style, region: .topHalf), settings: settings)
+    }
 }
 #endif

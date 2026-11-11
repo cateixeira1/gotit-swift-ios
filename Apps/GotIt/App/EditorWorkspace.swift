@@ -30,6 +30,7 @@ struct EditorWorkspace: View {
     @State private var showStickers = false
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
+    @State private var showPaper = false
     @State private var reader: PDFTarget?
     private struct PDFTarget: Identifiable { var id: UUID; var documentID: UUID; var url: URL }
     @State private var photo: PhotosPickerItem?
@@ -70,6 +71,10 @@ struct EditorWorkspace: View {
         }
         .sheet(isPresented: $showStickers) { stickerPicker.presentationDetents([.medium, .large]) }
         .sheet(item: $pageSetup) { focus in PageSetupView(model: model, settings: document.canvas, focus: focus) }
+        .sheet(isPresented: $showPaper) {
+            PaperPicker(model: model, pageID: pageID,
+                        current: document.pages.first { $0.id == pageID }?.paper?.style ?? document.canvas.paper)
+        }
         .sheet(item: $reader) { target in
             PDFReader(url: target.url) { data in try model.savePDF(data, blockID: target.id, documentID: target.documentID) }
         }
@@ -419,6 +424,10 @@ struct EditorWorkspace: View {
                             tile("Numerar páginas", "number", sheet: sheet) {
                                 session.perform(.finish); showTools = false; openPageSetup(.numbers)
                             }.accessibilityIdentifier("pageNumbers")
+                            tile("Papel", "squareshape.split.3x3", sheet: sheet) {
+                                session.perform(.finish); showTools = false
+                                Task { @MainActor in try? await Task.sleep(for: .milliseconds(350)); showPaper = true }
+                            }.accessibilityIdentifier("paperStyle")
                         }
                     }
                 }

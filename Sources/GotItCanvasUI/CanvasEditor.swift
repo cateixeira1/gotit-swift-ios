@@ -120,6 +120,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     let bands = PageBandsView()
     /// Dashed edge of a header or footer an object is being moved into.
     let bandGuides = BandGuidesView()
+    /// Black lines where a dragged object's middle lines up with another's (Canva-like).
+    let alignmentLines = CAShapeLayer()
+    private var alignmentSnap = AlignmentGuides.Snap.none
+    private let alignmentFeedback = UISelectionFeedbackGenerator()
     private let ruler = PageRuler()
     private weak var activeText: UITextView?
     private var applyingDrawing = false
@@ -451,6 +455,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         surface.bringSubviewToFront(ink)
         bands.frame = surface.bounds; bands.image = configuration.image
         bands.settings = configuration.document.canvas
+        bands.fills = configuration.document.pages.first.map { configuration.document.paperFills(on: $0.id) } ?? []
         bands.pageIndex = max(0, (configuration.pageNumber ?? 1) - 1); bands.pageCount = max(1, configuration.pageCount ?? 1)
         surface.sendSubviewToBack(bands)
         bandGuides.frame = surface.bounds; surface.bringSubviewToFront(bandGuides)
@@ -1338,6 +1343,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         return object
     }
 
+    private func showAlignment(_ lines: [AlignmentGuides.Line]) {
+        if alignmentLines.superlayer !== surface.layer { surface.layer.addSublayer(alignmentLines) }
+        alignmentLines.zPosition = 1000
+        alignmentLines.strokeColor = UIColor.black.cgColor; alignmentLines.lineWidth = 1 / max(0.5, scroll.zoomScale)
+        let path = UIBezierPath()
+        for line in lines {
+            path.move(to: CGPoint(x: line.start.x, y: line.start.y)); path.addLine(to: CGPoint(x: line.end.x, y: line.end.y))
+        }
+        alignmentLines.frame = surface.bounds
+        alignmentLines.path = lines.isEmpty ? nil : path.cgPath
+    }
+
     /// While an object is moved or resized into the header or footer, their edge and a notice show.
     func showBandGuides(for frame: CGRect) {
         guard configuration.document.kind == .note else { return }
@@ -1381,13 +1398,28 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     @objc private func moveObject(_ gesture: UIPanGestureRecognizer) {
         guard let object = gesture.view as? CanvasObjectView, let id = object.id,
               var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
-        if gesture.state == .began { movingID = id; moveOrigin = object.center; configuration.session?.objectDragBegan?(self); lift(id) }
-        let delta = gesture.translation(in: surface)
+        if gesture.state == .began {
+            movingID = id; moveOrigin = object.center; configuration.session?.objectDragBegan?(self); lift(id)
+            alignmentSnap = .none; alignmentFeedback.prepare()
+        }
+        var delta = gesture.translation(in: surface)
+        if gesture.state == .changed || gesture.state == .ended {
+            // Middles lining up with another object or the page: snap and show the line.
+            let raw = object.bounds.size
+            let proposed = LogicalRect(x: moveOrigin.x + delta.x - raw.width / 2, y: moveOrigin.y + delta.y - raw.height / 2, width: raw.width, height: raw.height)
+            let others = configuration.document.blocks.filter { $0.id != id && $0.parentID == nil && $0.isStacked && $0.textFlowID == nil }
+                .compactMap { frames[$0.id] }
+            let snap = AlignmentGuides.snap(proposed, to: others, page: configuration.document.canvas.size, threshold: 6 / max(0.5, scroll.zoomScale))
+            if !snap.lines.isEmpty, snap.lines.count > alignmentSnap.lines.count { alignmentFeedback.selectionChanged() }
+            alignmentSnap = snap
+            delta.x += snap.offset.x; delta.y += snap.offset.y
+        }
         if gesture.state == .changed {
             object.center = CGPoint(x: moveOrigin.x + delta.x, y: moveOrigin.y + delta.y)
             showBandGuides(for: object.frame)
+            showAlignment(alignmentSnap.lines)
         }
-        if gesture.state != .changed, gesture.state != .began { bandGuides.hide() }
+        if gesture.state != .changed, gesture.state != .began { bandGuides.hide(); showAlignment([]) }
         // Dropped on another page: the object moves there (a whole root object, not a text story box).
         if gesture.state == .ended, block.parentID == nil, block.textFlowID == nil,
            let target = configuration.session?.pageForDrop?(self, object.superview?.convert(object.frame, to: view) ?? object.frame) {

@@ -30,6 +30,7 @@ public enum DocumentValidator {
         try validate(style: document.defaultStyle)
         try document.canvas.size.validate()
         try document.canvas.validateLayout()
+        for page in document.pages { try page.paper?.style.validate() }
         guard document.canvas.pixelsPerInch.isFinite, document.canvas.pixelsPerInch > 0 else {
             throw DocumentError.invalid("Invalid document pixel density")
         }

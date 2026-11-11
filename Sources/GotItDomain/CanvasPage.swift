@@ -5,7 +5,11 @@ public struct CanvasPage: Codable, Equatable, Sendable, Identifiable {
     public var id: UUID
     public var title: String
     public var textFlowID: UUID?
-    public init(id: UUID = UUID(), title: String, textFlowID: UUID? = nil) { self.id = id; self.title = title; self.textFlowID = textFlowID }
+    /// Paper of this page only (whole page or one half), over the note's paper.
+    public var paper: PaperFill?
+    public init(id: UUID = UUID(), title: String, textFlowID: UUID? = nil, paper: PaperFill? = nil) {
+        self.id = id; self.title = title; self.textFlowID = textFlowID; self.paper = paper
+    }
 }
 
 public extension CanvasDocument {

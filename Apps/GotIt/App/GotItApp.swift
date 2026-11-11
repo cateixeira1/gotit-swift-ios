@@ -664,6 +664,31 @@ final class AppModel {
         return true
     }
 
+    /// Where a paper style goes.
+    enum PaperScope: String, CaseIterable, Identifiable {
+        case note, page, topHalf, bottomHalf
+        var id: Self { self }
+        var title: String {
+            switch self { case .note: "Nota inteira"; case .page: "Só esta página"; case .topHalf: "Metade de cima"; case .bottomHalf: "Metade de baixo" }
+        }
+    }
+
+    /// Paper for the whole note (every page), or for one page or half of it. Plain on a page
+    /// removes that page's own paper.
+    func setPaper(_ style: PaperStyle, scope: PaperScope, pageID: UUID) {
+        guard let document, !writeFailed else { return }
+        switch scope {
+        case .note:
+            var settings = document.canvas
+            settings.paper = style.kind == .plain ? nil : style
+            enqueue([.setCanvasSettings(settings)])
+        case .page, .topHalf, .bottomHalf:
+            let region: PaperFill.Region = scope == .page ? .full : scope == .topHalf ? .topHalf : .bottomHalf
+            let fill: PaperFill? = style.kind == .plain && scope == .page && document.canvas.paper == nil ? nil : PaperFill(style: style, region: region)
+            enqueue([.setPagePaper(pageID, fill)])
+        }
+    }
+
     /// New margins, header, footer or page numbers: stored, and every text of the note laid out
     /// again in the new text area (continuation pages start below the header, text stops above
     /// the footer). One undo step.
@@ -888,6 +913,13 @@ struct AppScreen: View {
                             if !model.trashedSummaries.isEmpty { Text("\(model.trashedSummaries.count)").foregroundStyle(.secondary) }
                         }
                     }.accessibilityIdentifier("openTrash")
+                } footer: {
+                    HStack(spacing: 8) {
+                        Image("LaunchLogo").resizable().frame(width: 22, height: 22)
+                        Text("Color Software").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity).padding(.top, 28)
+                    .accessibilityElement(children: .combine)
                 }
             }.navigationTitle("Got It!")
             .disabled(model.isSaving)

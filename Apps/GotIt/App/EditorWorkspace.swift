@@ -364,11 +364,12 @@ struct EditorWorkspace: View {
     /// Tools in groups, side by side in a grid of tiles with large icons: two per row beside the
     /// canvas on iPad, as many as fit in the sheet on iPhone.
     private func toolsPanel(sheet: Bool) -> some View {
-        let columns = [GridItem(.adaptive(minimum: sheet ? 70 : 52, maximum: sheet ? 96 : 60), spacing: 8)]
+        // Not lazy: every tool exists (and is reachable by VoiceOver and tests) even when scrolled away.
+        let columns = sheet ? 4 : 2
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 toolSection("Desenhar") {
-                    LazyVGrid(columns: columns, spacing: 8) {
+                    TileGrid(columns: columns, spacing: 8) {
                         ForEach(CanvasTool.allCases) { item in toolButton(item, sheet: sheet) }
                     }
                     HStack(spacing: 12) {
@@ -379,7 +380,7 @@ struct EditorWorkspace: View {
                     if tool == .eraser { Toggle("Apagar o traço inteiro", isOn: $vectorEraser).font(.caption) }
                 }
                 toolSection("Inserir") {
-                    LazyVGrid(columns: columns, spacing: 8) {
+                    TileGrid(columns: columns, spacing: 8) {
                         tile("Texto", "text.badge.plus", sheet: sheet) { showTools = false; session.perform(.insertText) }
                         tile("Tabela", "tablecells", sheet: sheet) { showTools = false; session.perform(.insertTable) }
                         tile("Imagem", "photo", sheet: sheet) { beginImport(sticker: false, pdf: false) }
@@ -404,7 +405,7 @@ struct EditorWorkspace: View {
                 }
                 if document.kind == .note {
                     toolSection("Página") {
-                        LazyVGrid(columns: columns, spacing: 8) {
+                        TileGrid(columns: columns, spacing: 8) {
                             tile("Cabeçalho e rodapé", "rectangle.topthird.inset.filled", sheet: sheet) {
                                 session.perform(.finish); showTools = false; openPageSetup(.bands)
                             }.accessibilityIdentifier("headerFooter")
@@ -503,3 +504,37 @@ struct PickedMovie: Transferable {
         }
     }
 }
+
+/// Tiles in rows of equal width, as many per row as `columns`; each row as tall as its tallest tile.
+struct TileGrid: Layout {
+    var columns: Int
+    var spacing: CGFloat
+
+    private func width(_ proposal: ProposedViewSize) -> CGFloat {
+        let total = proposal.width ?? CGFloat(columns) * 72
+        return max(1, (total - spacing * CGFloat(columns - 1)) / CGFloat(columns))
+    }
+    private func rows(_ subviews: Subviews, width: CGFloat) -> [CGFloat] {
+        stride(from: 0, to: subviews.count, by: columns).map { start in
+            subviews[start..<min(subviews.count, start + columns)].map { $0.sizeThatFits(.init(width: width, height: nil)).height }.max() ?? 0
+        }
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let w = width(proposal), heights = rows(subviews, width: w)
+        return CGSize(width: proposal.width ?? w * CGFloat(columns) + spacing * CGFloat(columns - 1),
+                      height: heights.reduce(0, +) + spacing * CGFloat(max(0, heights.count - 1)))
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let w = width(ProposedViewSize(width: bounds.width, height: nil)), heights = rows(subviews, width: w)
+        var y = bounds.minY
+        for (row, height) in heights.enumerated() {
+            for column in 0..<columns {
+                let index = row * columns + column
+                guard index < subviews.count else { break }
+                subviews[index].place(at: CGPoint(x: bounds.minX + CGFloat(column) * (w + spacing), y: y), proposal: .init(width: w, height: height))
+            }
+            y += height + spacing
+        }
+    }
+}
+

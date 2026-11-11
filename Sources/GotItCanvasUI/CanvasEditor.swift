@@ -108,7 +108,7 @@ final class FlowTextView: UITextView {
 }
 
 @MainActor
-public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate, UIPopoverPresentationControllerDelegate, UIEditMenuInteractionDelegate {
+public final class CanvasViewController: UIViewController, UIScrollViewDelegate, UITextViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate, PKCanvasViewDelegate, UIPopoverPresentationControllerDelegate, @preconcurrency UIEditMenuInteractionDelegate {
     private var configuration: CanvasEditor
     private let scroll = UIScrollView()
     private let surface = UIView()

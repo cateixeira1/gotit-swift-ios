@@ -34,7 +34,7 @@ public struct PagedCanvasEditor: UIViewControllerRepresentable {
 }
 
 @MainActor
-public final class PagedCanvasViewController: UIViewController, UIScrollViewDelegate, UIEditMenuInteractionDelegate {
+public final class PagedCanvasViewController: UIViewController, UIScrollViewDelegate, @preconcurrency UIEditMenuInteractionDelegate {
     private var configuration: PagedCanvasEditor
     private let scroll = UIScrollView()
     private let content = UIView()

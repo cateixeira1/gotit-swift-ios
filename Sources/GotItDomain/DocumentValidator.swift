@@ -29,6 +29,7 @@ public enum DocumentValidator {
         }
         try validate(style: document.defaultStyle)
         try document.canvas.size.validate()
+        try document.canvas.validateLayout()
         guard document.canvas.pixelsPerInch.isFinite, document.canvas.pixelsPerInch > 0 else {
             throw DocumentError.invalid("Invalid document pixel density")
         }
@@ -38,6 +39,7 @@ public enum DocumentValidator {
         let byID = Dictionary(uniqueKeysWithValues: document.blocks.map { ($0.id, $0) })
         let hashes = Set(document.assets.map(\.hash))
         guard hashes.count == document.assets.count else { throw DocumentError.invalid("Duplicate asset hash") }
+        guard document.canvas.bandAssetHashes.allSatisfy(hashes.contains) else { throw DocumentError.invalid("Header or footer picture is not registered") }
         for asset in document.assets {
             try validate(hash: asset.hash, mediaType: asset.mediaType, byteCount: asset.byteCount)
             guard Set(asset.derivatives.map(\.role)).count == asset.derivatives.count else {

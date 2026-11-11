@@ -86,3 +86,44 @@ import Testing
     document.blocks = [cover, label, under, stuck]
     #expect(document.paintOrder().map(\.id) == [under.id, note.id, label.id, cover.id])
 }
+
+@Test func wordMarginsGiveAFifteenCentimetreTextAreaOnA4() throws {
+    var settings = CanvasSettings(margins: .word)
+    let area = settings.textArea
+    #expect(abs(area.x - 85.04) < 0.01 && abs(area.y - 70.87) < 0.01)
+    #expect(abs(area.width * 2.54 / 72 - 15) < 0.001 && abs(area.height * 2.54 / 72 - 24.7) < 0.001)
+    #expect(CanvasSettings().textArea == LogicalRect(x: 24, y: 24, width: CanvasSize.a4.width - 48, height: CanvasSize.a4.height - 48), "older notes keep 24 pt")
+    // A header taller than the top margin pushes the text down.
+    settings.header = PageBand(height: PageMargins.centimeters(4))
+    #expect(settings.textArea.y > PageMargins.centimeters(4))
+    #expect(settings.bandsInvaded(by: .init(x: 100, y: 90, width: 50, height: 50)).count == 1)
+    #expect(settings.bandsInvaded(by: .init(x: 100, y: 300, width: 50, height: 50)).isEmpty)
+    settings.footer = PageBand(height: 40)
+    #expect(settings.bandsInvaded(by: .init(x: 100, y: 0, width: 50, height: 842)).count == 2)
+    settings.header?.height = 1000
+    #expect(throws: DocumentError.self) { try settings.validateLayout() }
+}
+
+@Test func pageNumbersFollowTheChosenFormat() {
+    let plain = PageNumbering()
+    #expect((0..<3).map { plain.label(index: $0, count: 3) } == ["1", "2", "3"])
+    let total = PageNumbering(format: .pageOfTotal, startAt: 1, skipFirstPage: true)
+    #expect((0..<3).map { total.label(index: $0, count: 3) } == [nil, "Página 2 de 3", "Página 3 de 3"])
+    #expect(PageNumbering(format: .dashes, startAt: 5).label(index: 1, count: 4) == "– 6 –")
+}
+
+@Test func headerPictureMustBeRegisteredAndStaysInUse() throws {
+    let hash = String(repeating: "b", count: 64)
+    var document = CanvasDocument(title: "Timbrado")
+    var settings = document.canvas
+    settings.header = PageBand(image: hash)
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.setCanvasSettings(settings)], to: document) }
+    document = try CommandEngine.applying([.registerAsset(Asset(hash: hash, mediaType: "image/png", byteCount: 10)), .setCanvasSettings(settings)], to: document)
+    #expect(document.canvas.header?.image == hash)
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.unregisterAsset(hash)], to: document) }
+    // Notes saved before these settings existed still decode.
+    var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(CanvasSettings())) as? [String: Any])
+    json.removeValue(forKey: "margins")
+    let decoded = try JSONDecoder().decode(CanvasSettings.self, from: JSONSerialization.data(withJSONObject: json))
+    #expect(decoded.margins == nil && decoded.pageMargins == .legacy)
+}

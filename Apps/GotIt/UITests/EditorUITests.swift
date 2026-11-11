@@ -14,7 +14,7 @@ final class EditorUITests: XCTestCase {
     func testEditsShownBeforeTheAppIsKilledAreRecovered() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--ui-testing", "--reset-test-data", "--hold-saves"]
+        app.launchArguments = ["--no-autofocus", "--ui-testing", "--reset-test-data", "--hold-saves"]
         app.launch()
         XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
         failIfAlert(app, "abertura")
@@ -24,7 +24,7 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["page-2"].waitForExistence(timeout: 10))
         failIfAlert(app, "nova página")
         app.terminate()
-        app.launchArguments = ["--ui-testing"]
+        app.launchArguments = ["--no-autofocus", "--ui-testing"]
         app.launch()
         XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
         failIfAlert(app, "recuperação")
@@ -40,12 +40,25 @@ final class EditorUITests: XCTestCase {
         XCTAssertTrue(choice.waitForExistence(timeout: 10)); choice.tap()
     }
 
+    /// Opening a note: the caret is already in its text and typing goes there right away.
+    func testOpeningANoteIsReadyToType() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-testing", "--reset-test-data"]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
+        let focused = app.textViews.matching(NSPredicate(format: "hasKeyboardFocus == true")).firstMatch
+        XCTAssertTrue(focused.waitForExistence(timeout: 15), "no text box has the caret after opening")
+        app.typeText("Pronto")
+        XCTAssertTrue(app.textViews.containing(NSPredicate(format: "value CONTAINS 'Pronto'")).firstMatch.waitForExistence(timeout: 10))
+    }
+
     /// Post-it and calendar: insert, type in the post-it, double-tap the calendar and pick a day;
     /// the app must stay responsive throughout (both froze on the device on 08/11).
     func testPostItAndCalendarStayResponsive() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--ui-testing", "--reset-test-data"]
+        app.launchArguments = ["--no-autofocus", "--ui-testing", "--reset-test-data"]
         app.launch()
         XCTAssertTrue(app.descendants(matching: .any)["drawingCanvas-1"].firstMatch.waitForExistence(timeout: 20))
         insertSticker(app, "stickyNoteSticker")
@@ -79,7 +92,7 @@ final class EditorUITests: XCTestCase {
     func testPagesDrawingAndReopenInAdaptiveEditor() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--ui-testing", "--reset-test-data"]
+        app.launchArguments = ["--no-autofocus", "--ui-testing", "--reset-test-data"]
         app.launch()
         let pages = app.buttons["showPages"]
         let addPage = app.buttons["addPage"]
@@ -120,7 +133,7 @@ final class EditorUITests: XCTestCase {
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Editor-native-layout"; screenshot.lifetime = .keepAlways; add(screenshot)
         app.terminate()
-        app.launchArguments = ["--ui-testing"]
+        app.launchArguments = ["--no-autofocus", "--ui-testing"]
         app.launch()
         XCTAssertTrue(app.buttons["showPages"].waitForExistence(timeout: 10) || app.buttons["addPage"].exists)
         if app.buttons["showPages"].exists { app.buttons["showPages"].tap() }

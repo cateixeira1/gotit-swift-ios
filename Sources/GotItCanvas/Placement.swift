@@ -10,8 +10,9 @@ public enum Placement {
     public static let gap = 8.0
 
     public static func firstFreeSpot(width: Double, height: Double, on page: CanvasDocument) -> CanvasPoint {
-        let canvas = page.canvas.size
-        let origin = CanvasPoint(x: margin, y: margin)
+        // The page's text area: where its first block sits (24 pt in older notes, Word margins in new ones).
+        let area = page.canvas.textArea
+        let origin = CanvasPoint(x: area.x, y: area.y)
         let frames = (try? CanvasLayoutEngine.frames(in: page)) ?? [:]
         let obstacles: [LogicalRect] = page.blocks.compactMap { block in
             guard block.parentID == nil else { return nil }
@@ -25,8 +26,8 @@ public enum Placement {
         }
         let rows = ([origin.y] + obstacles.map { $0.y + $0.height + gap }).filter { $0 >= origin.y }.sorted()
         let columns = ([origin.x] + obstacles.map { $0.x + $0.width + gap }).filter { $0 >= origin.x }.sorted()
-        for y in rows where y + height <= canvas.height - margin + 1e-9 {
-            for x in columns where x + width <= canvas.width - margin + 1e-9 {
+        for y in rows where y + height <= area.y + area.height + 1e-9 {
+            for x in columns where x + width <= area.x + area.width + 1e-9 {
                 let candidate = LogicalRect(x: x, y: y, width: width, height: height)
                 if !obstacles.contains(where: { overlaps($0, candidate) }) { return .init(x: x, y: y) }
             }

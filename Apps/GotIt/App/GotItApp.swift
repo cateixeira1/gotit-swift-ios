@@ -129,6 +129,29 @@ final class AppModel {
         catch { self.error = String(describing: error) }
     }
 
+    /// UI tests that drive toolbars turn this off (the keyboard would cover them).
+    let autofocusOnOpen = !ProcessInfo.processInfo.arguments.contains("--no-autofocus")
+
+    /// Where the caret goes when a note opens, so typing can start at once: the end of the note's
+    /// main text (the story that starts on the first page), or, when the note has no text yet, a
+    /// new text box at the top of the first page's text area.
+    func caretOnOpen() -> TextFlowFocus? {
+        guard let document, document.kind == .note, let firstPage = document.pages.first?.id, !writeFailed else { return nil }
+        let membership = document.pageAssignments()
+        let stories = document.blocks.filter { $0.parentID == nil && $0.textFlowID == $0.id && membership[$0.id] == firstPage }
+        if let story = stories.min(by: { $0.layout.frame.y == $1.layout.frame.y ? $0.order < $1.order : $0.layout.frame.y < $1.layout.frame.y }),
+           let last = document.textFlowFragments(story: story.id).last, case .text(let rich) = last.content {
+            return TextFlowFocus(blockID: last.id, pageID: membership[last.id] ?? firstPage,
+                                 range: NSRange(location: (rich.plainText as NSString).length, length: 0), text: rich, frame: last.layout.frame)
+        }
+        let area = document.canvas.textArea
+        var block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: area.x, y: area.y, width: area.width, height: 44)), content: .text(RichText("")))
+        block.textFlowID = block.id
+        enqueue([.insertBlock(block)], pageID: firstPage, documentID: document.id)
+        guard self.document?.blocks.contains(where: { $0.id == block.id }) == true else { return nil }
+        return TextFlowFocus(blockID: block.id, pageID: firstPage, range: NSRange(location: 0, length: 0), frame: block.layout.frame)
+    }
+
     // MARK: Lixeira
 
     var activeSummaries: [DocumentSummary] { summaries.filter { !$0.isTrashed } }
@@ -202,7 +225,10 @@ final class AppModel {
         guard !isSaving, let store else { return }
         returnStack.removeAll()
         do {
-            document = try await store.create(.init(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18)))
+            // A4 with Word's margins: the text area of a new Word document.
+            var note = CanvasDocument(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18))
+            note.canvas.margins = .word
+            document = try await store.create(note)
             try await refresh()
         } catch { self.error = String(describing: error) }
     }
@@ -212,6 +238,8 @@ final class AppModel {
         returnStack.removeAll()
         do {
             var web = CanvasDocument(title: "Teia \(summaries.filter { $0.kind == .web }.count + 1)", kind: .web)
+            // A Teia is a landscape page (A4 lying down): cards spread sideways.
+            web.canvas.size = CanvasSize(width: CanvasSize.a4.height, height: CanvasSize.a4.width)
             if let id, let summary = summaries.first(where: { $0.id == id && $0.kind == .note }) {
                 web = try CommandEngine.applying(TeiaEngine.addNotes([.init(id: summary.id, title: summary.title, createdAt: summary.createdAt)], to: web), to: web)
             }
@@ -625,13 +653,19 @@ struct AppScreen: View {
                     ForEach(model.activeSummaries) { summary in
                         // A List row with two buttons fires both on a single tap (opening a note
                         // also created a Teia). One button per row; Teia is in the context menu.
-                        Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
-                            VStack(alignment: .leading) {
-                                if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
-                                Text(summary.title).font(.headline)
-                                Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                        // Swipe left once to delete (haptic past half the row, delete on release).
+                        SwipeToDeleteRow(onDelete: { Task { await model.moveToTrash(summary.id) } }) {
+                            Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
+                                VStack(alignment: .leading) {
+                                    if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
+                                    Text(summary.title).font(.headline)
+                                    Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
+                                }
                             }
+                            .buttonStyle(.plain)
                         }
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
                         .contextMenu {
                             if summary.kind == .note {
                                 Button("Criar Teia com esta nota", systemImage: "point.3.connected.trianglepath.dotted") {
@@ -639,12 +673,6 @@ struct AppScreen: View {
                                 }
                             }
                             Button("Apagar", systemImage: "trash", role: .destructive) { Task { await model.moveToTrash(summary.id) } }
-                        }
-                        // Swipe left: red with a trash can; swiping on, or tapping it, deletes.
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) { Task { await model.moveToTrash(summary.id) } } label: {
-                                Label("Apagar", systemImage: "trash")
-                            }
                         }
                         .accessibilityIdentifier("document-\(summary.title)")
                     }

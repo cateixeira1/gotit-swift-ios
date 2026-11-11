@@ -37,11 +37,18 @@ public struct CanvasSettings: Codable, Equatable, Sendable {
     public var textAvoidsObjects: Bool
     public var recognizeDiagrams: Bool
     public var solveEquations: Bool
+    /// Text margins; nil in notes made before they existed (24 pt all round, see `pageMargins`).
+    public var margins: PageMargins?
+    public var header: PageBand?
+    public var footer: PageBand?
+    public var pageNumbers: PageNumbering?
     public init(size: CanvasSize = .a4, displayUnit: CanvasUnit = .centimeters,
                 pixelsPerInch: Double = 96, textAvoidsObjects: Bool = true,
-                recognizeDiagrams: Bool = true, solveEquations: Bool = true) {
+                recognizeDiagrams: Bool = true, solveEquations: Bool = true,
+                margins: PageMargins? = nil, header: PageBand? = nil, footer: PageBand? = nil, pageNumbers: PageNumbering? = nil) {
         self.size = size; self.displayUnit = displayUnit; self.pixelsPerInch = pixelsPerInch
         self.textAvoidsObjects = textAvoidsObjects; self.recognizeDiagrams = recognizeDiagrams; self.solveEquations = solveEquations
+        self.margins = margins; self.header = header; self.footer = footer; self.pageNumbers = pageNumbers
     }
 }
 

@@ -1431,9 +1431,17 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     private func insertText(at point: CGPoint) {
-        let size = configuration.document.canvas.size
-        // One line tall; pagination grows it with the text (down to the page margin).
-        let frame = LogicalRect(x: point.x, y: point.y, width: max(80, size.width - point.x - 24), height: 44)
+        // One line tall; pagination grows it with the text (down to the text area's bottom).
+        // A note's text lives in the page's text area (Word's A4 margins in new notes): a tap in a
+        // margin starts the text at the margin's edge.
+        let area = configuration.document.canvas.textArea
+        let frame: LogicalRect
+        if configuration.document.kind == .note {
+            let x = min(max(point.x, area.x), area.x + area.width - 80), y = min(max(point.y, area.y), area.y + area.height - 44)
+            frame = LogicalRect(x: x, y: y, width: area.x + area.width - x, height: 44)
+        } else {
+            frame = LogicalRect(x: point.x, y: point.y, width: max(80, configuration.document.canvas.size.width - point.x - 24), height: 44)
+        }
         var block = CanvasBlock(order: nextOrder, layout: .init(mode: .absolute, frame: frame), content: .text(RichText("")))
         if configuration.document.kind == .note { block.textFlowID = block.id }
         pendingFocusID = block.id

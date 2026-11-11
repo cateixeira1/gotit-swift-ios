@@ -213,10 +213,14 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
                 UIGraphicsGetCurrentContext()?.restoreGState()
             } else { placeholder("Imagem indisponível") }
         case .noteReference:
-            UIColor(hex: "#F8FAFC").setFill(); UIBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), cornerRadius: 12).fill()
+            // A darker grey card with a visible outline, so it stands out on the white canvas.
+            let card = UIBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), cornerRadius: 12)
+            UIColor(hex: "#E2E5EA").setFill(); card.fill()
+            UIColor(hex: "#8B95A3").setStroke(); card.lineWidth = 1.5; card.stroke()
             let previewFrame = CGRect(x: 8, y: 8, width: max(1, bounds.width - 16), height: max(1, bounds.height - 66))
             if let preview = note?.preview { preview.draw(in: previewFrame) }
             else { UIColor.white.setFill(); UIBezierPath(rect: previewFrame).fill() }
+            UIColor(hex: "#AEB6C1").setStroke(); let frame = UIBezierPath(rect: previewFrame); frame.lineWidth = 1; frame.stroke()
             let title = note?.title ?? "Nota indisponível"
             (title as NSString).draw(in: CGRect(x: 10, y: bounds.height - 52, width: bounds.width - 20, height: 24), withAttributes: [.font: UIFont.boldSystemFont(ofSize: 14), .foregroundColor: UIColor.black])
             if let note { (note.createdAt.formatted(date: .abbreviated, time: .shortened) as NSString).draw(in: CGRect(x: 10, y: bounds.height - 27, width: bounds.width - 20, height: 20), withAttributes: [.font: UIFont.systemFont(ofSize: 11), .foregroundColor: UIColor.darkGray]) }

@@ -73,7 +73,9 @@ public enum CommandEngine {
                     guard existing == asset else { throw DocumentError.invalid("Asset hash already has different metadata") }
                 } else { document.assets.append(asset) }
             case .unregisterAsset(let hash):
-                guard !document.blocks.contains(where: { $0.content.assetHashes.contains(hash) }) else { throw DocumentError.invalid("Asset is still in use") }
+                guard !document.blocks.contains(where: { $0.content.assetHashes.contains(hash) }), !document.canvas.bandAssetHashes.contains(hash) else {
+                    throw DocumentError.invalid("Asset is still in use")
+                }
                 document.assets.removeAll { $0.hash == hash }
             case .setRelation(let relation):
                 document.relations.removeAll { $0.id == relation.id }

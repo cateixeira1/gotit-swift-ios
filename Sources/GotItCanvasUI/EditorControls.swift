@@ -115,6 +115,11 @@ public final class EditorSession {
         prefersPencil = true
         interactionChanged?()
     }
+    /// Puts the caret (and the keyboard) in a text box, now if its page is on screen, otherwise
+    /// as soon as it is.
+    public func focusText(_ focus: TextFlowFocus) {
+        if focusRouter?(focus) != true { pendingFocus = focus }
+    }
     /// A pending caret move that never completed must not swallow typing forever.
     var waitingForFocus: Bool { pendingFocus != nil && Date().timeIntervalSince(pendingFocusSince) < 1 }
 }

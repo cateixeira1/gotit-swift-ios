@@ -511,6 +511,16 @@ final class EditorTests: XCTestCase {
         window.isHidden = true
     }
 
+    /// One swipe: past half the row it deletes on release; shorter, it leaves the trash open.
+    func testSwipePastHalfTheRowDeletesOnRelease() {
+        XCTAssertEqual(SwipeOutcome.decide(offset: -170, width: 320, velocity: 0), .delete)
+        XCTAssertEqual(SwipeOutcome.decide(offset: -150, width: 320, velocity: -2000), .open, "a quick flick does not delete")
+        XCTAssertEqual(SwipeOutcome.decide(offset: -70, width: 320, velocity: 0), .open)
+        XCTAssertEqual(SwipeOutcome.decide(offset: -20, width: 320, velocity: 0), .close)
+        XCTAssertTrue(SwipeOutcome.pastHalf(offset: -161, width: 320))
+        XCTAssertFalse(SwipeOutcome.pastHalf(offset: -159, width: 320))
+    }
+
     /// Swipe to delete sends a note or Teia to the Lixeira; it can come back whole or go for good.
     func testDeletedNotesAndTeiasGoToTheTrashAndCanComeBack() async throws {
         let model = AppModel()
@@ -542,6 +552,30 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(model.trashedSummaries.isEmpty)
         XCTAssertFalse(model.summaries.contains { $0.id == note.id })
         XCTAssertNil(model.error)
+    }
+
+    /// New notes use Word's A4 text area; opening one puts the caret at its top-left, and later at
+    /// the end of its text.
+    func testANewNoteOpensWithTheCaretInWordsTextArea() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let note = try XCTUnwrap(model.document)
+        XCTAssertEqual(note.canvas.margins, .word)
+        let area = note.canvas.textArea
+        XCTAssertEqual(area.width * 2.54 / 72, 15, accuracy: 0.001)
+        let first = try XCTUnwrap(model.caretOnOpen())
+        let box = try XCTUnwrap(model.document?.blocks.first { $0.id == first.blockID })
+        XCTAssertEqual(box.layout.frame.x, area.x, accuracy: 0.01); XCTAssertEqual(box.layout.frame.y, area.y, accuracy: 0.01)
+        XCTAssertEqual(box.layout.frame.width, area.width, accuracy: 0.01)
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        var typed = box; typed.content = .text(RichText("Olá"))
+        _ = model.editText(typed, group: nil, selection: NSRange(location: 3, length: 0))
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        let again = try XCTUnwrap(model.caretOnOpen())
+        XCTAssertEqual(again.blockID, box.id, "no second box")
+        XCTAssertEqual(again.range.location, 3)
+        XCTAssertEqual(model.document?.blocks.filter { $0.textFlowID != nil }.count, 1)
     }
 
     /// Moving an object to another page lays out the text it was next to again; when that text

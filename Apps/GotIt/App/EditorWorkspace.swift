@@ -76,6 +76,14 @@ struct EditorWorkspace: View {
             }
         }
         .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
+        // Opening a note puts the caret in its text and brings up the keyboard, ready to type.
+        .task(id: document.id) {
+            guard document.kind == .note, model.autofocusOnOpen else { return }
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, model.document?.id == document.id, let focus = model.caretOnOpen() else { return }
+            try? await Task.sleep(for: .milliseconds(120))
+            session.focusText(focus)
+        }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.perform(.finish) } }
     }
 

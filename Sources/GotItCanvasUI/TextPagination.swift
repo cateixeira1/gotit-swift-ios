@@ -10,12 +10,14 @@ public struct TextFlowFocus {
     public var text: RichText = .init("")
     /// The box's new frame, so the view can grow before the host re-renders (no clipped line).
     public var frame: LogicalRect?
+    public init(blockID: UUID, pageID: UUID, range: NSRange, text: RichText = .init(""), frame: LogicalRect? = nil) {
+        self.blockID = blockID; self.pageID = pageID; self.range = range; self.text = text; self.frame = frame
+    }
 }
 
 /// One logical story, stored as linked rich-text fragments. TextKit measures actual
 /// glyphs (including fonts, paragraphs and exclusions); it never estimates by characters.
 @MainActor public enum TextPagination {
-    static let pageBottomMargin = 24.0
     static let minimumBoxHeight = 44.0
     public struct Result {
         public var commands: [DocumentCommand]
@@ -63,6 +65,8 @@ public struct TextFlowFocus {
         var offset = 0, index = startIndex, previousPage = document.pageID(for: fragments[startIndex].id) ?? firstPage
         var stoppedEarly = false
         let nextOrder = (document.blocks.map(\.order).max() ?? 0) + 1
+        // Every page has the same text area: inside the margins, clear of header and footer.
+        let area = document.canvas.textArea
         repeat {
             var fragment: CanvasBlock
             if index < fragments.count { fragment = fragments[index] }
@@ -70,16 +74,18 @@ public struct TextFlowFocus {
                 let page = CanvasPage(title: "Continuação", textFlowID: story)
                 commands.append(.insertPage(page, after: previousPage))
                 fragment = CanvasBlock(order: nextOrder + index, layout: .init(mode: .absolute,
-                    frame: .init(x: first.layout.frame.x, y: 24, width: first.layout.frame.width, height: document.canvas.size.height - 48)),
+                    frame: .init(x: first.layout.frame.x, y: area.y, width: first.layout.frame.width, height: area.height)),
                     style: first.style, content: .text(.init("")), pageID: page.id, textFlowID: story)
             }
             fragment.textFlowID = story
             let page = fragment.pageID ?? firstPage
+            // Continuation pages start at the top of the text area (it moves with the header).
+            if index > 0, fragment.layout.frame.y != area.y { fragment.layout.frame.y = area.y }
             let frame = fragment.layout.frame
             // A story box may grow down to the page's bottom margin before text continues on the
             // next page; afterwards the last box shrinks to its text (see below), so a box never
             // covers empty paper where the user wants to tap and start another text.
-            let available = max(frame.height, document.canvas.size.height - frame.y - pageBottomMargin)
+            let available = max(minimumBoxHeight, area.y + area.height - frame.y)
             let container = NSTextContainer(size: CGSize(width: max(1, frame.width - 8), height: max(1, available - 8)))
             container.lineFragmentPadding = 5
             // Existing media on this page keeps the same wrapping contract as the canvas,

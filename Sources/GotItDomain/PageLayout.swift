@@ -1,0 +1,115 @@
+import Foundation
+
+/// Page margins in points. The text of a note lives inside them; objects may go anywhere.
+public struct PageMargins: Codable, Equatable, Sendable {
+    public var top: Double
+    public var bottom: Double
+    public var left: Double
+    public var right: Double
+    public init(top: Double, bottom: Double, left: Double, right: Double) {
+        self.top = top; self.bottom = bottom; self.left = left; self.right = right
+    }
+    public static func centimeters(_ value: Double) -> Double { value * 72 / 2.54 }
+    /// Notes created before margins existed: 24 pt all round.
+    public static let legacy = PageMargins(top: 24, bottom: 24, left: 24, right: 24)
+    /// Word's "Normal" margins in Portuguese (Brazil): 2,5 cm top and bottom, 3 cm left and right.
+    /// On A4 this leaves a 15 × 24,7 cm text area, like a new Word document.
+    public static let word = PageMargins(top: centimeters(2.5), bottom: centimeters(2.5), left: centimeters(3), right: centimeters(3))
+}
+
+public enum BandAlignment: String, Codable, Sendable, CaseIterable { case leading, center, trailing }
+
+/// A header or footer: a strip along the top or bottom edge of every page, holding a picture
+/// (a letterhead, a logo) and/or a line of text. The note's text stays out of it; objects may go
+/// into it (the editor warns while they do).
+public struct PageBand: Codable, Equatable, Sendable {
+    /// Height measured from the page edge, in points.
+    public var height: Double
+    public var text: String
+    /// Asset hash of the picture, registered in the document.
+    public var image: String?
+    public var alignment: BandAlignment
+    public init(height: Double = PageMargins.centimeters(2), text: String = "", image: String? = nil, alignment: BandAlignment = .center) {
+        self.height = height; self.text = text; self.image = image; self.alignment = alignment
+    }
+}
+
+/// Page numbers drawn on every page (in the footer or header strip, or its margin).
+public struct PageNumbering: Codable, Equatable, Sendable {
+    public enum Place: String, Codable, Sendable, CaseIterable { case footer, header }
+    public enum Format: String, Codable, Sendable, CaseIterable { case number, pageOfTotal, dashes }
+    public var place: Place
+    public var alignment: BandAlignment
+    public var format: Format
+    /// Number shown on the first numbered page.
+    public var startAt: Int
+    /// The first page (a cover) shows no number; numbering still counts it.
+    public var skipFirstPage: Bool
+    public init(place: Place = .footer, alignment: BandAlignment = .center, format: Format = .number, startAt: Int = 1, skipFirstPage: Bool = false) {
+        self.place = place; self.alignment = alignment; self.format = format; self.startAt = startAt; self.skipFirstPage = skipFirstPage
+    }
+
+    /// Text for the page at `index` (0-based) of `count` pages; nil where no number is shown.
+    public func label(index: Int, count: Int) -> String? {
+        guard index >= 0, index < count, !(skipFirstPage && index == 0) else { return nil }
+        let number = startAt + index, last = startAt + count - 1
+        switch format {
+        case .number: return "\(number)"
+        case .pageOfTotal: return "Página \(number) de \(last)"
+        case .dashes: return "– \(number) –"
+        }
+    }
+}
+
+public extension CanvasSettings {
+    /// Margins in force (older notes have none stored: 24 pt).
+    var pageMargins: PageMargins { margins ?? .legacy }
+
+    /// Strip of the header on a page, if the note has one.
+    var headerRect: LogicalRect? { header.map { LogicalRect(x: 0, y: 0, width: size.width, height: $0.height) } }
+    /// Strip of the footer on a page, if the note has one.
+    var footerRect: LogicalRect? { footer.map { LogicalRect(x: 0, y: size.height - $0.height, width: size.width, height: $0.height) } }
+
+    /// Where the text of the note goes on every page: inside the margins and clear of the
+    /// header and footer (a header taller than the top margin pushes the text down, as in Word).
+    var textArea: LogicalRect {
+        let m = pageMargins
+        let top = max(m.top, (header?.height ?? 0) + 6), bottom = max(m.bottom, (footer?.height ?? 0) + 6)
+        return LogicalRect(x: m.left, y: top, width: max(40, size.width - m.left - m.right), height: max(44, size.height - top - bottom))
+    }
+
+    /// Where the page number is drawn on a page.
+    var pageNumberRect: LogicalRect? {
+        guard let numbers = pageNumbers else { return nil }
+        let m = pageMargins
+        switch numbers.place {
+        case .footer:
+            let height = footer?.height ?? m.bottom
+            return LogicalRect(x: m.left, y: size.height - height, width: max(1, size.width - m.left - m.right), height: height)
+        case .header:
+            let height = header?.height ?? m.top
+            return LogicalRect(x: m.left, y: 0, width: max(1, size.width - m.left - m.right), height: height)
+        }
+    }
+
+    /// Header and footer strips a block's frame runs into (to warn while it is being placed).
+    func bandsInvaded(by frame: LogicalRect) -> [LogicalRect] {
+        [headerRect, footerRect].compactMap { $0 }.filter { band in
+            frame.x < band.x + band.width && band.x < frame.x + frame.width && frame.y < band.y + band.height && band.y < frame.y + frame.height
+        }
+    }
+
+    func validateLayout() throws {
+        if let m = margins {
+            guard [m.top, m.bottom, m.left, m.right].allSatisfy({ $0.isFinite && $0 >= 0 }),
+                  m.left + m.right < size.width - 40, m.top + m.bottom < size.height - 44 else { throw DocumentError.invalid("Invalid page margins") }
+        }
+        for band in [header, footer].compactMap({ $0 }) {
+            guard band.height.isFinite, band.height > 0, band.height <= size.height / 3 else { throw DocumentError.invalid("Invalid header or footer height") }
+        }
+        if let numbers = pageNumbers, !(0...100_000).contains(numbers.startAt) { throw DocumentError.invalid("Invalid first page number") }
+    }
+
+    /// Pictures used by the header and footer.
+    var bandAssetHashes: [String] { [header?.image, footer?.image].compactMap { $0 } }
+}

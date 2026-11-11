@@ -428,7 +428,11 @@ struct EditorWorkspace: View {
                             Task { @MainActor in try? await Task.sleep(for: .milliseconds(350)); showRecorder = true }
                         }.accessibilityIdentifier("recordAudio")
                         tile("Arquivo de áudio", "waveform", sheet: sheet) { beginImport(sticker: false, pdf: true, audio: true) }
-                        tile("Sticker", "face.smiling", sheet: sheet) { session.perform(.finish); showTools = false; showStickers = true }
+                        tile("Sticker", "face.smiling", sheet: sheet) {
+                            // The tools sheet closes before the sticker sheet opens (two at once: the second is dropped).
+                            session.perform(.finish); showTools = false
+                            Task { @MainActor in try? await Task.sleep(for: .milliseconds(sheet ? 350 : 0)); showStickers = true }
+                        }
                     }
                 }
                 toolSection("Destacar") {

@@ -208,3 +208,37 @@ Funções novas:
   `VNDetectContoursRequest` porque contornos circundam cada linha (viraria duas) e em
   vez de Rembg/Potrace/AutoTrace (Python; Potrace GPL; AutoTrace GPL/LGPL).
   O recorte do Vision não roda no simulador: só o caminho do papel é testado no CI.
+
+## Sexto teste no aparelho (10/11/2026)
+
+Retorno: mover objeto entre páginas mostrava `invalid("Empty command batch")`; remoção de
+fundo ruim (borrão); stickers ficavam sob setas e texto; apagar deslizando pedia dois gestos.
+
+Correções (`c54110f`, `e64c535`):
+- O aviso vinha da paginação depois da mudança de página: quando o texto não precisa mudar, o
+  resultado vazio era aplicado e dava erro. Agora é ignorado.
+- Remoção de fundo abre uma prévia: "Objeto da foto" (Vision) ou "Papel ou quadro", com
+  controle de sensibilidade; nada muda antes de "Aplicar". O modo papel compara cada pixel com o
+  papel ao redor (iluminação desigual), remove pontinhos e uniformiza a cor da tinta. O recorte do
+  Vision continua sem teste possível no simulador.
+- Camadas: objeto novo ou levado a outra página fica acima dos demais daquela página; objeto
+  arrastado fica por cima; filhos logo acima do pai; conectores logo acima do mais alto dos dois
+  objetos ligados; "Trazer para a frente" / "Enviar para trás".
+- Apagar deslizando: um gesto; passando da metade da linha, vibração leve e apaga ao soltar.
+- Ao abrir uma nota o cursor fica no fim do texto (ou numa caixa nova no início da área de
+  texto) e o teclado aparece.
+- Cartões de nota na Teia em cinza mais escuro com contorno; Teia nova em paisagem.
+
+Funções novas (`0554755`, `f892d53`):
+- Área de texto do Word em A4 para notas novas: margens "Normal" do Word em português
+  (2,5 cm em cima e embaixo, 3 cm nos lados; área de 15 × 24,7 cm). Fontes consultadas
+  divergem (Canaltech fala em 2,5 cm em todos os lados); usei a predefinição "Normal" descrita
+  pela Mettzer. Notas antigas mantêm 24 pt; dá para trocar em Opções do canvas.
+- Cabeçalho e rodapé (imagem ou primeira página de PDF, texto, altura, alinhamento); o texto da
+  nota é repaginado abaixo do cabeçalho e acima do rodapé, num passo de desfazer. Objetos podem
+  invadir: enquanto se move ou redimensiona, aparece a linha tracejada cinza e o aviso.
+- Numeração de páginas (rodapé/cabeçalho, alinhamento, 1 / Página 1 de N / – 1 –, número
+  inicial, sem número na primeira página), também nas miniaturas.
+- Ferramentas em grade por grupos com ícones maiores; páginas em grade na folha do iPhone.
+
+CI (f892d53): 143 testes do núcleo, 35 nativos e 5 de interface em iPad e iPhone.

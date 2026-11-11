@@ -684,6 +684,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         Task { @MainActor [weak self] in await Task.yield(); self?.processInk() }
     }
     public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        // VoiceOver (and tests) read the strokes on the page as they are drawn, not only after saving.
+        canvasView.accessibilityValue = "\(canvasView.drawing.strokes.count) traços"
         guard !applyingDrawing, !usingTool else { return }
         Task { @MainActor [weak self] in await Task.yield(); self?.processInk() }
     }
@@ -970,25 +972,36 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         text.adjustsFontForContentSizeCategory = true
         text.accessibilityLabel = "Bloco de texto"
         textIDs[ObjectIdentifier(text)] = id
+        // Icons, not words: on iOS 26 each item is a glass capsule, and eight word buttons ran past
+        // the iPhone's width, pushing "Concluir" off screen. Colour and the rest live in "Mais".
         let bar = UIToolbar()
+        func item(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> UIBarButtonItem {
+            let button = UIBarButtonItem(image: UIImage(systemName: symbol), primaryAction: UIAction { _ in action() })
+            button.accessibilityLabel = label
+            return button
+        }
+        let more = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: textMenu(text))
+        more.accessibilityLabel = "Mais"
+        let done = UIBarButtonItem(title: "Concluir", primaryAction: UIAction { [weak text] _ in text?.resignFirstResponder() })
+        done.style = .done
         bar.items = [
-            UIBarButtonItem(title: "B", primaryAction: UIAction { [weak self, weak text] _ in
+            item("bold", "Negrito") { [weak self, weak text] in
                 guard let self, let text, !self.storyFormat(.bold) else { return }
                 text.toggleBoldface(nil); self.textViewDidChange(text)
-            }),
-            UIBarButtonItem(title: "I", primaryAction: UIAction { [weak self, weak text] _ in
+            },
+            item("italic", "Itálico") { [weak self, weak text] in
                 guard let self, let text, !self.storyFormat(.italic) else { return }
                 text.toggleItalics(nil); self.textViewDidChange(text)
-            }),
-            UIBarButtonItem(title: "U", primaryAction: UIAction { [weak self, weak text] _ in
+            },
+            item("underline", "Sublinhado") { [weak self, weak text] in
                 guard let self, let text, !self.storyFormat(.underline) else { return }
                 self.format(text, key: .underlineStyle, value: NSUnderlineStyle.single.rawValue)
-            }),
-            UIBarButtonItem(title: "A+", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.resizeFont(text, delta: 2) } }),
-            UIBarButtonItem(title: "A−", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.resizeFont(text, delta: -2) } }),
-            UIBarButtonItem(title: "Cor", primaryAction: UIAction { [weak self, weak text] _ in if let text { self?.format(text, key: .foregroundColor, value: UIColor.systemBlue) } }),
-            UIBarButtonItem(title: "Mais", menu: textMenu(text)),
-            UIBarButtonItem(title: "Concluir", primaryAction: UIAction { [weak text] _ in text?.resignFirstResponder() })
+            },
+            item("textformat.size.larger", "Aumentar fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: 2) } },
+            item("textformat.size.smaller", "Diminuir fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: -2) } },
+            more,
+            .flexibleSpace(),
+            done,
         ]
         bar.sizeToFit(); text.inputAccessoryView = bar
         return text

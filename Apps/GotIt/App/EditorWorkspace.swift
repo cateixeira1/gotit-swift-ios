@@ -19,6 +19,7 @@ struct EditorWorkspace: View {
     @State private var showPDF = false
     @State private var showStickers = false
     @State private var pageScrollRequest = 0
+    @State private var pageSetup: PageSetupView.Focus?
     @State private var reader: PDFTarget?
     private struct PDFTarget: Identifiable { var id: UUID; var documentID: UUID; var url: URL }
     @State private var photo: PhotosPickerItem?
@@ -38,9 +39,9 @@ struct EditorWorkspace: View {
                 formattingBar
                 Divider()
                 HStack(spacing: 0) {
-                    if wide { pagesPanel.frame(width: 142); Divider() }
+                    if wide { pagesPanel(sheet: false).frame(width: 142); Divider() }
                     canvas
-                    if wide { Divider(); toolsPanel.frame(width: 106) }
+                    if wide { Divider(); toolsPanel(sheet: false).frame(width: 136) }
                 }
                 if !wide { Divider(); compactBar }
             }
@@ -50,14 +51,15 @@ struct EditorWorkspace: View {
         // not shrink and the bottom bar stays put behind the keyboard.
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showPages) {
-            NavigationStack { pagesPanel.navigationTitle("Páginas").toolbar { Button("Concluir") { showPages = false } } }
+            NavigationStack { pagesPanel(sheet: true).navigationTitle("Páginas").navigationBarTitleDisplayMode(.inline).toolbar { Button("Concluir") { showPages = false } } }
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showTools) {
-            NavigationStack { toolsPanel.navigationTitle("Ferramentas").toolbar { Button("Concluir") { showTools = false } } }
+            NavigationStack { toolsPanel(sheet: true).navigationTitle("Ferramentas").navigationBarTitleDisplayMode(.inline).toolbar { Button("Concluir") { showTools = false } } }
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showStickers) { stickerPicker.presentationDetents([.medium, .large]) }
+        .sheet(item: $pageSetup) { focus in PageSetupView(model: model, settings: document.canvas, focus: focus) }
         .sheet(item: $reader) { target in
             PDFReader(url: target.url) { data in try model.savePDF(data, blockID: target.id, documentID: target.documentID) }
         }
@@ -200,36 +202,41 @@ struct EditorWorkspace: View {
             .accessibilityLabel(title)
     }
 
-    private var pagesPanel: some View {
+    /// Page thumbnails: a column beside the canvas on iPad, a grid (several per row) in the sheet.
+    private func pagesPanel(sheet: Bool) -> some View {
         ScrollView {
-            LazyVStack(spacing: 20) {
+            VStack(spacing: 14) {
                 HStack {
-                    Text("Páginas").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    if !sheet { Text("Páginas").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
                     Spacer()
-                    Button { session.perform(.finish); model.addPage(); pageScrollRequest += 1 } label: { Image(systemName: "plus") }
-                        .accessibilityLabel("Adicionar página").accessibilityIdentifier("addPage")
-                        .frame(minWidth: 32, minHeight: 36)
+                    Button { session.perform(.finish); model.addPage(); pageScrollRequest += 1 } label: {
+                        Label("Nova página", systemImage: "plus").labelStyle(.iconOnly).font(.title3)
+                    }
+                    .accessibilityLabel("Adicionar página").accessibilityIdentifier("addPage")
+                    .frame(minWidth: 36, minHeight: 36)
                 }
-                ForEach(Array(document.pages.enumerated()), id: \.element.id) { index, item in
-                    if let previewPage = try? document.pageDocument(item.id) {
-                        Button {
-                            session.perform(.finish)
-                            model.selectedPageID = item.id
-                            pageScrollRequest += 1
-                            showPages = false
-                        } label: {
-                            VStack(spacing: 7) {
-                                PageThumbnail(model: model, document: previewPage)
-                                    .frame(width: 100, height: 138)
-                                    .background(.white, in: RoundedRectangle(cornerRadius: 4))
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                                    .shadow(color: .black.opacity(0.09), radius: 3, y: 2)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(pageID == item.id ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: pageID == item.id ? 3 : 1))
-                                Text("\(index + 1)").font(.caption.monospacedDigit()).foregroundStyle(pageID == item.id ? Color.accentColor : .secondary)
-                            }
-                        }.buttonStyle(.plain).accessibilityLabel(item.title)
-                            .accessibilityIdentifier("page-\(index + 1)")
-                            .accessibilityAddTraits(pageID == item.id ? .isSelected : [])
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: sheet ? 96 : 100, maximum: sheet ? 130 : 120), spacing: 14)], spacing: 16) {
+                    ForEach(Array(document.pages.enumerated()), id: \.element.id) { index, item in
+                        if let previewPage = try? document.pageDocument(item.id) {
+                            Button {
+                                session.perform(.finish)
+                                model.selectedPageID = item.id
+                                pageScrollRequest += 1
+                                showPages = false
+                            } label: {
+                                VStack(spacing: 6) {
+                                    PageThumbnail(model: model, document: previewPage)
+                                        .aspectRatio(document.canvas.size.width / document.canvas.size.height, contentMode: .fit)
+                                        .background(.white, in: RoundedRectangle(cornerRadius: 4))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        .shadow(color: .black.opacity(0.09), radius: 3, y: 2)
+                                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(pageID == item.id ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: pageID == item.id ? 3 : 1))
+                                    Text("\(index + 1)").font(.caption.monospacedDigit()).foregroundStyle(pageID == item.id ? Color.accentColor : .secondary)
+                                }
+                            }.buttonStyle(.plain).accessibilityLabel(item.title)
+                                .accessibilityIdentifier("page-\(index + 1)")
+                                .accessibilityAddTraits(pageID == item.id ? .isSelected : [])
+                        }
                     }
                 }
             }.padding(14)
@@ -308,63 +315,92 @@ struct EditorWorkspace: View {
         return image.pngData()
     }
 
-    private var toolsPanel: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                toolButton(.select)
-                Divider()
-                Text("DESTACAR").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                HStack(spacing: 7) {
-                    highlight("Amarelo", .systemYellow)
-                    highlight("Verde", .systemGreen)
-                    highlight("Rosa", .systemPink)
-                }.disabled(!session.hasTextSelection || tool.isDrawing)
-                Button("Limpar destaque") { session.perform(.highlight(nil)) }
-                    .font(.system(size: 10)).disabled(!session.hasTextSelection || tool.isDrawing)
-                Divider()
-                Text("INSERIR").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                paletteButton("Texto", "text.badge.plus") { showTools = false; session.perform(.insertText) }
-                paletteButton("Tabela", "tablecells") { showTools = false; session.perform(.insertTable) }
-                paletteButton("Imagem", "photo") { beginImport(sticker: false, pdf: false) }
-                paletteButton("PDF", "doc.richtext") { beginImport(sticker: false, pdf: true) }
-                paletteButton("Sticker", "face.smiling") { session.perform(.finish); showTools = false; showStickers = true }
-                Divider()
-                Text("DESENHAR").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-                ForEach(CanvasTool.allCases.filter { $0 != .select }) { item in toolButton(item) }
-                Divider()
-                ColorPicker("Cor", selection: $inkColor, supportsOpacity: false).font(.caption)
-                VStack(spacing: 6) {
-                    Text("Traço: \(inkWidth.formatted(.number.precision(.fractionLength(1)))) pt").font(.system(size: 10))
-                    Slider(value: $inkWidth, in: 1...20, step: 0.5).accessibilityLabel("Largura do traçado")
-                }.disabled(tool == .eraser)
-                if tool == .eraser {
-                    Toggle("Traço inteiro", isOn: $vectorEraser).font(.caption)
+    /// Tools in groups, side by side in a grid of tiles with large icons: two per row beside the
+    /// canvas on iPad, as many as fit in the sheet on iPhone.
+    private func toolsPanel(sheet: Bool) -> some View {
+        let columns = [GridItem(.adaptive(minimum: sheet ? 70 : 52, maximum: sheet ? 96 : 60), spacing: 8)]
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                toolSection("Desenhar") {
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        ForEach(CanvasTool.allCases) { item in toolButton(item, sheet: sheet) }
+                    }
+                    HStack(spacing: 12) {
+                        ColorPicker("Cor do traço", selection: $inkColor, supportsOpacity: false).labelsHidden()
+                        Slider(value: $inkWidth, in: 1...20, step: 0.5).accessibilityLabel("Largura do traçado")
+                        Text("\(inkWidth.formatted(.number.precision(.fractionLength(1))))").font(.caption2.monospacedDigit()).frame(width: 26)
+                    }.disabled(tool == .eraser)
+                    if tool == .eraser { Toggle("Apagar o traço inteiro", isOn: $vectorEraser).font(.caption) }
                 }
-                Text("Dois dedos para mover ao desenhar").font(.system(size: 10)).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            }.padding(.horizontal, 10).padding(.vertical, 14)
+                toolSection("Inserir") {
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        tile("Texto", "text.badge.plus", sheet: sheet) { showTools = false; session.perform(.insertText) }
+                        tile("Tabela", "tablecells", sheet: sheet) { showTools = false; session.perform(.insertTable) }
+                        tile("Imagem", "photo", sheet: sheet) { beginImport(sticker: false, pdf: false) }
+                        tile("PDF", "doc.richtext", sheet: sheet) { beginImport(sticker: false, pdf: true) }
+                        tile("Sticker", "face.smiling", sheet: sheet) { session.perform(.finish); showTools = false; showStickers = true }
+                    }
+                }
+                toolSection("Destacar") {
+                    HStack(spacing: 10) {
+                        highlight("Amarelo", .systemYellow)
+                        highlight("Verde", .systemGreen)
+                        highlight("Rosa", .systemPink)
+                        Button { session.perform(.highlight(nil)) } label: { Image(systemName: "xmark.circle").font(.title2) }
+                            .accessibilityLabel("Limpar destaque")
+                    }.disabled(!session.hasTextSelection || tool.isDrawing)
+                }
+                if document.kind == .note {
+                    toolSection("Página") {
+                        LazyVGrid(columns: columns, spacing: 8) {
+                            tile("Cabeçalho e rodapé", "rectangle.topthird.inset.filled", sheet: sheet) {
+                                session.perform(.finish); showTools = false; openPageSetup(.bands)
+                            }.accessibilityIdentifier("headerFooter")
+                            tile("Numerar páginas", "number", sheet: sheet) {
+                                session.perform(.finish); showTools = false; openPageSetup(.numbers)
+                            }.accessibilityIdentifier("pageNumbers")
+                        }
+                    }
+                }
+                if !sheet { Text("Dois dedos para mover ao desenhar").font(.system(size: 10)).foregroundStyle(.secondary) }
+            }.padding(.horizontal, sheet ? 18 : 10).padding(.vertical, 14)
         }.background(.bar)
     }
-    private func toolButton(_ item: CanvasTool) -> some View {
-        paletteButton(item.title, item.symbol, selected: tool == item) {
+    private func toolSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased()).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            content()
+        }
+    }
+    private func toolButton(_ item: CanvasTool, sheet: Bool) -> some View {
+        tile(item.title, item.symbol, sheet: sheet, selected: tool == item) {
             session.perform(.finish); tool = item
             if item.isDrawing { showTools = false }
         }.accessibilityIdentifier("tool-\(item.rawValue)")
     }
-    private func paletteButton(_ title: String, _ symbol: String, selected: Bool = false, action: @escaping () -> Void) -> some View {
+    private func tile(_ title: String, _ symbol: String, sheet: Bool, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 4) {
-                Image(systemName: symbol).font(.system(size: 23, weight: .regular))
-                Text(title).font(.system(size: 10, weight: .medium))
-            }.frame(maxWidth: .infinity, minHeight: 48)
-                .foregroundStyle(selected ? Color.accentColor : Color.primary)
-                .background(selected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                Image(systemName: symbol).font(.system(size: sheet ? 28 : 24, weight: .regular)).frame(height: sheet ? 32 : 28)
+                if sheet { Text(title).font(.system(size: 10, weight: .medium)).lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.8) }
+            }
+            .frame(maxWidth: .infinity, minHeight: sheet ? 66 : 50)
+            .foregroundStyle(selected ? Color.accentColor : Color.primary)
+            .background(selected ? Color.accentColor.opacity(0.14) : Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
         }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func highlight(_ title: String, _ color: UIColor) -> some View {
         Button { session.perform(.highlight(color.withAlphaComponent(0.35))) } label: {
-            Circle().fill(Color(uiColor: color)).frame(width: 21, height: 21)
+            Circle().fill(Color(uiColor: color)).frame(width: 28, height: 28)
                 .overlay(Circle().stroke(.primary.opacity(0.12), lineWidth: 1))
         }.accessibilityLabel("Destacar em \(title)")
+    }
+    private func openPageSetup(_ focus: PageSetupView.Focus) {
+        // The tools sheet closes before another sheet is presented.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            pageSetup = focus
+        }
     }
     private func beginImport(sticker: Bool, pdf: Bool) {
         session.perform(.finish); showTools = false

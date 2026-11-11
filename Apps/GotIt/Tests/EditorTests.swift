@@ -578,6 +578,66 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(model.document?.blocks.filter { $0.textFlowID != nil }.count, 1)
     }
 
+    /// Header, footer and numbers are drawn on each page; moving an object into a strip shows its
+    /// dashed edge and a notice, which go away outside it.
+    func testHeaderFooterNumbersAndInvasionGuides() throws {
+        var document = CanvasDocument(title: "Timbrado")
+        document.canvas.margins = .word
+        document.canvas.header = PageBand(height: PageMargins.centimeters(3), text: "Escritório")
+        document.canvas.footer = PageBand(height: PageMargins.centimeters(2))
+        document.canvas.pageNumbers = PageNumbering(format: .pageOfTotal)
+        var editor = CanvasEditor(document: document, onCommands: { _ in })
+        editor.pageNumber = 2; editor.pageCount = 3
+        let controller = CanvasViewController(configuration: editor)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        XCTAssertEqual(controller.bands.numberLabel, "Página 2 de 3")
+        controller.showBandGuides(for: CGRect(x: 100, y: 40, width: 80, height: 80))
+        XCTAssertFalse(controller.bandGuides.isHidden)
+        XCTAssertEqual(controller.bandGuides.notice.text, "Este bloco está invadindo o cabeçalho")
+        controller.showBandGuides(for: CGRect(x: 100, y: 300, width: 80, height: 80))
+        XCTAssertTrue(controller.bandGuides.isHidden, "gone once the object is out of the strip")
+        controller.showBandGuides(for: CGRect(x: 100, y: 800, width: 80, height: 80))
+        XCTAssertEqual(controller.bandGuides.notice.text, "Este bloco está invadindo o rodapé")
+        controller.bandGuides.hide()
+        // The strips are drawn: the header text darkens the top of the page.
+        let image = UIGraphicsImageRenderer(bounds: controller.bands.bounds).image { _ in controller.bands.drawHierarchy(in: controller.bands.bounds, afterScreenUpdates: true) }
+        XCTAssertNotNil(image.cgImage)
+        window.isHidden = true
+    }
+
+    /// A header taller than the margin moves the note's text below it on every page.
+    func testAddingAHeaderLaysTheTextOutBelowIt() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let first = try XCTUnwrap(model.caretOnOpen())
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        var box = try XCTUnwrap(model.document?.blocks.first { $0.id == first.blockID })
+        let long = String(repeating: "palavra ", count: 900)
+        box.content = .text(RichText(long))
+        _ = model.editText(box, group: nil, selection: NSRange(location: 0, length: 0))
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        var settings = try XCTUnwrap(model.document?.canvas)
+        settings.header = PageBand(height: PageMargins.centimeters(4), text: "Cabeçalho")
+        settings.pageNumbers = PageNumbering()
+        model.applyPageLayout(settings)
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertNil(model.error)
+        let document = try XCTUnwrap(model.document)
+        let area = document.canvas.textArea
+        XCTAssertGreaterThan(area.y, PageMargins.centimeters(4))
+        let fragments = document.textFlowFragments(story: box.id)
+        XCTAssertGreaterThan(fragments.count, 1)
+        for fragment in fragments { XCTAssertGreaterThanOrEqual(fragment.layout.frame.y, area.y - 0.01) }
+        XCTAssertEqual(fragments.compactMap { if case .text(let t) = $0.content { t.plainText } else { nil } }.joined(), long)
+        await model.history(undo: true)
+        XCTAssertNil(model.document?.canvas.header, "one undo step")
+    }
+
     /// Moving an object to another page lays out the text it was next to again; when that text
     /// does not need to move, the move is applied without any warning.
     func testMovingAnObjectToAnotherPageShowsNoWarning() async throws {

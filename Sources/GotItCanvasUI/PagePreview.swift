@@ -7,8 +7,10 @@ import GotItCanvas
 @MainActor
 public enum PagePreview {
     /// Uses the same block renderer as the editor. Thumbnails represent actual page contents.
+    /// `pageIndex`/`pageCount` place the page number of a page projection (nil: not numbered as a page).
     public static func image(document: CanvasDocument, width: CGFloat = 120,
-                             asset: (String) -> UIImage?, drawingData: (String) -> Data?) -> UIImage {
+                             asset: (String) -> UIImage?, drawingData: (String) -> Data?,
+                             pageIndex: (UUID) -> Int? = { _ in nil }, pageCount: Int? = nil) -> UIImage {
         let size = document.canvas.size
         let scale = width / max(1, size.width)
         let output = CGSize(width: width, height: max(1, size.height * scale))
@@ -16,6 +18,10 @@ public enum PagePreview {
         return UIGraphicsImageRenderer(size: output).image { context in
             UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: output))
             context.cgContext.scaleBy(x: scale, y: scale)
+            if document.kind == .note {
+                let index = document.pages.first.flatMap { page in pageIndex(page.id) } ?? 0
+                PageBandsView.draw(document.canvas, pageIndex: index, pageCount: max(1, pageCount ?? 1), image: asset)
+            }
             for block in document.paintOrder() {
                 guard let frame = frames[block.id] else { continue }
                 let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)

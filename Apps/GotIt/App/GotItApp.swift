@@ -520,6 +520,62 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// New margins, header, footer or page numbers: stored, and every text of the note laid out
+    /// again in the new text area (continuation pages start below the header, text stops above
+    /// the footer). One undo step.
+    func applyPageLayout(_ settings: CanvasSettings, assets: [Asset] = []) {
+        guard let document, !writeFailed else { return }
+        do {
+            var commands: [DocumentCommand] = assets.filter { asset in !document.assets.contains { $0.hash == asset.hash } }
+                .reduce(into: []) { list, asset in if !list.contains(.registerAsset(asset)) { list.append(.registerAsset(asset)) } }
+            commands.append(.setCanvasSettings(settings))
+            var working = try CommandEngine.applying(commands, to: document)
+            let area = settings.textArea, oldArea = document.canvas.textArea
+            for story in working.blocks where story.parentID == nil && story.textFlowID == story.id {
+                var first = story
+                // Text that sat in the old text area follows it (margins changed, a header grew).
+                if abs(first.layout.frame.x - oldArea.x) < 0.5, abs(first.layout.frame.width - oldArea.width) < 0.5 {
+                    first.layout.frame.x = area.x; first.layout.frame.width = area.width
+                }
+                if first.layout.frame.y < area.y { first.layout.frame.y = area.y }
+                for fragment in working.textFlowFragments(story: story.id) where fragment.id != story.id
+                    && abs(fragment.layout.frame.x - oldArea.x) < 0.5 && abs(fragment.layout.frame.width - oldArea.width) < 0.5 {
+                    var moved = fragment; moved.layout.frame.x = area.x; moved.layout.frame.width = area.width
+                    working = try CommandEngine.applying([.replaceBlock(moved)], to: working); commands.append(.replaceBlock(moved))
+                }
+                if first != story { working = try CommandEngine.applying([.replaceBlock(first)], to: working); commands.append(.replaceBlock(first)) }
+                let result = try TextPagination.reflow(first, in: working, selection: NSRange(location: 0, length: 0), incremental: false)
+                guard !result.commands.isEmpty else { continue }
+                working = try CommandEngine.applying(result.commands, to: working)
+                commands += result.commands
+            }
+            enqueue(commands)
+        } catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = String(describing: error) }
+    }
+
+    /// A picture for the header or footer from a file: an image as it is, or the first page of a
+    /// PDF rendered at print resolution (letterheads often come as PDF).
+    func bandAsset(from url: URL) throws -> Asset {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: url)
+        if let pdf = PDFDocument(data: data), let page = pdf.page(at: 0) {
+            let bounds = page.bounds(for: .mediaBox)
+            let scale = min(4, 2400 / max(1, max(bounds.width, bounds.height)))
+            let format = UIGraphicsImageRendererFormat(); format.scale = 1
+            let image = UIGraphicsImageRenderer(size: CGSize(width: bounds.width * scale, height: bounds.height * scale), format: format).image { context in
+                UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: context.format.bounds.size))
+                context.cgContext.translateBy(x: 0, y: bounds.height * scale); context.cgContext.scaleBy(x: scale, y: -scale)
+                page.draw(with: .mediaBox, to: context.cgContext)
+            }
+            guard let png = image.pngData() else { throw DocumentError.invalid("Não foi possível ler o PDF.") }
+            return try storeAsset(png, mediaType: "image/png")
+        }
+        guard let image = UIImage(data: data), let png = image.pngData() else { throw DocumentError.invalid("O arquivo não é uma imagem nem um PDF.") }
+        return try storeAsset(png, mediaType: "image/png")
+    }
+
     /// The picture without its background: a new PNG asset, same frame, crop and rotation.
     /// The old picture stays registered, so undo brings it back.
     func replaceImage(_ id: UUID, png: Data, pageID: UUID, documentID: UUID) {
@@ -625,7 +681,10 @@ final class AppModel {
     }
 
     func pagePreview(_ page: CanvasDocument) -> UIImage {
-        PagePreview.image(document: page, asset: image, drawingData: assetData)
+        // The page's number in the whole note (the projection holds only that page).
+        let pages = document?.pages.map(\.id) ?? []
+        return PagePreview.image(document: page, asset: image, drawingData: assetData,
+                                 pageIndex: { pages.firstIndex(of: $0) }, pageCount: max(1, pages.count))
     }
 
     private func preview(_ note: CanvasDocument) -> UIImage {
@@ -728,7 +787,7 @@ struct AppScreen: View {
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityIdentifier("documentOptions")
                     }
                 }
-                .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.enqueueReflowing([.setCanvasSettings($0)]) } }
+                .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.applyPageLayout($0) } }
                 .sheet(isPresented: $showDiagnostics) { DiagnosticsView() }
                 .sheet(item: $sharing) { file in ActivitySheet(url: file.url) }
                 .alert("Equação de uma incógnita", isPresented: $showEquation) {
@@ -837,6 +896,9 @@ struct PageOptions: View {
                 TextField("Largura", text: $width).keyboardType(.decimalPad)
                 TextField("Altura", text: $height).keyboardType(.decimalPad)
                 Button("A4") { settings.size = .a4; loadSize() }
+                Picker("Margens do texto", selection: Binding(get: { settings.margins == .word ? 1 : 0 }, set: { settings.margins = $0 == 1 ? .word : .legacy })) {
+                    Text("Word (2,5 × 3 cm)").tag(1); Text("Estreitas (0,85 cm)").tag(0)
+                }
                 Toggle("Texto contorna objetos", isOn: $settings.textAvoidsObjects)
                 Toggle("Reconhecer diagramas", isOn: $settings.recognizeDiagrams)
                 Toggle("Resolver equações", isOn: $settings.solveEquations)

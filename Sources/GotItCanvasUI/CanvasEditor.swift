@@ -37,6 +37,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onError: (Error) -> Void
     /// 1-based page number, used for per-page accessibility identifiers in stacked layouts.
     public var pageNumber: Int?
+    /// Pages in the note, for "Página 1 de N".
+    public var pageCount: Int?
     /// A picture's background was removed: the host stores the new PNG and points the block at it.
     public var onReplaceImage: ((UUID, Data) -> Void)?
 
@@ -108,6 +110,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private let scroll = UIScrollView()
     private let surface = UIView()
     private let ink = PKCanvasView()
+    /// Header, footer and page number, behind the page's objects.
+    let bands = PageBandsView()
+    /// Dashed edge of a header or footer an object is being moved into.
+    let bandGuides = BandGuidesView()
     private let ruler = PageRuler()
     private weak var activeText: UITextView?
     private var applyingDrawing = false
@@ -224,7 +230,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         pencilWatcher.delegate = self; pencilWatcher.cancelsTouchesInView = false
         ink.addGestureRecognizer(pencilWatcher)
         bindSession()
+        surface.addSubview(bands)
         surface.addSubview(ink)
+        surface.addSubview(bandGuides)
         if embedded {
             scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 1
             scroll.isScrollEnabled = false; scroll.delaysContentTouches = false
@@ -427,6 +435,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         ink.accessibilityValue = "\(ink.drawing.strokes.count) traços"
         ink.accessibilityIdentifier = configuration.pageNumber.map { "drawingCanvas-\($0)" } ?? "drawingCanvas"
         surface.bringSubviewToFront(ink)
+        bands.frame = surface.bounds; bands.image = configuration.image
+        bands.settings = configuration.document.canvas
+        bands.pageIndex = max(0, (configuration.pageNumber ?? 1) - 1); bands.pageCount = max(1, configuration.pageCount ?? 1)
+        surface.sendSubviewToBack(bands)
+        bandGuides.frame = surface.bounds; surface.bringSubviewToFront(bandGuides)
         selectionOverlay?.removeFromSuperview(); selectionOverlay = nil
         if let id = selectedObjectID, let object = blockViews[id],
            let block = configuration.document.blocks.first(where: { $0.id == id }) {
@@ -482,7 +495,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 } else {
                     object.bounds.size = CGSize(width: width, height: height)
                     handles.bounds.size = object.bounds.size; handles.setNeedsLayout()
+                    self.showBandGuides(for: CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height))
                 }
+                if ended { self.bandGuides.hide() }
             }
             surface.addSubview(handles); selectionOverlay = handles
             }
@@ -1298,6 +1313,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         return object
     }
 
+    /// While an object is moved or resized into the header or footer, their edge and a notice show.
+    func showBandGuides(for frame: CGRect) {
+        guard configuration.document.kind == .note else { return }
+        bandGuides.show(for: LogicalRect(x: frame.minX, y: frame.minY, width: frame.width, height: frame.height), settings: configuration.document.canvas)
+        surface.bringSubviewToFront(bandGuides)
+    }
+
     /// Places the children of `parent` (in their order, each followed by its own children) right
     /// above `view`; returns the last view placed.
     private func stackChildren(of parent: UUID, above view: UIView) -> UIView {
@@ -1336,7 +1358,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
               var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
         if gesture.state == .began { movingID = id; moveOrigin = object.center; configuration.session?.objectDragBegan?(self); lift(id) }
         let delta = gesture.translation(in: surface)
-        if gesture.state == .changed { object.center = CGPoint(x: moveOrigin.x + delta.x, y: moveOrigin.y + delta.y) }
+        if gesture.state == .changed {
+            object.center = CGPoint(x: moveOrigin.x + delta.x, y: moveOrigin.y + delta.y)
+            showBandGuides(for: object.frame)
+        }
+        if gesture.state != .changed, gesture.state != .began { bandGuides.hide() }
         // Dropped on another page: the object moves there (a whole root object, not a text story box).
         if gesture.state == .ended, block.parentID == nil, block.textFlowID == nil,
            let target = configuration.session?.pageForDrop?(self, object.superview?.convert(object.frame, to: view) ?? object.frame) {

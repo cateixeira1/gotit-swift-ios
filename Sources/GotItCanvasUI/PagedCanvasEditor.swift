@@ -210,7 +210,7 @@ public final class PagedCanvasViewController: UIViewController, UIScrollViewDele
         for (index, editor) in configuration.pages.enumerated() {
             let id = pageID(editor)
             guard let frame = frames[id] else { continue }
-            var page = editor; page.tool = configuration.tool; page.session = configuration.session; page.pageNumber = index + 1
+            var page = editor; page.tool = configuration.tool; page.session = configuration.session; page.pageNumber = index + 1; page.pageCount = configuration.pages.count
             let keep = frame.intersects(window) || id == configuration.focusPageID || pageEditors[id]?.hasActiveText == true
                 || configuration.session?.pendingFocus?.pageID == id
             if keep {

@@ -1045,5 +1045,10 @@ private extension UIView {
                                       space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
         context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
     }
-    return stride(from: 0, to: bytes.count, by: 4).filter { Int(bytes[$0]) + Int(bytes[$0 + 1]) + Int(bytes[$0 + 2]) < 3 * 128 }.count
+    var count = 0
+    for i in stride(from: 0, to: bytes.count, by: 4) {
+        let sum: Int = Int(bytes[i]) + Int(bytes[i + 1]) + Int(bytes[i + 2])
+        if sum < 384 { count += 1 }
+    }
+    return count
 }

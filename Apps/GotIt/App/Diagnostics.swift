@@ -131,9 +131,11 @@ import os
             var strokes: [PKStroke] = []
             for index in 0..<count {
                 let x = Double(index % 30) * 18, y = Double(index / 30) * 16
-                let points = (0..<40).map { step in
-                    PKStrokePoint(location: CGPoint(x: x + Double(step) * 0.4, y: y + sin(Double(step) / 4) * 5), timeOffset: Double(step) / 120,
-                                  size: CGSize(width: 3, height: 3), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+                let points: [PKStrokePoint] = (0..<40).map { (step: Int) -> PKStrokePoint in
+                    let t = Double(step)
+                    let location = CGPoint(x: x + t * 0.4, y: y + sin(t / 4) * 5)
+                    return PKStrokePoint(location: location, timeOffset: t / 120, size: CGSize(width: 3, height: 3),
+                                         opacity: 1, force: 1, azimuth: 0, altitude: CGFloat.pi / 2)
                 }
                 strokes.append(PKStroke(ink: PKInk(.pen, color: .black), path: PKStrokePath(controlPoints: points, creationDate: Date())))
             }

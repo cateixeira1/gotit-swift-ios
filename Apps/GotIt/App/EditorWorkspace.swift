@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import AVKit
 import UniformTypeIdentifiers
 import GotItDomain
 import GotItCanvasUI
@@ -21,6 +22,9 @@ struct EditorWorkspace: View {
     @State private var fileKind = FileKind.pdf
     private enum FileKind { case pdf, audio }
     @State private var showRecorder = false
+    @State private var pickingVideo = false
+    @State private var playing: PlayingVideo?
+    private struct PlayingVideo: Identifiable { let id: UUID; let player: AVPlayer }
     @State private var showStickers = false
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
@@ -67,12 +71,32 @@ struct EditorWorkspace: View {
         .sheet(item: $reader) { target in
             PDFReader(url: target.url) { data in try model.savePDF(data, blockID: target.id, documentID: target.documentID) }
         }
-        .photosPicker(isPresented: $showPhotos, selection: $photo, matching: .images)
+        .photosPicker(isPresented: $showPhotos, selection: $photo, matching: pickingVideo ? .videos : .images)
         .onChange(of: photo) { _, item in
             if let item, let target = importTarget {
-                Task { await model.importImage(item, sticker: target.sticker, pageID: target.pageID, documentID: target.documentID) }
+                if pickingVideo {
+                    Task {
+                        do {
+                            guard let movie = try await item.loadTransferable(type: PickedMovie.self) else { return }
+                            await model.insertVideo(from: movie.url, pageID: target.pageID, documentID: target.documentID)
+                            try? FileManager.default.removeItem(at: movie.url)
+                        } catch { model.error = "Não foi possível abrir o vídeo: \(error.localizedDescription)" }
+                    }
+                } else {
+                    Task { await model.importImage(item, sticker: target.sticker, pageID: target.pageID, documentID: target.documentID) }
+                }
                 photo = nil
             }
+        }
+        .fullScreenCover(item: $playing) { video in
+            VideoPlayer(player: video.player)
+                .ignoresSafeArea()
+                .overlay(alignment: .topLeading) {
+                    Button { video.player.pause(); playing = nil } label: {
+                        Image(systemName: "xmark.circle.fill").font(.largeTitle).symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.5))
+                    }.padding().accessibilityLabel("Fechar vídeo")
+                }
+                .onAppear { video.player.play() }
         }
         .fileImporter(isPresented: $showPDF, allowedContentTypes: fileKind == .pdf ? [.pdf] : [.audio]) { result in
             guard let target = importTarget else { return }
@@ -155,6 +179,12 @@ struct EditorWorkspace: View {
                 if case .invalid(let text)? = error as? DocumentError { model.error = text } else { model.error = String(describing: error) }
             },
             onTranscribe: { id in Task { await model.transcribe(id) } },
+            onPlayVideo: { id in
+                if let block = document.blocks.first(where: { $0.id == id }), case .video(let reference) = block.content,
+                   let media = model.mediaAsset(reference.hash) {
+                    playing = PlayingVideo(id: id, player: AVPlayer(playerItem: AVPlayerItem(asset: media)))
+                }
+            },
             onReplaceImage: { id, png in model.replaceImage(id, png: png, pageID: targetPage, documentID: targetDocument) })
     }
 
@@ -354,6 +384,7 @@ struct EditorWorkspace: View {
                         tile("Tabela", "tablecells", sheet: sheet) { showTools = false; session.perform(.insertTable) }
                         tile("Imagem", "photo", sheet: sheet) { beginImport(sticker: false, pdf: false) }
                         tile("PDF", "doc.richtext", sheet: sheet) { beginImport(sticker: false, pdf: true) }
+                        tile("Vídeo", "video", sheet: sheet) { beginImport(sticker: false, pdf: false, video: true) }
                         tile("Gravar áudio", "mic", sheet: sheet) {
                             session.perform(.finish); showTools = false
                             Task { @MainActor in try? await Task.sleep(for: .milliseconds(350)); showRecorder = true }
@@ -423,9 +454,10 @@ struct EditorWorkspace: View {
             pageSetup = focus
         }
     }
-    private func beginImport(sticker: Bool, pdf: Bool, audio: Bool = false) {
+    private func beginImport(sticker: Bool, pdf: Bool, audio: Bool = false, video: Bool = false) {
         session.perform(.finish); showTools = false
         fileKind = audio ? .audio : .pdf
+        pickingVideo = video
         importTarget = .init(documentID: document.id, pageID: pageID, sticker: sticker)
         // A single sheet closes before the system picker is presented.
         Task { @MainActor in
@@ -455,6 +487,19 @@ private struct PageThumbnail: View {
         }.task(id: document.revision) {
             do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
             preview = model.pagePreview(document)
+        }
+    }
+}
+
+/// A video picked from the gallery, copied to a temporary file (videos can be large: no Data).
+struct PickedMovie: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in SentTransferredFile(movie.url) } importing: { received in
+            let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension)
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return PickedMovie(url: copy)
         }
     }
 }

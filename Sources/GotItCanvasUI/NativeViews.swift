@@ -236,7 +236,26 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
             accessibilityLabel = "Áudio"
             accessibilityValue = audioDuration.map { AudioArt.time($0) }
             accessibilityHint = audioPlaying ? "Toque para pausar" : "Toque para ouvir"
-        case .video: placeholder("Vídeo")
+        case .video:
+            // First frame (filling the block, rounded), a dark veil and a play button.
+            let card = UIBezierPath(roundedRect: bounds, cornerRadius: 10)
+            UIGraphicsGetCurrentContext()?.saveGState(); card.addClip()
+            if let asset {
+                let scale = max(bounds.width / max(1, asset.size.width), bounds.height / max(1, asset.size.height))
+                let size = CGSize(width: asset.size.width * scale, height: asset.size.height * scale)
+                asset.draw(in: CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height))
+            } else { UIColor(hex: "#1F2937").setFill(); card.fill() }
+            UIColor.black.withAlphaComponent(0.18).setFill(); card.fill()
+            UIGraphicsGetCurrentContext()?.restoreGState()
+            let diameter = min(56, min(bounds.width, bounds.height) * 0.4)
+            let circle = CGRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2, width: diameter, height: diameter)
+            UIColor.white.withAlphaComponent(0.9).setFill(); UIBezierPath(ovalIn: circle).fill()
+            let triangle = UIBezierPath()
+            triangle.move(to: CGPoint(x: circle.midX - diameter * 0.14, y: circle.midY - diameter * 0.22))
+            triangle.addLine(to: CGPoint(x: circle.midX + diameter * 0.24, y: circle.midY))
+            triangle.addLine(to: CGPoint(x: circle.midX - diameter * 0.14, y: circle.midY + diameter * 0.22))
+            triangle.close(); UIColor(hex: "#111827").setFill(); triangle.fill()
+            accessibilityLabel = "Vídeo"; accessibilityHint = "Toque para assistir"
         case .drawing: placeholder("Desenho PencilKit")
         case .table(let table):
             TableRendering.draw(table, in: bounds)

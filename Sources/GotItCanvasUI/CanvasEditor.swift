@@ -44,6 +44,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onReplaceImage: ((UUID, Data) -> Void)?
     /// "Transcrever" on an audio block: the host writes its text below it.
     public var onTranscribe: ((UUID) -> Void)?
+    /// A tap on a video block: the host plays it full screen.
+    public var onPlayVideo: ((UUID) -> Void)?
 
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
@@ -56,8 +58,9 @@ public struct CanvasEditor: UIViewControllerRepresentable {
                 onCommands: @escaping ([DocumentCommand]) -> Void,
                 onOpenPDF: @escaping (UUID) -> Void = { _ in },
                 onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in },
-                pageNumber: Int? = nil, onTranscribe: ((UUID) -> Void)? = nil, onReplaceImage: ((UUID, Data) -> Void)? = nil) {
-        self.pageNumber = pageNumber; self.onReplaceImage = onReplaceImage; self.onTranscribe = onTranscribe
+                pageNumber: Int? = nil, onTranscribe: ((UUID) -> Void)? = nil, onPlayVideo: ((UUID) -> Void)? = nil,
+                onReplaceImage: ((UUID, Data) -> Void)? = nil) {
+        self.pageNumber = pageNumber; self.onReplaceImage = onReplaceImage; self.onTranscribe = onTranscribe; self.onPlayVideo = onPlayVideo
         self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
         self.drawingData = drawingData; self.onDrawing = onDrawing
         self.onOpenPDF = onOpenPDF
@@ -1415,6 +1418,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         }
         if connectingFrom == nil, case .audio(let reference) = object.block?.content {
             toggleAudio(id, hash: reference.hash); return
+        }
+        if connectingFrom == nil, case .video = object.block?.content, let play = configuration.onPlayVideo {
+            stopAudio(); play(id); return
         }
         if wasSelected, connectingFrom == nil, case .shape(let shape) = object.block?.content, shape.kind == .calendar {
             pickDay(for: id); return

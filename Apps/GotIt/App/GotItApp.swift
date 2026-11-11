@@ -4,6 +4,7 @@ import CryptoKit
 import ImageIO
 import PencilKit
 import PDFKit
+import AVFoundation
 import UniformTypeIdentifiers
 import GotItDomain
 import GotItPersistence
@@ -336,6 +337,13 @@ final class AppModel {
 
     func image(_ hash: String) -> UIImage? {
         if let cached = images.object(forKey: hash as NSString) { return cached }
+        if let type = document?.assets.first(where: { $0.hash == hash })?.mediaType {
+            if type.hasPrefix("audio/") { return nil }
+            if type.hasPrefix("video/") {
+                guard let frame = poster(hash) else { return nil }
+                images.setObject(frame, forKey: hash as NSString, cost: Int(frame.size.width * frame.size.height * 4)); return frame
+            }
+        }
         if let bytes = assetData(hash), let pdf = PDFDocument(data: bytes), let page = pdf.page(at: 0) {
             let image = page.thumbnail(of: CGSize(width: 600, height: 850), for: .mediaBox)
             images.setObject(image, forKey: hash as NSString, cost: Int(image.size.width * image.size.height * 4)); return image
@@ -518,6 +526,52 @@ final class AppModel {
             let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: width, height: width * aspect)), content: sticker ? .sticker(.init(hash: asset.hash)) : .image(.init(hash: asset.hash)))
             enqueue((current.assets.contains(where: { $0.hash == asset.hash }) ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
         } catch { self.error = String(describing: error) }
+    }
+
+    // MARK: Video
+
+    /// A video from the gallery or Files goes on the page with its first frame and the shape of
+    /// the video, at the first free spot; a tap plays it.
+    func insertVideo(from url: URL, pageID: UUID, documentID: UUID) async {
+        guard let current = document, current.id == documentID else { return }
+        do {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let type = UTType(filenameExtension: url.pathExtension)
+            guard type?.conforms(to: .movie) ?? true else { throw DocumentError.invalid("O arquivo não é um vídeo.") }
+            let data = try Data(contentsOf: url)
+            let asset = try storeAsset(data, mediaType: type?.preferredMIMEType ?? "video/quicktime")
+            var aspect = 9.0 / 16.0
+            if let track = try await AVURLAsset(url: url).loadTracks(withMediaType: .video).first {
+                let (size, transform) = try await track.load(.naturalSize, .preferredTransform)
+                let shown = size.applying(transform)
+                if abs(shown.width) > 0 { aspect = Double(abs(shown.height) / abs(shown.width)) }
+            }
+            guard let latest = document, latest.id == documentID else { return }
+            let width = min(320, latest.canvas.size.width * 0.6), height = width * aspect
+            let spot = freeSpot(width: width, height: height, pageID: pageID, in: latest)
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: width, height: height)),
+                                    content: .video(AssetReference(hash: asset.hash)))
+            enqueue((latest.assets.contains { $0.hash == asset.hash } ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
+        } catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = "Não foi possível inserir o vídeo: \(error.localizedDescription)" }
+    }
+
+    /// The stored file of an audio or video, read with its media type (assets are saved without extension).
+    func mediaAsset(_ hash: String) -> AVURLAsset? {
+        guard let url = assetURL(hash), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let type = document?.assets.first { $0.hash == hash }?.mediaType ?? "video/quicktime"
+        return AVURLAsset(url: url, options: [AVURLAssetOverrideMIMETypeKey: type])
+    }
+
+    /// First frame of a video, for the block on the page.
+    private func poster(_ hash: String) -> UIImage? {
+        guard let media = mediaAsset(hash) else { return nil }
+        let generator = AVAssetImageGenerator(asset: media)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 1280, height: 1280)
+        guard let frame = try? generator.copyCGImage(at: CMTime(seconds: 0.2, preferredTimescale: 600), actualTime: nil) else { return nil }
+        return UIImage(cgImage: frame)
     }
 
     // MARK: Audio

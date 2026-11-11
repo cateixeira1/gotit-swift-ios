@@ -1,5 +1,6 @@
 import SwiftUI
 import GotItDomain
+import GotItCanvasUI
 
 /// Paper of the note or of one page: plain, notebook (yellow, ruled, brown top), squares or a
 /// white and light grey checkerboard; squares sized in millimetres and always square.

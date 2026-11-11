@@ -178,11 +178,24 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
                 accessibilityLabel = "Calendário, " + day.formatted(.dateTime.day().month(.wide).year().locale(Locale(identifier: "pt_BR")))
                 return
             }
+            if shape.kind == .transcript {
+                // Card with a header: speech-bubble icon and "Transcrição"; the text is the child block.
+                let card = UIBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 12)
+                UIColor(hex: shape.fill ?? "#F5F7FB").setFill(); card.fill()
+                UIColor(hex: shape.stroke).setStroke(); card.lineWidth = 1; card.stroke()
+                let icon = UIImage(systemName: "waveform.and.person.filled") ?? UIImage(systemName: "text.bubble")
+                icon?.withTintColor(.systemIndigo, renderingMode: .alwaysOriginal).draw(in: CGRect(x: 12, y: 9, width: 18, height: 16))
+                NSAttributedString(string: "Transcrição", attributes: [.font: UIFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: UIColor.systemIndigo])
+                    .draw(at: CGPoint(x: 36, y: 9))
+                UIColor(hex: "#DDE3EC").setFill(); UIBezierPath(rect: CGRect(x: 12, y: 30, width: bounds.width - 24, height: 1)).fill()
+                accessibilityLabel = "Transcrição"
+                return
+            }
             let area = bounds.insetBy(dx: shape.lineWidth / 2, dy: shape.lineWidth / 2)
             let path: UIBezierPath
             switch shape.kind {
             case .ellipse: path = UIBezierPath(ovalIn: area)
-            case .rectangle, .stickyNote, .calendar: path = UIBezierPath(rect: area)
+            case .rectangle, .stickyNote, .calendar, .transcript: path = UIBezierPath(rect: area)
             case .diamond:
                 path = polygon([CGPoint(x: area.midX, y: area.minY), .init(x: area.maxX, y: area.midY), .init(x: area.midX, y: area.maxY), .init(x: area.minX, y: area.midY)])
             case .triangle: path = polygon(corners(shape.triangleCorners, in: area))

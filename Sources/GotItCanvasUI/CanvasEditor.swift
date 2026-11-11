@@ -972,38 +972,36 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         text.adjustsFontForContentSizeCategory = true
         text.accessibilityLabel = "Bloco de texto"
         textIDs[ObjectIdentifier(text)] = id
-        // Icons, not words: on iOS 26 each item is a glass capsule, and eight word buttons ran past
-        // the iPhone's width, pushing "Concluir" off screen. Colour and the rest live in "Mais".
-        let bar = UIToolbar()
-        func item(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> UIBarButtonItem {
-            let button = UIBarButtonItem(image: UIImage(systemName: symbol), primaryAction: UIAction { _ in action() })
-            button.accessibilityLabel = label
-            return button
+        // A bar that scrolls sideways, with "Concluir" fixed on the right: a UIToolbar cannot
+        // scroll, and on iOS 26 its glass capsules ran past the iPhone's width.
+        let bar = KeyboardBar()
+        bar.add("bold", "Negrito") { [weak self, weak text] in
+            guard let self, let text, !self.storyFormat(.bold) else { return }
+            text.toggleBoldface(nil); self.textViewDidChange(text)
         }
-        let more = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: textMenu(text))
-        more.accessibilityLabel = "Mais"
-        let done = UIBarButtonItem(title: "Concluir", primaryAction: UIAction { [weak text] _ in text?.resignFirstResponder() })
-        done.style = .done
-        bar.items = [
-            item("bold", "Negrito") { [weak self, weak text] in
-                guard let self, let text, !self.storyFormat(.bold) else { return }
-                text.toggleBoldface(nil); self.textViewDidChange(text)
-            },
-            item("italic", "Itálico") { [weak self, weak text] in
-                guard let self, let text, !self.storyFormat(.italic) else { return }
-                text.toggleItalics(nil); self.textViewDidChange(text)
-            },
-            item("underline", "Sublinhado") { [weak self, weak text] in
-                guard let self, let text, !self.storyFormat(.underline) else { return }
-                self.format(text, key: .underlineStyle, value: NSUnderlineStyle.single.rawValue)
-            },
-            item("textformat.size.larger", "Aumentar fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: 2) } },
-            item("textformat.size.smaller", "Diminuir fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: -2) } },
-            more,
-            .flexibleSpace(),
-            done,
-        ]
-        bar.sizeToFit(); text.inputAccessoryView = bar
+        bar.add("italic", "Itálico") { [weak self, weak text] in
+            guard let self, let text, !self.storyFormat(.italic) else { return }
+            text.toggleItalics(nil); self.textViewDidChange(text)
+        }
+        bar.add("underline", "Sublinhado") { [weak self, weak text] in
+            guard let self, let text, !self.storyFormat(.underline) else { return }
+            self.format(text, key: .underlineStyle, value: NSUnderlineStyle.single.rawValue)
+        }
+        bar.add("strikethrough", "Tachado") { [weak self, weak text] in
+            if let text { self?.format(text, key: .strikethroughStyle, value: NSUnderlineStyle.single.rawValue) }
+        }
+        bar.add("textformat.size.larger", "Aumentar fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: 2) } }
+        bar.add("textformat.size.smaller", "Diminuir fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: -2) } }
+        bar.add("highlighter", "Marca-texto") { [weak self, weak text] in if let text { self?.format(text, key: .backgroundColor, value: UIColor.systemYellow) } }
+        bar.add("list.bullet", "Lista com marcadores") { [weak self, weak text] in
+            if let text { self?.paragraph(text) { $0.textLists = [NSTextList(markerFormat: .disc, options: 0)] } }
+        }
+        bar.add("list.number", "Lista numerada") { [weak self, weak text] in
+            if let text { self?.paragraph(text) { $0.textLists = [NSTextList(markerFormat: .decimal, options: 0)] } }
+        }
+        bar.add(menu: textMenu(text), symbol: "ellipsis.circle", label: "Mais")
+        bar.done = { [weak text] in text?.resignFirstResponder() }
+        text.inputAccessoryView = bar
         return text
     }
 
@@ -2063,7 +2061,7 @@ private extension ShapeKind {
         switch self {
         case .rectangle: "Retângulo"; case .ellipse: "Elipse"; case .diamond: "Losango"
         case .triangle: "Triângulo"; case .line: "Linha"; case .arrow: "Seta"
-        case .stickyNote: "Post-it"; case .calendar: "Calendário"
+        case .stickyNote: "Post-it"; case .calendar: "Calendário"; case .transcript: "Transcrição"
         }
     }
 }
@@ -2071,5 +2069,73 @@ private extension ShapeKind {
 private extension TextWrapMode {
     static var allMenuCases: [TextWrapMode] { [.inherit, .bounds, .contour, .topAndBottom, .none] }
     var title: String { switch self { case .inherit: "Padrão da nota"; case .bounds: "Retangular"; case .contour: "Contorno"; case .topAndBottom: "Acima e abaixo"; case .none: "Sobrepor" } }
+}
+
+/// The bar above the keyboard: formatting buttons in a row that scrolls sideways (a finger drag
+/// moves it), and "Concluir" fixed on the right, always reachable.
+@MainActor final class KeyboardBar: UIInputView {
+    private let scroll = UIScrollView()
+    private let row = UIStackView()
+    let doneButton = UIButton(type: .system)
+    var done: (() -> Void)?
+
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 320, height: 48), inputViewStyle: .keyboard)
+        autoresizingMask = .flexibleWidth
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.alwaysBounceHorizontal = true
+        scroll.delaysContentTouches = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        row.axis = .horizontal; row.spacing = 2; row.alignment = .center
+        row.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(row)
+        var config = UIButton.Configuration.borderedProminent()
+        config.title = "Concluir"; config.cornerStyle = .capsule
+        doneButton.configuration = config
+        doneButton.accessibilityLabel = "Concluir"
+        doneButton.addAction(UIAction { [weak self] _ in self?.done?() }, for: .touchUpInside)
+        doneButton.translatesAutoresizingMaskIntoConstraints = false
+        doneButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let divider = UIView(); divider.backgroundColor = .separator; divider.translatesAutoresizingMaskIntoConstraints = false
+        [scroll, divider, doneButton].forEach(addSubview)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor), scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.trailingAnchor.constraint(equalTo: divider.leadingAnchor, constant: -6),
+            divider.widthAnchor.constraint(equalToConstant: 1), divider.heightAnchor.constraint(equalToConstant: 24),
+            divider.centerYAnchor.constraint(equalTo: centerYAnchor),
+            divider.trailingAnchor.constraint(equalTo: doneButton.leadingAnchor, constant: -8),
+            doneButton.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            doneButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            row.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -6),
+            row.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            row.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            row.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func button(_ symbol: String, _ label: String) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)), for: .normal)
+        button.accessibilityLabel = label
+        button.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        row.addArrangedSubview(button)
+        return button
+    }
+
+    func add(_ symbol: String, _ label: String, action: @escaping () -> Void) {
+        button(symbol, label).addAction(UIAction { _ in action() }, for: .touchUpInside)
+    }
+
+    func add(menu: UIMenu, symbol: String, label: String) {
+        let button = button(symbol, label)
+        button.menu = menu; button.showsMenuAsPrimaryAction = true
+    }
+
+    /// Buttons in the scrolling row (tests).
+    var items: [UIButton] { row.arrangedSubviews.compactMap { $0 as? UIButton } }
 }
 #endif

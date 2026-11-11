@@ -22,6 +22,8 @@ struct EditorWorkspace: View {
     @State private var fileKind = FileKind.pdf
     private enum FileKind { case pdf, audio }
     @State private var showRecorder = false
+    /// Audio whose transcription is being placed (asks where the text goes).
+    @State private var transcribing: UUID?
     @State private var pickingVideo = false
     @State private var playing: PlayingVideo?
     private struct PlayingVideo: Identifiable { let id: UUID; let player: AVPlayer }
@@ -103,18 +105,23 @@ struct EditorWorkspace: View {
             switch result {
             case .success(let url):
                 if fileKind == .pdf { model.importPDF(url, pageID: target.pageID, documentID: target.documentID) }
-                else { Task { await model.insertAudio(from: url, transcribe: false, pageID: target.pageID, documentID: target.documentID) } }
+                else { Task { await model.insertAudio(from: url, transcribe: nil, pageID: target.pageID, documentID: target.documentID) } }
             case .failure(let error): model.error = error.localizedDescription
             }
         }
         .sheet(isPresented: $showRecorder) {
             let target = (page: pageID, document: document.id)
-            AudioRecorderView { url, transcribe in
+            AudioRecorderView { url, placement in
                 Task {
-                    await model.insertAudio(from: url, transcribe: transcribe, pageID: target.page, documentID: target.document)
+                    await model.insertAudio(from: url, transcribe: placement, pageID: target.page, documentID: target.document)
                     try? FileManager.default.removeItem(at: url)
                 }
-            }.presentationDetents([.medium])
+            }.presentationDetents([.medium, .large])
+        }
+        .confirmationDialog("Onde colocar a transcrição?", isPresented: Binding(get: { transcribing != nil }, set: { if !$0 { transcribing = nil } }),
+                            titleVisibility: .visible, presenting: transcribing) { id in
+            Button("Bloco próprio ao lado do áudio") { Task { await model.transcribe(id, placement: .card) } }
+            Button("Texto na nota, abaixo do áudio") { Task { await model.transcribe(id, placement: .text) } }
         }
         .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
         // Opening a note puts the caret in its text and brings up the keyboard, ready to type.
@@ -178,7 +185,7 @@ struct EditorWorkspace: View {
             onError: { error in
                 if case .invalid(let text)? = error as? DocumentError { model.error = text } else { model.error = String(describing: error) }
             },
-            onTranscribe: { id in Task { await model.transcribe(id) } },
+            onTranscribe: { id in transcribing = id },
             onPlayVideo: { id in
                 if let block = document.blocks.first(where: { $0.id == id }), case .video(let reference) = block.content,
                    let media = model.mediaAsset(reference.hash) {

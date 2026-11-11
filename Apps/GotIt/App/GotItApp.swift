@@ -581,7 +581,7 @@ final class AppModel {
 
     /// A recording or an audio file goes on the page as a player (first free spot); with
     /// `transcribe`, its text is written below it once the device has transcribed it.
-    func insertAudio(from url: URL, transcribe: Bool, pageID: UUID, documentID: UUID) async {
+    func insertAudio(from url: URL, transcribe: TranscriptPlacement?, pageID: UUID, documentID: UUID) async {
         guard let document, document.id == documentID else { return }
         do {
             let scoped = url.startAccessingSecurityScopedResource()
@@ -595,13 +595,17 @@ final class AppModel {
             let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: size.width, height: size.height)),
                                     content: .audio(AssetReference(hash: asset.hash)))
             enqueue((document.assets.contains { $0.hash == asset.hash } ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
-            if transcribe { await self.transcribe(block.id) }
+            if let transcribe { await self.transcribe(block.id, placement: transcribe) }
         } catch DocumentError.invalid(let reason) { self.error = reason }
         catch { self.error = error.localizedDescription }
     }
 
-    /// Writes the audio's text in a new text box right below it (laid out across pages if long).
-    func transcribe(_ blockID: UUID) async {
+    /// Where a transcription goes: its own card beside the audio, or text in the note below it.
+    enum TranscriptPlacement: String, CaseIterable { case card, text }
+
+    /// Transcribes an audio on the device and puts the text either in a card with its own icon
+    /// beside the audio (right, else left, below, above) or in the note's text below it.
+    func transcribe(_ blockID: UUID, placement: TranscriptPlacement = .card) async {
         guard let document, !transcribing.contains(blockID),
               let block = document.blocks.first(where: { $0.id == blockID }), case .audio(let reference) = block.content,
               let stored = assetURL(reference.hash) else { return }
@@ -613,12 +617,20 @@ final class AppModel {
         do {
             try FileManager.default.copyItem(at: stored, to: copy)
             defer { try? FileManager.default.removeItem(at: copy) }
-            let text = try await AudioTranscription.transcribe(copy)
-            guard !text.isEmpty else { self.error = "Nenhuma fala foi reconhecida neste áudio."; return }
+            let result = try await AudioTranscription.transcribe(copy)
+            let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { self.error = "Nenhuma fala foi reconhecida neste áudio (idioma: \(result.language))."; return }
+            // Speech runs at ~2 words a second; far fewer means something went wrong: say so, with the details.
+            let words = text.split(whereSeparator: \.isWhitespace).count
+            if result.seconds > 20, Double(words) < result.seconds / 6 {
+                self.error = "A transcrição veio curta para o áudio: \(words) palavras em \(Int(result.seconds)) s (\(result.engine), \(result.language)). Confira o texto; se estiver errado, me envie esses números."
+            }
             while isSaving { try await Task.sleep(for: .milliseconds(30)) }
             guard let current = self.document, current.id == document.id,
                   let audio = current.blocks.first(where: { $0.id == blockID }),
                   let page = current.pageID(for: blockID) else { return }
+            if placement == .card, placeTranscriptCard(text, beside: audio, page: page, in: current) { return }
+            if placement == .card { self.error = "A transcrição é longa demais para um bloco: ela foi colocada no texto da nota." }
             let area = current.canvas.textArea, frame = audio.layout.frame
             let x = min(max(frame.x, area.x), area.x + area.width - 80)
             var box = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: x, y: frame.y + frame.height + 8, width: area.x + area.width - x, height: 44)),
@@ -631,6 +643,25 @@ final class AppModel {
             _ = editText(inserted, group: nil, selection: NSRange(location: 0, length: 0))
         } catch let failure as AudioTranscription.Failure { self.error = failure.errorDescription }
         catch { self.error = "Não foi possível transcrever: \(error.localizedDescription)" }
+    }
+
+    /// A card sized to its text (wider for long texts), beside the audio. False when even a wide
+    /// card would not fit on the page.
+    private func placeTranscriptCard(_ text: String, beside audio: CanvasBlock, page: UUID, in document: CanvasDocument) -> Bool {
+        let size = document.canvas.size
+        let font = UIFont.systemFont(ofSize: Stickers.transcriptFontSize)
+        func height(_ width: Double) -> Double {
+            let inner = width - 2 * Stickers.transcriptInset
+            let box = (text as NSString).boundingRect(with: CGSize(width: inner - 10, height: .greatestFiniteMagnitude),
+                                                      options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font], context: nil)
+            return ceil(box.height) + 24 + Stickers.transcriptHeader + Stickers.transcriptInset
+        }
+        guard let width = [280.0, 360.0, 460.0, size.width - 32].first(where: { height($0) <= size.height - 32 }) else { return false }
+        let cardHeight = height(width)
+        guard let projection = try? document.pageDocument(page) else { return false }
+        let spot = Placement.beside(audio.layout.frame, width: width, height: cardHeight, on: projection, except: [audio.id])
+        enqueue(Stickers.transcript(at: spot, width: width, height: cardHeight, text: text, order: nextRootOrder(in: document)), pageID: page, documentID: document.id)
+        return true
     }
 
     /// New margins, header, footer or page numbers: stored, and every text of the note laid out

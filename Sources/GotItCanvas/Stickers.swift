@@ -52,6 +52,20 @@ public enum Stickers {
         return [.insertBlock(paper), .insertBlock(text)]
     }
 
+    /// A transcription card: a header with an icon, and the text as its child (so it moves with it).
+    public static func transcript(at origin: CanvasPoint, width: Double, height: Double, text: String, order: Int) -> [DocumentCommand] {
+        let card = CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(x: origin.x, y: origin.y, width: width, height: height)),
+                               content: .shape(.init(kind: .transcript, stroke: "#C7CFDB", fill: "#F5F7FB", lineWidth: 1)),
+                               presentation: .init(wrap: .none))
+        let body = CanvasBlock(parentID: card.id, layout: .init(mode: .absolute, frame: .init(x: transcriptInset, y: transcriptHeader, width: width - 2 * transcriptInset, height: height - transcriptHeader - transcriptInset)),
+                               style: .init(fontSize: transcriptFontSize, foreground: "#1F2937", alignment: .leading),
+                               content: .text(RichText(text)))
+        return [.insertBlock(card), .insertBlock(body)]
+    }
+    public static let transcriptHeader = 34.0
+    public static let transcriptInset = 12.0
+    public static let transcriptFontSize = 14.0
+
     /// A calendar page showing `day` (today, unless the caller says otherwise).
     public static func calendar(at origin: CanvasPoint, day: Date = Date(), calendar: Calendar = .current, order: Int) -> [DocumentCommand] {
         let block = CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(x: origin.x, y: origin.y, width: calendarSize.width, height: calendarSize.height)),

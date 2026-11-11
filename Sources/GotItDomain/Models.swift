@@ -188,6 +188,8 @@ public enum ShapeKind: String, Codable, Sendable {
     case stickyNote
     /// A desk-calendar sticker showing one day (`Shape.date`).
     case calendar
+    /// A card holding the transcription of an audio (its text is the child block).
+    case transcript
 }
 public extension ShapeKind {
     /// Shapes with an inside: usable as image masks and as text-wrap contours.

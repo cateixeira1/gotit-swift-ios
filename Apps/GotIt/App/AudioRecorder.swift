@@ -63,10 +63,12 @@ import AVFoundation
 }
 
 struct AudioRecorderView: View {
-    let onDone: (URL, Bool) -> Void
+    let onDone: (URL, AppModel.TranscriptPlacement?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var recording = AudioRecording()
     @AppStorage("transcribeRecordings") private var transcribe = true
+    @AppStorage("transcriptPlacement") private var placement = AppModel.TranscriptPlacement.card.rawValue
+    @AppStorage(AudioTranscription.languageKey) private var language = "pt-BR"
 
     var body: some View {
         NavigationStack {
@@ -98,12 +100,23 @@ struct AudioRecorderView: View {
                     .accessibilityLabel(recording.state == .recording ? "Pausar" : recording.state == .paused ? "Continuar gravando" : "Gravar")
                     .accessibilityIdentifier("recordButton")
                     Button {
-                        if let url = recording.finish() { onDone(url, transcribe) }
+                        if let url = recording.finish() { onDone(url, transcribe ? AppModel.TranscriptPlacement(rawValue: placement) ?? .card : nil) }
                         dismiss()
                     } label: { Image(systemName: "checkmark.circle.fill").font(.title) }
                         .accessibilityLabel("Concluir gravação").disabled(recording.state == .idle)
                 }
-                Toggle("Transcrever no aparelho ao concluir", isOn: $transcribe).padding(.horizontal)
+                VStack(spacing: 10) {
+                    Toggle("Transcrever no aparelho ao concluir", isOn: $transcribe)
+                    if transcribe {
+                        Picker("Transcrição", selection: $placement) {
+                            Text("Bloco ao lado").tag(AppModel.TranscriptPlacement.card.rawValue)
+                            Text("Texto na nota").tag(AppModel.TranscriptPlacement.text.rawValue)
+                        }.pickerStyle(.segmented)
+                        Picker("Idioma", selection: $language) {
+                            ForEach(AudioTranscription.languages, id: \.id) { Text($0.name).tag($0.id) }
+                        }
+                    }
+                }.padding(.horizontal)
                 if let problem = recording.problem { Text(problem).font(.footnote).foregroundStyle(.red).multilineTextAlignment(.center).padding(.horizontal) }
                 Spacer(minLength: 0)
             }

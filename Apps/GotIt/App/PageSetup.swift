@@ -58,7 +58,8 @@ struct PageSetupView: View {
                     case .header: settings.header?.image = asset.hash
                     case .footer: settings.footer?.image = asset.hash
                     }
-                } catch { model.error = (error as? DocumentError).flatMap { if case .invalid(let text) = $0 { text } else { nil } } ?? error.localizedDescription }
+                } catch DocumentError.invalid(let reason) { model.error = reason }
+                catch { model.error = error.localizedDescription }
             }
         }
     }

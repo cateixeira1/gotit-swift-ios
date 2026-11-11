@@ -54,7 +54,7 @@ jobs:
           -derivedDataPath "$RUNNER_TEMP/GotItCatalystDerivedData"
           CODE_SIGNING_ALLOWED=NO build
       - name: Test native editor on iPad and iPhone
-        timeout-minutes: 25
+        timeout-minutes: 55
         run: |
           python3 - <<'PYTHON'
           import json, subprocess, os

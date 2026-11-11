@@ -242,3 +242,15 @@ Funções novas (`0554755`, `f892d53`):
 - Ferramentas em grade por grupos com ícones maiores; páginas em grade na folha do iPhone.
 
 CI (f892d53): 143 testes do núcleo, 35 nativos e 5 de interface em iPad e iPhone.
+
+## Início da etapa 3 — desempenho e multimídia (11/11/2026)
+
+- Remoção de fundo aprovada no aparelho; vetorização retirada a pedido do usuário. Pincel de
+  retoque (Apagar/Recuperar, tamanho, zoom, desfazer) sobre a máscara do Vision/papel.
+- Áudio: gravar, importar, tocar no bloco e transcrever no aparelho (iOS 26 `SpeechAnalyzer`;
+  antes, `SFSpeechRecognizer` só no aparelho). Texto numa caixa abaixo do áudio.
+- Vídeo: inserir da galeria, primeiro quadro no bloco, tela cheia ao tocar.
+- CI e IPA em macos-26 / Xcode 26.6 (escolha do usuário: SpeechAnalyzer + visual Liquid Glass).
+  Ajustes para o iOS 26: barra do teclado com ícones (o "Concluir" saía da tela no iPhone),
+  conformidades `@preconcurrency`, grade de ferramentas não preguiçosa, mais tempo para testes.
+- CI (f2c417b): 36 testes nativos e os testes de interface em iPad e iPhone passando.

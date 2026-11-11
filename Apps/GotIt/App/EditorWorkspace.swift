@@ -17,6 +17,10 @@ struct EditorWorkspace: View {
     @State private var showTools = false
     @State private var showPhotos = false
     @State private var showPDF = false
+    /// What the file picker is choosing: a PDF or an audio file.
+    @State private var fileKind = FileKind.pdf
+    private enum FileKind { case pdf, audio }
+    @State private var showRecorder = false
     @State private var showStickers = false
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
@@ -70,12 +74,23 @@ struct EditorWorkspace: View {
                 photo = nil
             }
         }
-        .fileImporter(isPresented: $showPDF, allowedContentTypes: [.pdf]) { result in
+        .fileImporter(isPresented: $showPDF, allowedContentTypes: fileKind == .pdf ? [.pdf] : [.audio]) { result in
             guard let target = importTarget else { return }
             switch result {
-            case .success(let url): model.importPDF(url, pageID: target.pageID, documentID: target.documentID)
+            case .success(let url):
+                if fileKind == .pdf { model.importPDF(url, pageID: target.pageID, documentID: target.documentID) }
+                else { Task { await model.insertAudio(from: url, transcribe: false, pageID: target.pageID, documentID: target.documentID) } }
             case .failure(let error): model.error = error.localizedDescription
             }
+        }
+        .sheet(isPresented: $showRecorder) {
+            let target = (page: pageID, document: document.id)
+            AudioRecorderView { url, transcribe in
+                Task {
+                    await model.insertAudio(from: url, transcribe: transcribe, pageID: target.page, documentID: target.document)
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }.presentationDetents([.medium])
         }
         .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
         // Opening a note puts the caret in its text and brings up the keyboard, ready to type.
@@ -139,6 +154,7 @@ struct EditorWorkspace: View {
             onError: { error in
                 if case .invalid(let text)? = error as? DocumentError { model.error = text } else { model.error = String(describing: error) }
             },
+            onTranscribe: { id in Task { await model.transcribe(id) } },
             onReplaceImage: { id, png in model.replaceImage(id, png: png, pageID: targetPage, documentID: targetDocument) })
     }
 
@@ -338,6 +354,11 @@ struct EditorWorkspace: View {
                         tile("Tabela", "tablecells", sheet: sheet) { showTools = false; session.perform(.insertTable) }
                         tile("Imagem", "photo", sheet: sheet) { beginImport(sticker: false, pdf: false) }
                         tile("PDF", "doc.richtext", sheet: sheet) { beginImport(sticker: false, pdf: true) }
+                        tile("Gravar áudio", "mic", sheet: sheet) {
+                            session.perform(.finish); showTools = false
+                            Task { @MainActor in try? await Task.sleep(for: .milliseconds(350)); showRecorder = true }
+                        }.accessibilityIdentifier("recordAudio")
+                        tile("Arquivo de áudio", "waveform", sheet: sheet) { beginImport(sticker: false, pdf: true, audio: true) }
                         tile("Sticker", "face.smiling", sheet: sheet) { session.perform(.finish); showTools = false; showStickers = true }
                     }
                 }
@@ -402,8 +423,9 @@ struct EditorWorkspace: View {
             pageSetup = focus
         }
     }
-    private func beginImport(sticker: Bool, pdf: Bool) {
+    private func beginImport(sticker: Bool, pdf: Bool, audio: Bool = false) {
         session.perform(.finish); showTools = false
+        fileKind = audio ? .audio : .pdf
         importTarget = .init(documentID: document.id, pageID: pageID, sticker: sticker)
         // A single sheet closes before the system picker is presented.
         Task { @MainActor in

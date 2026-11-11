@@ -2,6 +2,7 @@
 import SwiftUI
 import UIKit
 import PencilKit
+import AVFoundation
 import GotItDomain
 import GotItCanvas
 
@@ -41,6 +42,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var pageCount: Int?
     /// A picture's background was removed: the host stores the new PNG and points the block at it.
     public var onReplaceImage: ((UUID, Data) -> Void)?
+    /// "Transcrever" on an audio block: the host writes its text below it.
+    public var onTranscribe: ((UUID) -> Void)?
 
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
@@ -53,8 +56,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
                 onCommands: @escaping ([DocumentCommand]) -> Void,
                 onOpenPDF: @escaping (UUID) -> Void = { _ in },
                 onOpenNote: @escaping (UUID) -> Void = { _ in }, onError: @escaping (Error) -> Void = { _ in },
-                pageNumber: Int? = nil, onReplaceImage: ((UUID, Data) -> Void)? = nil) {
-        self.pageNumber = pageNumber; self.onReplaceImage = onReplaceImage
+                pageNumber: Int? = nil, onTranscribe: ((UUID) -> Void)? = nil, onReplaceImage: ((UUID, Data) -> Void)? = nil) {
+        self.pageNumber = pageNumber; self.onReplaceImage = onReplaceImage; self.onTranscribe = onTranscribe
         self.session = session; self.inkColor = inkColor; self.inkWidth = inkWidth; self.vectorEraser = vectorEraser
         self.drawingData = drawingData; self.onDrawing = onDrawing
         self.onOpenPDF = onOpenPDF
@@ -353,7 +356,15 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             } else {
                 let object = (blockViews[block.id] as? CanvasObjectView) ?? makeObjectView(id: block.id)
                 object.block = block
-                object.asset = block.content.assetHash.flatMap(configuration.image)
+                if case .audio(let reference) = block.content {
+                    object.asset = nil
+                    object.audioDuration = audioDuration(reference.hash)
+                    object.accessibilityValue = object.audioDuration.map { AudioArt.time($0) }
+                    object.audioPlaying = playingAudio == block.id && audioPlayer?.isPlaying == true
+                    if playingAudio != block.id { object.audioProgress = 0 }
+                } else {
+                    object.asset = block.content.assetHash.flatMap(configuration.image)
+                }
                 if case .noteReference(let ref) = block.content { object.note = configuration.note(ref.documentID) }
                 object.layer.shadowPath = nil
                 switch block.content {
@@ -1402,6 +1413,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if connectingFrom == nil, case .table(let table) = object.block?.content {
             tapTable(object, table: table, at: point, wasSelected: wasSelected); return
         }
+        if connectingFrom == nil, case .audio(let reference) = object.block?.content {
+            toggleAudio(id, hash: reference.hash); return
+        }
         if wasSelected, connectingFrom == nil, case .shape(let shape) = object.block?.content, shape.kind == .calendar {
             pickDay(for: id); return
         }
@@ -1537,6 +1551,68 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             }
             configuration.onCommands([.replaceBlock(updated)])
         } catch { configuration.onError(error) }
+    }
+
+    // MARK: Audio
+
+    private var audioPlayer: AVAudioPlayer?
+    private(set) var playingAudio: UUID?
+    private var audioTimer: Timer?
+    private var audioDurations: [String: TimeInterval] = [:]
+
+    /// Length of an audio file, read once per file.
+    private func audioDuration(_ hash: String) -> TimeInterval? {
+        if let known = audioDurations[hash] { return known }
+        guard let data = configuration.drawingData(hash), let player = try? AVAudioPlayer(data: data) else { return nil }
+        audioDurations[hash] = player.duration
+        return player.duration
+    }
+
+    /// A tap on an audio block plays it, or pauses it if it is playing; another one stops it.
+    func toggleAudio(_ id: UUID, hash: String) {
+        if playingAudio == id, let player = audioPlayer {
+            if player.isPlaying { player.pause(); audioTimer?.invalidate() } else { player.play(); startAudioTimer() }
+            updateAudioView(); return
+        }
+        stopAudio()
+        guard let data = configuration.drawingData(hash) else { configuration.onError(DocumentError.invalid("O áudio não está disponível.")); return }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+            try AVAudioSession.sharedInstance().setActive(true)
+            let player = try AVAudioPlayer(data: data)
+            audioPlayer = player; playingAudio = id
+            player.play(); startAudioTimer(); updateAudioView()
+        } catch { configuration.onError(DocumentError.invalid("Não foi possível tocar este áudio.")) }
+    }
+
+    func stopAudio() {
+        audioTimer?.invalidate(); audioTimer = nil
+        audioPlayer?.stop(); audioPlayer = nil
+        if let id = playingAudio, let view = blockViews[id] as? CanvasObjectView { view.audioPlaying = false; view.audioProgress = 0 }
+        playingAudio = nil
+    }
+
+    private func startAudioTimer() {
+        audioTimer?.invalidate()
+        audioTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateAudioView() }
+        }
+    }
+
+    private func updateAudioView() {
+        guard let id = playingAudio, let player = audioPlayer else { return }
+        if !player.isPlaying, player.currentTime == 0 || player.currentTime >= player.duration - 0.05 {
+            // Played to the end.
+            stopAudio(); return
+        }
+        guard let view = blockViews[id] as? CanvasObjectView else { return }
+        view.audioPlaying = player.isPlaying
+        view.audioProgress = player.duration > 0 ? player.currentTime / player.duration : 0
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        stopAudio()
     }
 
     // MARK: Background removal
@@ -1807,6 +1883,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             })
         ]
         if case .pdf = block.content { actions.insert(UIAction(title: "Abrir PDF") { [weak self] _ in self?.configuration.onOpenPDF(id) }, at: 0) }
+        if case .audio = block.content, configuration.onTranscribe != nil {
+            actions.insert(UIAction(title: "Transcrever", image: UIImage(systemName: "text.bubble")) { [weak self] _ in
+                self?.stopAudio(); self?.configuration.onTranscribe?(id)
+            }, at: 0)
+        }
         switch block.content {
         case .image, .sticker:
             actions.insert(UIAction(title: "Remover fundo", image: UIImage(systemName: "person.crop.rectangle.badge.plus")) { [weak self] _ in

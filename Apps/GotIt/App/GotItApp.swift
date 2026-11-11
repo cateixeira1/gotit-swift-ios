@@ -520,6 +520,65 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    // MARK: Audio
+
+    /// Audio being transcribed (block ids), to show progress and avoid starting twice.
+    var transcribing: Set<UUID> = []
+
+    /// A recording or an audio file goes on the page as a player (first free spot); with
+    /// `transcribe`, its text is written below it once the device has transcribed it.
+    func insertAudio(from url: URL, transcribe: Bool, pageID: UUID, documentID: UUID) async {
+        guard let document, document.id == documentID else { return }
+        do {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url)
+            let type = UTType(filenameExtension: url.pathExtension)
+            guard type?.conforms(to: .audio) ?? true else { throw DocumentError.invalid("O arquivo não é um áudio.") }
+            let asset = try storeAsset(data, mediaType: type?.preferredMIMEType ?? "audio/mp4")
+            let size = (width: 320.0, height: 60.0)
+            let spot = freeSpot(width: size.width, height: size.height, pageID: pageID, in: document)
+            let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: size.width, height: size.height)),
+                                    content: .audio(AssetReference(hash: asset.hash)))
+            enqueue((document.assets.contains { $0.hash == asset.hash } ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
+            if transcribe { await self.transcribe(block.id) }
+        } catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = error.localizedDescription }
+    }
+
+    /// Writes the audio's text in a new text box right below it (laid out across pages if long).
+    func transcribe(_ blockID: UUID) async {
+        guard let document, !transcribing.contains(blockID),
+              let block = document.blocks.first(where: { $0.id == blockID }), case .audio(let reference) = block.content,
+              let stored = assetURL(reference.hash) else { return }
+        transcribing.insert(blockID)
+        defer { transcribing.remove(blockID) }
+        let mediaType = document.assets.first { $0.hash == reference.hash }?.mediaType ?? "audio/mp4"
+        let ext = UTType(mimeType: mediaType)?.preferredFilenameExtension ?? "m4a"
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        do {
+            try FileManager.default.copyItem(at: stored, to: copy)
+            defer { try? FileManager.default.removeItem(at: copy) }
+            let text = try await AudioTranscription.transcribe(copy)
+            guard !text.isEmpty else { self.error = "Nenhuma fala foi reconhecida neste áudio."; return }
+            while isSaving { try await Task.sleep(for: .milliseconds(30)) }
+            guard let current = self.document, current.id == document.id,
+                  let audio = current.blocks.first(where: { $0.id == blockID }),
+                  let page = current.pageID(for: blockID) else { return }
+            let area = current.canvas.textArea, frame = audio.layout.frame
+            let x = min(max(frame.x, area.x), area.x + area.width - 80)
+            var box = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: x, y: frame.y + frame.height + 8, width: area.x + area.width - x, height: 44)),
+                                  content: .text(RichText("")))
+            box.textFlowID = box.id
+            enqueue([.insertBlock(box)], pageID: page, documentID: current.id)
+            while isSaving { try await Task.sleep(for: .milliseconds(30)) }
+            guard var inserted = self.document?.blocks.first(where: { $0.id == box.id }) else { return }
+            inserted.content = .text(RichText(text))
+            _ = editText(inserted, group: nil, selection: NSRange(location: 0, length: 0))
+        } catch let failure as AudioTranscription.Failure { self.error = failure.errorDescription }
+        catch { self.error = "Não foi possível transcrever: \(error.localizedDescription)" }
+    }
+
     /// New margins, header, footer or page numbers: stored, and every text of the note laid out
     /// again in the new text area (continuation pages start below the header, text stops above
     /// the footer). One undo step.

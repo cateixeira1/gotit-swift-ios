@@ -20,6 +20,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "O Got It! usa o microfone para gravar áudios nas suas notas."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "O Got It! transcreve no próprio aparelho os áudios das suas notas."
         PRODUCT_BUNDLE_IDENTIFIER: com.gotit.prototype.demo
     dependencies:
       - package: GotIt

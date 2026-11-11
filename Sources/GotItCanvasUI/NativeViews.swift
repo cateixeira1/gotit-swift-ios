@@ -137,6 +137,10 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
     var block: CanvasBlock?
     var asset: UIImage?
     var note: NoteCardPresentation?
+    /// Audio blocks: length, position (0…1) and whether it is playing.
+    var audioDuration: TimeInterval?
+    var audioProgress: Double = 0 { didSet { if audioProgress != oldValue { setNeedsDisplay() } } }
+    var audioPlaying = false { didSet { if audioPlaying != oldValue { setNeedsDisplay() } } }
     var onMenu: (() -> UIMenu)?
     /// Where the context menu was invoked, in this view's coordinates (tables use it to
     /// know which row/column the menu acts on).
@@ -227,7 +231,11 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
             accessibilityLabel = title
         case .pdf:
             if let asset { asset.draw(in: bounds) } else { placeholder("PDF indisponível") }
-        case .audio: placeholder("Áudio")
+        case .audio(let reference):
+            AudioArt.draw(in: bounds, seed: reference.hash, duration: audioDuration, progress: audioProgress, playing: audioPlaying)
+            accessibilityLabel = "Áudio"
+            accessibilityValue = audioDuration.map { AudioArt.time($0) }
+            accessibilityHint = audioPlaying ? "Toque para pausar" : "Toque para ouvir"
         case .video: placeholder("Vídeo")
         case .drawing: placeholder("Desenho PencilKit")
         case .table(let table):
@@ -390,6 +398,51 @@ final class ConnectionView: UIView, UIContextMenuInteractionDelegate {
                 UIAction(title: name) { _ in var changed = relation; var style = changed.style ?? .init(); style.color = color; changed.style = style; self.onUpdate?(changed) }
             } + [UIAction(title: "Excluir conexão", attributes: .destructive) { _ in self.onDelete?() }])
         })
+    }
+}
+
+/// A recorded or imported audio on the page: a rounded player with a play/pause button, a
+/// waveform (drawn from the file's hash, the same every time) that fills as it plays, and the time.
+@MainActor enum AudioArt {
+    static func time(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        return total >= 3600 ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60) : String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    static func draw(in bounds: CGRect, seed: String, duration: TimeInterval?, progress: Double, playing: Bool) {
+        let card = UIBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), cornerRadius: min(22, bounds.height / 2))
+        UIColor(hex: "#EEF2F7").setFill(); card.fill()
+        UIColor(hex: "#C5CEDA").setStroke(); card.lineWidth = 1; card.stroke()
+        let diameter = min(bounds.height - 16, 40)
+        let button = CGRect(x: 10, y: bounds.midY - diameter / 2, width: diameter, height: diameter)
+        UIColor.systemBlue.setFill(); UIBezierPath(ovalIn: button).fill()
+        UIColor.white.setFill()
+        if playing {
+            let w = diameter * 0.12, h = diameter * 0.4
+            UIBezierPath(rect: CGRect(x: button.midX - w * 1.6, y: button.midY - h / 2, width: w, height: h)).fill()
+            UIBezierPath(rect: CGRect(x: button.midX + w * 0.6, y: button.midY - h / 2, width: w, height: h)).fill()
+        } else {
+            let triangle = UIBezierPath()
+            triangle.move(to: CGPoint(x: button.midX - diameter * 0.14, y: button.midY - diameter * 0.22))
+            triangle.addLine(to: CGPoint(x: button.midX + diameter * 0.24, y: button.midY))
+            triangle.addLine(to: CGPoint(x: button.midX - diameter * 0.14, y: button.midY + diameter * 0.22))
+            triangle.close(); triangle.fill()
+        }
+        let label = duration.map { playing || progress > 0 ? time($0 * progress) + " / " + time($0) : time($0) } ?? "Áudio"
+        let text = NSAttributedString(string: label, attributes: [.font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium), .foregroundColor: UIColor(hex: "#475569")])
+        let size = text.size()
+        text.draw(at: CGPoint(x: bounds.maxX - size.width - 14, y: bounds.midY - size.height / 2))
+        let wave = CGRect(x: button.maxX + 10, y: bounds.minY + 12, width: max(10, bounds.maxX - size.width - 24 - button.maxX - 10), height: bounds.height - 24)
+        var value: UInt64 = seed.utf8.reduce(5381) { ($0 &<< 5) &+ $0 &+ UInt64($1) }
+        let bars = max(4, Int(wave.width / 5))
+        for index in 0..<bars {
+            value = value &* 6364136223846793005 &+ 1442695040888963407
+            let height = wave.height * (0.25 + 0.75 * Double(value >> 40 & 0xFF) / 255)
+            let x = wave.minX + CGFloat(index) * wave.width / CGFloat(bars)
+            let played = Double(index) / Double(bars) < progress
+            (played ? UIColor.systemBlue : UIColor(hex: "#94A3B8")).setFill()
+            UIBezierPath(roundedRect: CGRect(x: x, y: wave.midY - height / 2, width: 2.5, height: height), cornerRadius: 1.25).fill()
+        }
     }
 }
 #endif

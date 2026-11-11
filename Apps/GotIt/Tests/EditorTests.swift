@@ -567,6 +567,38 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(model.document?.blocks.filter { $0.textFlowID != nil }.count, 1)
     }
 
+    /// An audio block shows its length and plays or pauses with a tap.
+    func testAudioBlockPlaysAndPausesWithATap() throws {
+        // One second of a 440 Hz tone as 16-bit mono WAV.
+        let rate = 22_050, samples = (0..<rate).map { Int16(sin(Double($0) * 2 * .pi * 440 / Double(rate)) * 8000) }
+        var wav = Data("RIFF".utf8)
+        func le<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { wav.append(contentsOf: $0) } }
+        le(UInt32(36 + samples.count * 2)); wav.append(contentsOf: Data("WAVEfmt ".utf8))
+        le(UInt32(16)); le(UInt16(1)); le(UInt16(1)); le(UInt32(rate)); le(UInt32(rate * 2)); le(UInt16(2)); le(UInt16(16))
+        wav.append(contentsOf: Data("data".utf8)); le(UInt32(samples.count * 2)); samples.forEach { le($0) }
+        let hash = String(repeating: "c", count: 64)
+        let audio = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 40, y: 40, width: 320, height: 60)), content: .audio(.init(hash: hash)))
+        let document = try CommandEngine.applying([.registerAsset(Asset(hash: hash, mediaType: "audio/wav", byteCount: Int64(wav.count))), .insertBlock(audio)],
+                                                  to: CanvasDocument(title: "Áudio"))
+        let controller = CanvasViewController(configuration: CanvasEditor(document: document, drawingData: { $0 == hash ? wav : nil }, onCommands: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
+        let view = try XCTUnwrap(controller.view.findAll(CanvasObjectView.self).first { $0.id == audio.id })
+        XCTAssertEqual(try XCTUnwrap(view.audioDuration), 1, accuracy: 0.05)
+        XCTAssertEqual(view.accessibilityValue, "0:01")
+        controller.toggleAudio(audio.id, hash: hash)
+        XCTAssertEqual(controller.playingAudio, audio.id)
+        XCTAssertTrue(view.audioPlaying)
+        controller.toggleAudio(audio.id, hash: hash)
+        XCTAssertFalse(view.audioPlaying, "paused")
+        controller.stopAudio()
+        XCTAssertNil(controller.playingAudio)
+        window.isHidden = true
+    }
+
     /// Header, footer and numbers are drawn on each page; moving an object into a strip shows its
     /// dashed edge and a notice, which go away outside it.
     func testHeaderFooterNumbersAndInvasionGuides() throws {
@@ -934,4 +966,8 @@ final class EditorTests: XCTestCase {
 
 private extension UIView {
     var firstResponderView: UIView? { isFirstResponder ? self : subviews.lazy.compactMap(\.firstResponderView).first }
+}
+
+private extension UIView {
+    func findAll<T: UIView>(_ type: T.Type) -> [T] { ((self as? T).map { [$0] } ?? []) + subviews.flatMap { $0.findAll(type) } }
 }

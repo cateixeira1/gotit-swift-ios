@@ -254,3 +254,30 @@ CI (f892d53): 143 testes do núcleo, 35 nativos e 5 de interface em iPad e iPhon
   Ajustes para o iOS 26: barra do teclado com ícones (o "Concluir" saía da tela no iPhone),
   conformidades `@preconcurrency`, grade de ferramentas não preguiçosa, mais tempo para testes.
 - CI (f2c417b): 36 testes nativos e os testes de interface em iPad e iPhone passando.
+
+### Pedidos de 11/11 (madrugada) e continuação da etapa 3
+
+- Barra acima do teclado rolável (ícones de 44 pt) com "Concluir" fixo.
+- Transcrição: áudio convertido para o formato pedido pelo `SpeechAnalyzer` e enviado em
+  fluxo; idioma escolhido (padrão pt-BR); aviso quando o texto sai curto demais para a duração.
+  Opção de bloco próprio ("Transcrição") ao lado do áudio: direita → esquerda → abaixo → acima.
+- Guias de alinhamento ao arrastar (centros e bordas com outros blocos e com a página).
+- Logo na tela de abertura; "Color Software" na abertura e no rodapé do menu.
+- Papel: caderno, quadriculado e xadrez, na nota toda, numa página ou meia página; tamanho do
+  quadrado ajustável (0,3–2 cm), sempre quadrado.
+- Escrita vira texto (opcional) na fonte escolhida. SF-Hello não é uma fonte instalável (SVGs
+  da Apple, com direitos reservados); Bosk, TrashHand e Desyrel não têm licença de
+  distribuição e Malam não tem acentos. Incluídas Caveat (padrão), Patrick Hand, Kalam e Indie
+  Flower (OFL); o usuário pode importar fontes próprias.
+- Equações escritas à mão: lidas e resolvidas por padrão (resposta em azul ao lado), com chave
+  para desligar.
+- Folhas abertas a partir de Ferramentas (sticker, gravador, papel, cabeçalho, importação)
+  passam a abrir quando a folha de Ferramentas termina de fechar (`onDismiss`), em vez de
+  esperar um tempo fixo, que no iOS 26 às vezes não bastava.
+- PDF para anotar: cada página do PDF vira uma página da nota com a página do PDF por baixo
+  (até 100 por vez), para escrever, desenhar e digitar por cima; a primeira página em branco
+  recebe a primeira página do PDF; um só desfazer.
+
+Já existiam e cobrem critérios da etapa 3: views fora da tela não são instanciadas, histórico
+com limite de grupos e bytes por nota, coleta de assets que considera o histórico (desfazer e
+refazer) e só apaga arquivos com mais de um dia.

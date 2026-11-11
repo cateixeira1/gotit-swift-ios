@@ -18,9 +18,9 @@ struct EditorWorkspace: View {
     @State private var showTools = false
     @State private var showPhotos = false
     @State private var showPDF = false
-    /// What the file picker is choosing: a PDF or an audio file.
+    /// What the file picker is choosing: a PDF (as a block, or as pages to write on) or an audio file.
     @State private var fileKind = FileKind.pdf
-    private enum FileKind { case pdf, audio }
+    private enum FileKind { case pdf, pdfPages, audio }
     @State private var showRecorder = false
     /// Audio whose transcription is being placed (asks where the text goes).
     @State private var transcribing: UUID?
@@ -123,12 +123,15 @@ struct EditorWorkspace: View {
                 }
                 .onAppear { video.player.play() }
         }
-        .fileImporter(isPresented: $showPDF, allowedContentTypes: fileKind == .pdf ? [.pdf] : [.audio]) { result in
+        .fileImporter(isPresented: $showPDF, allowedContentTypes: fileKind == .audio ? [.audio] : [.pdf]) { result in
             guard let target = importTarget else { return }
             switch result {
             case .success(let url):
-                if fileKind == .pdf { model.importPDF(url, pageID: target.pageID, documentID: target.documentID) }
-                else { Task { await model.insertAudio(from: url, transcribe: nil, pageID: target.pageID, documentID: target.documentID) } }
+                switch fileKind {
+                case .pdf: model.importPDF(url, pageID: target.pageID, documentID: target.documentID)
+                case .pdfPages: Task { await model.importPDFPages(url, after: target.pageID, documentID: target.documentID) }
+                case .audio: Task { await model.insertAudio(from: url, transcribe: nil, pageID: target.pageID, documentID: target.documentID) }
+                }
             case .failure(let error): model.error = error.localizedDescription
             }
         }
@@ -427,6 +430,10 @@ struct EditorWorkspace: View {
                         tile("Tabela", "tablecells", sheet: sheet) { showTools = false; session.perform(.insertTable) }
                         tile("Imagem", "photo", sheet: sheet) { beginImport(sticker: false, pdf: false) }
                         tile("PDF", "doc.richtext", sheet: sheet) { beginImport(sticker: false, pdf: true) }
+                        if document.kind == .note {
+                            tile("PDF para anotar", "doc.text.image", sheet: sheet) { beginImport(sticker: false, pdf: true, pages: true) }
+                                .accessibilityIdentifier("pdfPages")
+                        }
                         tile("Vídeo", "video", sheet: sheet) { beginImport(sticker: false, pdf: false, video: true) }
                         tile("Gravar áudio", "mic", sheet: sheet) {
                             session.perform(.finish)
@@ -503,9 +510,9 @@ struct EditorWorkspace: View {
     private func afterToolsClose(_ open: @escaping () -> Void) {
         if showTools { afterTools = open; showTools = false } else { open() }
     }
-    private func beginImport(sticker: Bool, pdf: Bool, audio: Bool = false, video: Bool = false) {
+    private func beginImport(sticker: Bool, pdf: Bool, audio: Bool = false, video: Bool = false, pages: Bool = false) {
         session.perform(.finish)
-        fileKind = audio ? .audio : .pdf
+        fileKind = audio ? .audio : pages ? .pdfPages : .pdf
         pickingVideo = video
         importTarget = .init(documentID: document.id, pageID: pageID, sticker: sticker)
         afterToolsClose { if pdf { showPDF = true } else { showPhotos = true } }

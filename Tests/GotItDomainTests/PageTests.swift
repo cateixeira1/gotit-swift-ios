@@ -143,3 +143,24 @@ import Testing
     document = try CommandEngine.applying([.setPagePaper(page.id, nil)], to: document)
     #expect(document.paperFills(on: page.id).count == 1)
 }
+
+@Test func pdfPagesBecomeNotePagesWithAPictureUnderThem() throws {
+    var document = CanvasDocument(title: "PDF")
+    let first = try #require(document.pages.first)
+    let hashes = ["c", "d"].map { String(repeating: $0, count: 64) }
+    let page = CanvasPage(title: "Contrato – 2", background: hashes[1])
+    // The picture has to be registered first.
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.setPageBackground(first.id, hashes[0])], to: document) }
+    document = try CommandEngine.applying(hashes.map { .registerAsset(Asset(hash: $0, mediaType: "image/jpeg", byteCount: 10)) } +
+                                          [.setPageBackground(first.id, hashes[0]), .insertPage(page, after: first.id)], to: document)
+    #expect(document.pages.map(\.background) == hashes)
+    #expect(try document.pageDocument(page.id).pages.first?.background == hashes[1])
+    // In use: it cannot be dropped until the page lets go of it.
+    #expect(throws: DocumentError.self) { try CommandEngine.applying([.unregisterAsset(hashes[0])], to: document) }
+    document = try CommandEngine.applying([.setPageBackground(first.id, nil), .unregisterAsset(hashes[0])], to: document)
+    #expect(document.pages.first?.background == nil && document.assets.count == 1)
+    // Pages saved before backgrounds existed still decode.
+    var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(first)) as? [String: Any])
+    json.removeValue(forKey: "background")
+    #expect(try JSONDecoder().decode(CanvasPage.self, from: JSONSerialization.data(withJSONObject: json)).background == nil)
+}

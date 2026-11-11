@@ -10,6 +10,8 @@ import GotItDomain
     var image: (String) -> UIImage? = { _ in nil }
     /// Paper painted under everything (notebook, squares, checkerboard).
     var fills: [PaperFill] = [] { didSet { if fills != oldValue { setNeedsDisplay() } } }
+    /// Asset hash of the page's own picture (a page of an imported PDF).
+    var background: String? { didSet { if background != oldValue { setNeedsDisplay() } } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -22,12 +24,19 @@ import GotItDomain
     var numberLabel: String? { settings.pageNumbers?.label(index: pageIndex, count: pageCount) }
 
     override func draw(_ rect: CGRect) {
-        Self.draw(settings, pageIndex: pageIndex, pageCount: pageCount, image: image, fills: fills)
+        Self.draw(settings, pageIndex: pageIndex, pageCount: pageCount, image: image, fills: fills, background: background)
     }
 
     /// Draws into the current context, in page coordinates (also used for page thumbnails).
-    static func draw(_ settings: CanvasSettings, pageIndex: Int, pageCount: Int, image: (String) -> UIImage?, fills: [PaperFill] = []) {
+    static func draw(_ settings: CanvasSettings, pageIndex: Int, pageCount: Int, image: (String) -> UIImage?, fills: [PaperFill] = [], background: String? = nil) {
         for fill in fills { paint(fill, settings: settings) }
+        if let background, let picture = image(background), picture.size.width > 0, picture.size.height > 0 {
+            // Fit the whole picture on the page, centred, keeping its proportions.
+            let page = CGSize(width: settings.size.width, height: settings.size.height)
+            let scale = min(page.width / picture.size.width, page.height / picture.size.height)
+            let size = CGSize(width: picture.size.width * scale, height: picture.size.height * scale)
+            picture.draw(in: CGRect(x: (page.width - size.width) / 2, y: (page.height - size.height) / 2, width: size.width, height: size.height))
+        }
         let m = settings.pageMargins
         if let header = settings.header, let strip = settings.headerRect { draw(header, in: strip, inset: m, image: image) }
         if let footer = settings.footer, let strip = settings.footerRect { draw(footer, in: strip, inset: m, image: image) }

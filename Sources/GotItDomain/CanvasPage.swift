@@ -7,8 +7,11 @@ public struct CanvasPage: Codable, Equatable, Sendable, Identifiable {
     public var textFlowID: UUID?
     /// Paper of this page only (whole page or one half), over the note's paper.
     public var paper: PaperFill?
-    public init(id: UUID = UUID(), title: String, textFlowID: UUID? = nil, paper: PaperFill? = nil) {
-        self.id = id; self.title = title; self.textFlowID = textFlowID; self.paper = paper
+    /// A picture under everything on the page (a page of an imported PDF, to write over it).
+    /// Asset hash, registered in the document; drawn to fill the page, keeping its proportions.
+    public var background: String?
+    public init(id: UUID = UUID(), title: String, textFlowID: UUID? = nil, paper: PaperFill? = nil, background: String? = nil) {
+        self.id = id; self.title = title; self.textFlowID = textFlowID; self.paper = paper; self.background = background
     }
 }
 

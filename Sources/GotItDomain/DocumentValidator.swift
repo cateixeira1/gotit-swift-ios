@@ -41,6 +41,7 @@ public enum DocumentValidator {
         let hashes = Set(document.assets.map(\.hash))
         guard hashes.count == document.assets.count else { throw DocumentError.invalid("Duplicate asset hash") }
         guard document.canvas.bandAssetHashes.allSatisfy(hashes.contains) else { throw DocumentError.invalid("Header or footer picture is not registered") }
+        guard document.pages.compactMap(\.background).allSatisfy(hashes.contains) else { throw DocumentError.invalid("Page background is not registered") }
         for asset in document.assets {
             try validate(hash: asset.hash, mediaType: asset.mediaType, byteCount: asset.byteCount)
             guard Set(asset.derivatives.map(\.role)).count == asset.derivatives.count else {

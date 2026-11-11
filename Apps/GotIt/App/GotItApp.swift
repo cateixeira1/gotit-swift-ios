@@ -846,6 +846,67 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// Most pages taken from one PDF at a time (each becomes a picture of about 1 MB).
+    nonisolated static let pdfPageLimit = 100
+
+    /// Every page of a PDF becomes a page of the note with the PDF page as its background, to write,
+    /// draw and type over it. The first PDF page goes on the current page when that page is empty.
+    func importPDFPages(_ url: URL, after pageID: UUID, documentID: UUID) async {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        do {
+            guard let current = document, current.id == documentID, current.kind == .note else { return }
+            let data = try Data(contentsOf: url)
+            let size = current.canvas.size
+            let rendered = try await Task.detached(priority: .userInitiated) { try Self.renderPDFPages(data, fitting: size, limit: Self.pdfPageLimit) }.value
+            guard let latest = document, latest.id == documentID, let start = latest.pages.firstIndex(where: { $0.id == pageID }) else { return }
+            var commands: [DocumentCommand] = [], registered = Set(latest.assets.map(\.hash))
+            // A blank page (nothing on it but, perhaps, an empty text box) takes the first PDF page.
+            let reuse = latest.pages[start].background == nil && !latest.blocks.contains { block in
+                guard latest.pageID(for: block.id) == pageID else { return false }
+                if case .text(let text) = block.content { return !text.plainText.isEmpty }
+                return true
+            }
+            var previous = pageID, first: UUID?
+            for (index, picture) in rendered.pages.enumerated() {
+                let asset = try storeAsset(picture, mediaType: "image/jpeg")
+                if registered.insert(asset.hash).inserted { commands.append(.registerAsset(asset)) }
+                if index == 0, reuse {
+                    commands.append(.setPageBackground(pageID, asset.hash)); first = pageID
+                } else {
+                    let page = CanvasPage(title: "\(url.deletingPathExtension().lastPathComponent) – \(index + 1)", background: asset.hash)
+                    commands.append(.insertPage(page, after: previous)); previous = page.id
+                    if first == nil { first = page.id }
+                }
+            }
+            enqueue(commands)
+            if let first, self.document?.pages.contains(where: { $0.id == first }) == true { selectedPageID = first }
+            if rendered.total > rendered.pages.count {
+                self.error = "O PDF tem \(rendered.total) páginas; foram trazidas as \(rendered.pages.count) primeiras."
+            }
+        } catch { self.error = String(describing: error) }
+    }
+
+    /// JPEG pictures of a PDF's pages, sized to fill the note's page at twice its resolution.
+    nonisolated static func renderPDFPages(_ data: Data, fitting size: CanvasSize, limit: Int) throws -> (pages: [Data], total: Int) {
+        guard let pdf = PDFDocument(data: data), pdf.pageCount > 0, !pdf.isLocked else { throw DocumentError.invalid("PDF vazio, protegido ou inválido") }
+        var pages: [Data] = []
+        for index in 0..<min(limit, pdf.pageCount) {
+            try autoreleasepool {
+                guard let page = pdf.page(at: index) else { return }
+                let bounds = page.bounds(for: .mediaBox)
+                let rotated = page.rotation % 180 != 0
+                let source = CGSize(width: rotated ? bounds.height : bounds.width, height: rotated ? bounds.width : bounds.height)
+                guard source.width > 0, source.height > 0 else { return }
+                let scale = 2 * min(size.width / source.width, size.height / source.height)
+                let picture = page.thumbnail(of: CGSize(width: source.width * scale, height: source.height * scale), for: .mediaBox)
+                guard let jpeg = picture.jpegData(compressionQuality: 0.85) else { throw DocumentError.invalid("Não foi possível ler a página \(index + 1) do PDF.") }
+                pages.append(jpeg)
+            }
+        }
+        return (pages, pdf.pageCount)
+    }
+
     /// The note's strokes as JSON (ink left as ink, and the original strokes of shapes and
     /// connectors made from ink), so recognition can be tuned on the user's own handwriting.
     func exportInk(of document: CanvasDocument) throws -> URL {

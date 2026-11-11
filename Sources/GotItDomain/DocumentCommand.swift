@@ -19,6 +19,8 @@ public enum DocumentCommand: Codable, Equatable, Sendable {
     case removePage(UUID)
     /// Paper of one page (nil: only the note's paper).
     case setPagePaper(UUID, PaperFill?)
+    /// Picture under one page (nil removes it; the asset stays registered until unregistered).
+    case setPageBackground(UUID, String?)
     case insertBlock(CanvasBlock)
     case replaceBlock(CanvasBlock)
     case removeSubtree(UUID)
@@ -48,6 +50,9 @@ public enum CommandEngine {
                 guard let index = document.pages.firstIndex(where: { $0.id == id }) else { throw DocumentError.invalid("Missing page") }
                 try paper?.style.validate()
                 document.pages[index].paper = paper
+            case .setPageBackground(let id, let hash):
+                guard let index = document.pages.firstIndex(where: { $0.id == id }) else { throw DocumentError.invalid("Missing page") }
+                document.pages[index].background = hash
             case .removePage(let id):
                 guard document.pages.count > 1, !document.blocks.contains(where: { document.pageID(for: $0.id) == id }) else { throw DocumentError.invalid("Page is not empty") }
                 document.pages.removeAll { $0.id == id }
@@ -79,7 +84,8 @@ public enum CommandEngine {
                     guard existing == asset else { throw DocumentError.invalid("Asset hash already has different metadata") }
                 } else { document.assets.append(asset) }
             case .unregisterAsset(let hash):
-                guard !document.blocks.contains(where: { $0.content.assetHashes.contains(hash) }), !document.canvas.bandAssetHashes.contains(hash) else {
+                guard !document.blocks.contains(where: { $0.content.assetHashes.contains(hash) }), !document.canvas.bandAssetHashes.contains(hash),
+                      !document.pages.contains(where: { $0.background == hash }) else {
                     throw DocumentError.invalid("Asset is still in use")
                 }
                 document.assets.removeAll { $0.hash == hash }

@@ -456,6 +456,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         bands.frame = surface.bounds; bands.image = configuration.image
         bands.settings = configuration.document.canvas
         bands.fills = configuration.document.pages.first.map { configuration.document.paperFills(on: $0.id) } ?? []
+        bands.background = configuration.document.pages.first?.background
         bands.pageIndex = max(0, (configuration.pageNumber ?? 1) - 1); bands.pageCount = max(1, configuration.pageCount ?? 1)
         surface.sendSubviewToBack(bands)
         bandGuides.frame = surface.bounds; surface.bringSubviewToFront(bandGuides)

@@ -689,6 +689,39 @@ final class EditorTests: XCTestCase {
         XCTAssertNil(model.document?.canvas.header, "one undo step")
     }
 
+    /// A PDF brought in "para anotar": each of its pages is a page of the note with the PDF page
+    /// under it; the blank first page of a new note takes PDF page 1; one undo takes it all back.
+    func testPDFPagesBecomeNotePagesToWriteOn() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        let page = try XCTUnwrap(model.document?.pages.first?.id)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("tres-paginas.pdf")
+        let data = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).pdfData { context in
+            for number in 1...3 {
+                context.beginPage()
+                ("Página \(number)" as NSString).draw(at: CGPoint(x: 72, y: 72), withAttributes: [.font: UIFont.systemFont(ofSize: 40)])
+            }
+        }
+        try data.write(to: url)
+        await model.importPDFPages(url, after: page, documentID: try XCTUnwrap(model.document?.id))
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertNil(model.error)
+        let document = try XCTUnwrap(model.document)
+        XCTAssertEqual(document.pages.count, 3)
+        XCTAssertEqual(document.pages.first?.id, page, "the blank page took the first PDF page")
+        XCTAssertEqual(Set(document.pages.compactMap(\.background)).count, 3)
+        let picture = try XCTUnwrap(model.image(try XCTUnwrap(document.pages[1].background)))
+        XCTAssertEqual(picture.size.width / picture.size.height, 612 / 792, accuracy: 0.01)
+        // Drawn under the page in its thumbnail: not a blank white page.
+        let thumbnail = model.pagePreview(try document.pageDocument(document.pages[1].id))
+        XCTAssertGreaterThan(darkPixels(thumbnail), 50, "the PDF page shows in the thumbnail")
+        await model.history(undo: true)
+        XCTAssertEqual(model.document?.pages.count, 1)
+        XCTAssertNil(model.document?.pages.first?.background, "one undo step")
+    }
+
     /// Moving an object to another page lays out the text it was next to again; when that text
     /// does not need to move, the move is applied without any warning.
     func testMovingAnObjectToAnotherPageShowsNoWarning() async throws {
@@ -1000,4 +1033,17 @@ private extension UIView {
 
 private extension UIView {
     func findAll<T: UIView>(_ type: T.Type) -> [T] { ((self as? T).map { [$0] } ?? []) + subviews.flatMap { $0.findAll(type) } }
+}
+
+/// Pixels darker than mid grey (text or ink drawn on a white page).
+@MainActor func darkPixels(_ image: UIImage) -> Int {
+    guard let cg = image.cgImage else { return 0 }
+    let width = cg.width, height = cg.height
+    var bytes = [UInt8](repeating: 255, count: width * height * 4)
+    bytes.withUnsafeMutableBytes { buffer in
+        guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+    }
+    return stride(from: 0, to: bytes.count, by: 4).filter { Int(bytes[$0]) + Int(bytes[$0 + 1]) + Int(bytes[$0 + 2]) < 3 * 128 }.count
 }

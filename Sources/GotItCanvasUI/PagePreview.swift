@@ -16,7 +16,7 @@ public enum PagePreview {
         return UIGraphicsImageRenderer(size: output).image { context in
             UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: output))
             context.cgContext.scaleBy(x: scale, y: scale)
-            for block in document.blocks.sorted(by: { $0.layout.zIndex == $1.layout.zIndex ? $0.order < $1.order : $0.layout.zIndex < $1.layout.zIndex }) {
+            for block in document.paintOrder() {
                 guard let frame = frames[block.id] else { continue }
                 let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
                 context.cgContext.saveGState()

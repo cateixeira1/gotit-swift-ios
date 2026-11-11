@@ -299,7 +299,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         for id in Array(blockViews.keys) where !ids.contains(id) {
             recycle(id)
         }
-        for block in configuration.document.blocks.sorted(by: { $0.layout.zIndex < $1.layout.zIndex }) {
+        // Back to front: stacking index, then insertion order (old notes have every index at 0).
+        for block in configuration.document.paintOrder() {
             if case .drawing = block.content { continue }
             guard ids.contains(block.id), let logical = frames[block.id] else { continue }
             let blockView: UIView
@@ -374,9 +375,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             if blockView.superview == nil { surface.addSubview(blockView) }
             surface.bringSubviewToFront(blockView)
         }
-        // Containers and shape parents remain behind their editable children.
-        for block in configuration.document.blocks where block.parentID != nil {
-            if let child = blockViews[block.id] { surface.bringSubviewToFront(child) }
+        // Children (a post-it's text, a shape's label) sit right above their parent, not above
+        // everything: an object put on top of a post-it covers its text too.
+        for root in configuration.document.blocks where root.parentID == nil {
+            if let view = blockViews[root.id] { _ = stackChildren(of: root.id, above: view) }
         }
         connectionViews.forEach { $0.removeFromSuperview() }; connectionViews = []
         if configuration.document.kind == .web {
@@ -402,7 +404,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             connection.points = ConnectorGeometry.path(from: source, to: target, routing: relation.style?.routing ?? .straight)
             connection.onUpdate = { [weak self] relation in self?.configuration.onCommands([.setRelation(relation)]) }
             connection.onDelete = { [weak self] in self?.configuration.onCommands([.removeRelation(relation.id)]) }
-            surface.addSubview(connection); connectionViews.append(connection)
+            // A connector lies just above the higher of the two objects it joins, so an object
+            // stacked above both also covers the arrow.
+            let ends = [relation.sourceID, relation.targetID].compactMap { blockViews[$0] }.compactMap { surface.subviews.firstIndex(of: $0) }
+            if let highest = ends.max() { surface.insertSubview(connection, aboveSubview: surface.subviews[highest]) }
+            else { surface.addSubview(connection) }
+            connectionViews.append(connection)
         }
         ink.frame = surface.bounds
         ink.contentSize = surface.bounds.size
@@ -1291,10 +1298,43 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         return object
     }
 
+    /// Places the children of `parent` (in their order, each followed by its own children) right
+    /// above `view`; returns the last view placed.
+    private func stackChildren(of parent: UUID, above view: UIView) -> UIView {
+        var cursor = view
+        for child in configuration.document.blocks.filter({ $0.parentID == parent }).sorted(by: { $0.order < $1.order }) {
+            guard let childView = blockViews[child.id] else { continue }
+            surface.insertSubview(childView, aboveSubview: cursor)
+            cursor = stackChildren(of: child.id, above: childView)
+        }
+        return cursor
+    }
+
+    /// An object being dragged is shown above everything (with its children) until it is dropped.
+    private func lift(_ id: UUID) {
+        guard let view = blockViews[id] else { return }
+        surface.bringSubviewToFront(view)
+        _ = stackChildren(of: id, above: view)
+        surface.bringSubviewToFront(ink)
+    }
+
+    /// Stacking index that puts `block` above every other object on this page (unchanged if it already is).
+    private func frontIndex(for block: CanvasBlock) -> Int {
+        let others = configuration.document.blocks.filter { $0.id != block.id && $0.parentID == nil && $0.isStacked }.map(\.layout.zIndex)
+        guard let top = others.max() else { return block.layout.zIndex }
+        return block.layout.zIndex > top ? block.layout.zIndex : top + 1
+    }
+
+    private func backIndex(for block: CanvasBlock) -> Int {
+        let others = configuration.document.blocks.filter { $0.id != block.id && $0.parentID == nil && $0.isStacked }.map(\.layout.zIndex)
+        guard let bottom = others.min() else { return block.layout.zIndex }
+        return block.layout.zIndex < bottom ? block.layout.zIndex : bottom - 1
+    }
+
     @objc private func moveObject(_ gesture: UIPanGestureRecognizer) {
         guard let object = gesture.view as? CanvasObjectView, let id = object.id,
               var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
-        if gesture.state == .began { movingID = id; moveOrigin = object.center; configuration.session?.objectDragBegan?(self) }
+        if gesture.state == .began { movingID = id; moveOrigin = object.center; configuration.session?.objectDragBegan?(self); lift(id) }
         let delta = gesture.translation(in: surface)
         if gesture.state == .changed { object.center = CGPoint(x: moveOrigin.x + delta.x, y: moveOrigin.y + delta.y) }
         // Dropped on another page: the object moves there (a whole root object, not a text story box).
@@ -1315,6 +1355,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 block.layout.mode = .absolute
             }
             block.layout.frame.x += delta.x; block.layout.frame.y += delta.y
+            // What was moved stays where the user put it: above what it was dragged over.
+            if block.parentID == nil { block.layout.zIndex = frontIndex(for: block) }
             configuration.onCommands([.replaceBlock(block)]); movingID = nil
         } else if gesture.state == .cancelled { movingID = nil; render() }
     }
@@ -1476,19 +1518,31 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
               let source = ImageCutout.raster(image, maxSide: vectorize ? 1024 : 2048) else {
             configuration.onError(DocumentError.invalid("Não foi possível ler esta imagem.")); return
         }
+        // A preview first: the user picks photo or paper and sees the result before the note changes.
+        let sheet = CutoutPreviewController(source: source, vectorize: vectorize) { [weak self] processed in
+            self?.applyCutout(id, processed, vectorize: vectorize)
+        }
+        let navigation = UINavigationController(rootViewController: sheet)
+        navigation.modalPresentationStyle = .pageSheet
+        navigation.sheetPresentationController?.detents = [.large()]
+        present(navigation, animated: true)
+    }
+
+    private func applyCutout(_ id: UUID, _ processed: ImageCutout.Processed, vectorize: Bool) {
+        guard !vectorize else {
+            finishCutout(id, cut: processed.cutout, png: nil, traced: processed.traced, vectorize: true); return
+        }
         let spinner = UIActivityIndicatorView(style: .large)
         spinner.color = .systemBlue; spinner.accessibilityIdentifier = "cutoutProgress"
         if let view = blockViews[id] { spinner.center = view.center }
         surface.addSubview(spinner); spinner.startAnimating()
         cutouts[id] = spinner
+        let image = processed.cutout.image
         Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) { () -> (ImageCutout.Cutout, Data?, [TracedStroke]) in
-                let cut = ImageCutout.removeBackground(source)
-                return vectorize ? (cut, nil, ImageVectorizer.trace(cut.image)) : (cut, ImageCutout.png(cut.image), [])
-            }.value
+            let png = await Task.detached(priority: .userInitiated) { ImageCutout.png(image) }.value
             guard let self else { return }
             self.cutouts.removeValue(forKey: id)?.removeFromSuperview()
-            self.finishCutout(id, cut: result.0, png: result.1, traced: result.2, vectorize: vectorize)
+            self.finishCutout(id, cut: processed.cutout, png: png, traced: [], vectorize: false)
         }
     }
 
@@ -1725,6 +1779,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         }
         let colors = [("Azul", "#2563EB"), ("Verde", "#16A34A"), ("Coral", "#F97316"), ("Branco", "#FFFFFF"), ("Preto", "#111827")]
         var actions: [UIMenuElement] = [
+            UIMenu(title: "", options: .displayInline, children: block.parentID != nil ? [] : [
+                UIAction(title: "Trazer para a frente", image: UIImage(systemName: "square.3.layers.3d.top.filled"),
+                         handler: update { [weak self] in $0.layout.zIndex = self?.frontIndex(for: $0) ?? $0.layout.zIndex }),
+                UIAction(title: "Enviar para trás", image: UIImage(systemName: "square.3.layers.3d.bottom.filled"),
+                         handler: update { [weak self] in $0.layout.zIndex = self?.backIndex(for: $0) ?? $0.layout.zIndex }),
+            ]),
             UIAction(title: "Conectar a outro bloco") { [weak self] _ in self?.connectingFrom = id },
             UIAction(title: "Redimensionar") { [weak self] _ in self?.resize(block) },
             UIAction(title: "Girar 90°", handler: update { var p = $0.effectivePresentation; p.rotationRadians += .pi / 2; $0.presentation = p }),

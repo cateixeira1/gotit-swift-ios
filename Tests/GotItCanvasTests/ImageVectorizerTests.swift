@@ -71,7 +71,7 @@ private func distance(_ p: CanvasPoint, _ x: Double, _ y: Double) -> Double { hy
     let cleaned = ImageVectorizer.removingPaper(image)
     #expect(cleaned.alpha(5 * 64 + 5) == 0)
     #expect(cleaned.alpha(32 * 64 + 32) == 255)
-    #expect(cleaned.rgba[(32 * 64 + 32) * 4] == 20, "colours are untouched")
+    #expect(abs(Int(cleaned.rgba[(32 * 64 + 32) * 4]) - 20) <= 3, "colour kept (lit as on white paper)")
 }
 
 @Test func onATransparentBackgroundTheMarksAreFoundToo() {
@@ -87,4 +87,32 @@ private func distance(_ p: CanvasPoint, _ x: Double, _ y: Double) -> Double { hy
     let strokes = ImageVectorizer.trace(image).sorted { $0.length > $1.length }
     #expect(strokes.count == 2)
     #expect(strokes.first.map { abs($0.length - 78) < 8 } == true)
+}
+
+@Test func unevenlyLitPaperGoesAwayEverywhereAndTheLinesStay() {
+    // A sheet lit from the left: paper from 0.95 down to 0.45 on the right, where it is darker than
+    // the ink on the left. Lines drawn at 40% of the paper's brightness around them.
+    let w = 240, h = 160
+    var rgba = [UInt8](repeating: 255, count: w * h * 4)
+    func isLine(_ x: Int, _ y: Int) -> Bool { (y % 40 >= 18 && y % 40 <= 21 && x > 10 && x < w - 10) || (x % 60 >= 28 && x % 60 <= 30) }
+    for y in 0..<h { for x in 0..<w {
+        let paper = 0.95 - 0.5 * Double(x) / Double(w)
+        let value = UInt8((255 * (isLine(x, y) ? 0.4 * paper : paper)).rounded())
+        let i = (y * w + x) * 4
+        rgba[i] = value; rgba[i + 1] = value; rgba[i + 2] = value
+    } }
+    // A few lone specks of dust.
+    for (x, y) in [(5, 5), (100, 150), (200, 8)] { let i = (y * w + x) * 4; rgba[i] = 20; rgba[i + 1] = 20; rgba[i + 2] = 20 }
+    let cleaned = ImageVectorizer.removingPaper(RasterImage(width: w, height: h, rgba: rgba))
+    var paperLeft = 0, linesLost = 0, lines = 0
+    for y in 0..<h { for x in 0..<w {
+        let a = cleaned.alpha(y * w + x)
+        if isLine(x, y) { lines += 1; if a < 200 { linesLost += 1 } } else if a > 40 { paperLeft += 1 }
+    } }
+    #expect(paperLeft < w * h / 200, "paper left: \(paperLeft)")
+    #expect(linesLost < lines / 50, "lines lost: \(linesLost) of \(lines)")
+    #expect(cleaned.alpha(5 * w + 5) == 0 && cleaned.alpha(150 * w + 100) == 0, "specks go")
+    // The same ink is about the same colour in the light and in the shadow.
+    let left = Int(cleaned.rgba[(19 * w + 20) * 4]), right = Int(cleaned.rgba[(19 * w + 220) * 4])
+    #expect(abs(left - right) < 30)
 }

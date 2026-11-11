@@ -116,6 +116,54 @@ enum ImageCutout {
         return Cutout(image: ImageVectorizer.removingPaper(image), method: .paper)
     }
 
+    /// What the preview shows and what "Aplicar" uses.
+    struct Processed: Sendable {
+        var cutout: Cutout
+        var traced: [TracedStroke]
+        /// The strokes drawn on white, for the vectorising preview.
+        var strokePreview: RasterImage?
+        /// Said to the user when the chosen method could not do its job.
+        var note: String?
+    }
+
+    /// Runs off the main thread: the chosen method (no guessing), then the strokes if asked.
+    static func process(_ source: RasterImage, method: Method, sensitivity: Double, vectorize: Bool) -> Processed {
+        var note: String?
+        let cutout: Cutout
+        if method == .subject, let subject = liftSubject(source) { cutout = Cutout(image: subject, method: .subject) }
+        else {
+            if method == .subject { note = "Nenhum objeto foi encontrado na foto; foi usado o modo Papel ou quadro." }
+            cutout = Cutout(image: ImageVectorizer.removingPaper(source, sensitivity: sensitivity), method: .paper)
+        }
+        guard vectorize else { return Processed(cutout: cutout, traced: [], strokePreview: nil, note: note) }
+        let traced = ImageVectorizer.trace(cutout.image)
+        if traced.isEmpty { note = "Nenhum traço foi encontrado." }
+        return Processed(cutout: cutout, traced: traced, strokePreview: drawn(traced, width: cutout.image.width, height: cutout.image.height), note: note)
+    }
+
+    /// Traced strokes drawn with their colour and thickness on a white picture of the same size.
+    static func drawn(_ strokes: [TracedStroke], width: Int, height: Int) -> RasterImage? {
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.translateBy(x: 0, y: CGFloat(height)); context.scaleBy(x: 1, y: -1)
+        context.setLineCap(.round); context.setLineJoin(.round)
+        for stroke in strokes {
+            let hex = UInt32(stroke.color.dropFirst(), radix: 16) ?? 0
+            context.setStrokeColor(CGColor(red: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1))
+            context.setLineWidth(stroke.width)
+            guard let first = stroke.points.first else { continue }
+            context.move(to: CGPoint(x: first.x, y: first.y))
+            for point in stroke.points.dropFirst() { context.addLine(to: CGPoint(x: point.x, y: point.y)) }
+            if stroke.points.count == 1 || stroke.points.first == stroke.points.last && stroke.points.count == 2 {
+                context.addLine(to: CGPoint(x: first.x + 0.01, y: first.y))
+            }
+            context.strokePath()
+        }
+        guard let image = context.makeImage() else { return nil }
+        return raster(image)
+    }
+
     static func png(_ image: RasterImage) -> Data? {
         guard let cg = cgImage(image) else { return nil }
         let data = NSMutableData()

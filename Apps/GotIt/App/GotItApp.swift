@@ -356,6 +356,8 @@ final class AppModel {
             guard let first = working.textFlowFragments(story: story).first else { continue }
             do {
                 let result = try TextPagination.reflow(first, in: working, selection: NSRange(location: 0, length: 0))
+                // The text did not need to move (the object went somewhere it does not wrap): nothing to apply.
+                guard !result.commands.isEmpty else { continue }
                 working = try CommandEngine.applying(result.commands, to: working)
                 extra += result.commands
             } catch { self.error = String(describing: error) }

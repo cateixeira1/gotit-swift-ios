@@ -213,13 +213,31 @@ final class EditorTests: XCTestCase {
         window.rootViewController = controller; window.makeKeyAndVisible()
         controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
 
+        /// The preview sheet: it guesses paper for this picture; "Aplicar" changes the note.
+        func preview() async throws -> CutoutPreviewController {
+            for _ in 0..<200 where controller.presentedViewController == nil { try await Task.sleep(for: .milliseconds(25)) }
+            let sheet = try XCTUnwrap((controller.presentedViewController as? UINavigationController)?.viewControllers.first as? CutoutPreviewController)
+            sheet.loadViewIfNeeded()
+            await sheet.finished()
+            return sheet
+        }
         controller.cutOut(picture.id, vectorize: false)
+        var sheet = try await preview()
+        XCTAssertEqual(sheet.method, .paper)
+        XCTAssertNil(png, "nothing changes before Aplicar")
+        sheet.slider.value = 0.9; sheet.slider.sendActions(for: .valueChanged)
+        try await Task.sleep(for: .milliseconds(400)); await sheet.finished()
+        sheet.apply()
         await fulfillment(of: [replaced], timeout: 30)
+        for _ in 0..<200 where controller.presentedViewController != nil { try await Task.sleep(for: .milliseconds(25)) }
         let cut = try XCTUnwrap(png.flatMap(UIImage.init(data:)).flatMap { ImageCutout.raster($0, maxSide: 400) })
         XCTAssertEqual(cut.alpha(5 * cut.width + 5), 0, "paper is transparent")
         XCTAssertGreaterThan(cut.alpha(50 * cut.width + 100), 200, "the line stays")
 
         controller.cutOut(picture.id, vectorize: true)
+        sheet = try await preview()
+        XCTAssertEqual(sheet.result?.traced.count, 1)
+        sheet.apply()
         await fulfillment(of: [drawn], timeout: 30)
         XCTAssertEqual(extra, [.removeSubtree(picture.id)])
         let strokes = try XCTUnwrap(drawing).strokes
@@ -524,6 +542,32 @@ final class EditorTests: XCTestCase {
         XCTAssertTrue(model.trashedSummaries.isEmpty)
         XCTAssertFalse(model.summaries.contains { $0.id == note.id })
         XCTAssertNil(model.error)
+    }
+
+    /// Moving an object to another page lays out the text it was next to again; when that text
+    /// does not need to move, the move is applied without any warning.
+    func testMovingAnObjectToAnotherPageShowsNoWarning() async throws {
+        let model = AppModel()
+        await model.start()
+        await model.createNote()
+        let note = try XCTUnwrap(model.document)
+        let first = try XCTUnwrap(note.pages.first?.id)
+        var text = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 24, y: 24, width: 300, height: 44)), content: .text(.init("abc")))
+        text.textFlowID = text.id
+        let sticker = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 40, y: 500, width: 80, height: 80)), content: .shape(.init(kind: .rectangle)))
+        model.enqueue([.insertBlock(text), .insertBlock(sticker)], pageID: first, documentID: note.id)
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        model.addPage()
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        let second = try XCTUnwrap(model.document?.pages.last?.id)
+        for (page, y) in [(second, 100.0), (first, 300.0), (second, 200.0)] {
+            var moved = try XCTUnwrap(model.document?.blocks.first { $0.id == sticker.id })
+            moved.pageID = page; moved.layout.frame.y = y
+            model.enqueue([.replaceBlock(moved)], pageID: first, documentID: note.id)
+            while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertNil(model.error)
+            XCTAssertEqual(model.document?.blocks.first { $0.id == sticker.id }?.pageID, page)
+        }
     }
 
     func testUndoAfterTextFlowsOntoNewPagesRestoresOnePageAndRedoBringsThemBack() async throws {

@@ -185,9 +185,9 @@ final class EditorTests: XCTestCase {
         window.isHidden = true
     }
 
-    /// A drawing photographed on paper: "Remover fundo" clears the paper; "… e vetorizar" turns the
-    /// lines into pen strokes where the picture was and removes the picture, in one step.
-    func testPictureBackgroundIsRemovedAndItsLinesBecomeStrokes() async throws {
+    /// A drawing photographed on paper: "Remover fundo" previews the paper removed; the brush
+    /// erases what was kept and brings back what was removed (undo included); "Aplicar" stores it.
+    func testPictureBackgroundIsRemovedAndRetouchedWithTheBrush() async throws {
         let size = CGSize(width: 200, height: 100)
         let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
         let sketch = UIGraphicsImageRenderer(size: size, format: format).image { context in
@@ -199,13 +199,9 @@ final class EditorTests: XCTestCase {
         let picture = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 100, y: 200, width: 200, height: 100)), content: .image(.init(hash: hash)))
         let document = try CommandEngine.applying([.registerAsset(Asset(hash: hash, mediaType: "image/png", byteCount: 1)), .insertBlock(picture)],
                                                   to: CanvasDocument(title: "Fundo"))
-        let replaced = expectation(description: "png"), drawn = expectation(description: "strokes")
-        var png: Data?, drawing: PKDrawing?, extra: [DocumentCommand] = []
+        let replaced = expectation(description: "png")
+        var png: Data?
         let controller = CanvasViewController(configuration: CanvasEditor(document: document,
-            onDrawing: { save, commands in
-                if case .full(let data) = save { drawing = try? PKDrawing(data: data) }
-                extra = commands; drawn.fulfill()
-            },
             image: { $0 == hash ? sketch : nil }, onCommands: { _ in }, onReplaceImage: { _, data in png = data; replaced.fulfill() }))
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)
@@ -213,38 +209,31 @@ final class EditorTests: XCTestCase {
         window.rootViewController = controller; window.makeKeyAndVisible()
         controller.view.setNeedsLayout(); controller.view.layoutIfNeeded()
 
-        /// The preview sheet: it guesses paper for this picture; "Aplicar" changes the note.
-        func preview() async throws -> CutoutPreviewController {
-            for _ in 0..<200 where controller.presentedViewController == nil { try await Task.sleep(for: .milliseconds(25)) }
-            let sheet = try XCTUnwrap((controller.presentedViewController as? UINavigationController)?.viewControllers.first as? CutoutPreviewController)
-            sheet.loadViewIfNeeded()
-            await sheet.finished()
-            return sheet
-        }
-        controller.cutOut(picture.id, vectorize: false)
-        var sheet = try await preview()
+        controller.cutOut(picture.id)
+        for _ in 0..<200 where controller.presentedViewController == nil { try await Task.sleep(for: .milliseconds(25)) }
+        let sheet = try XCTUnwrap((controller.presentedViewController as? UINavigationController)?.viewControllers.first as? CutoutPreviewController)
+        sheet.loadViewIfNeeded()
+        await sheet.finished()
         XCTAssertEqual(sheet.method, .paper)
         XCTAssertNil(png, "nothing changes before Aplicar")
-        sheet.slider.value = 0.9; sheet.slider.sendActions(for: .valueChanged)
-        try await Task.sleep(for: .milliseconds(400)); await sheet.finished()
+        let w = 200
+        XCTAssertEqual(sheet.mask[5 * w + 5], 0); XCTAssertGreaterThan(sheet.mask[50 * w + 100], 200)
+        // Erase the left half of the line, bring back a patch of paper, undo once.
+        sheet.paint([.init(x: 10, y: 50), .init(x: 100, y: 50)], radius: 8, mode: .erase)
+        XCTAssertEqual(sheet.mask[50 * w + 60], 0)
+        sheet.paint([.init(x: 150, y: 15)], radius: 6, mode: .restore)
+        XCTAssertEqual(sheet.mask[15 * w + 150], 255)
+        sheet.paint([.init(x: 30, y: 85)], radius: 6, mode: .restore)
+        sheet.undoRetouch()
+        XCTAssertEqual(sheet.mask[85 * w + 30], 0, "undone")
         sheet.apply()
         await fulfillment(of: [replaced], timeout: 30)
-        for _ in 0..<200 where controller.presentedViewController != nil { try await Task.sleep(for: .milliseconds(25)) }
         let cut = try XCTUnwrap(png.flatMap(UIImage.init(data:)).flatMap { ImageCutout.raster($0, maxSide: 400) })
-        XCTAssertEqual(cut.alpha(5 * cut.width + 5), 0, "paper is transparent")
-        XCTAssertGreaterThan(cut.alpha(50 * cut.width + 100), 200, "the line stays")
-
-        controller.cutOut(picture.id, vectorize: true)
-        sheet = try await preview()
-        XCTAssertEqual(sheet.result?.traced.count, 1)
-        sheet.apply()
-        await fulfillment(of: [drawn], timeout: 30)
-        XCTAssertEqual(extra, [.removeSubtree(picture.id)])
-        let strokes = try XCTUnwrap(drawing).strokes
-        XCTAssertEqual(strokes.count, 1)
-        let bounds = try XCTUnwrap(strokes.first).renderBounds
-        XCTAssertEqual(bounds.midY, 250, accuracy: 4)                       // where the line is on the page
-        XCTAssertEqual(bounds.minX, 120, accuracy: 8); XCTAssertEqual(bounds.maxX, 280, accuracy: 8)
+        XCTAssertEqual(cut.alpha(50 * cut.width + 60), 0, "erased part of the line")
+        XCTAssertGreaterThan(cut.alpha(50 * cut.width + 160), 200, "the rest of the line stays")
+        XCTAssertEqual(cut.alpha(15 * cut.width + 150), 255, "restored paper, with its own colour")
+        XCTAssertGreaterThan(Int(cut.rgba[(15 * cut.width + 150) * 4]), 200)
+        XCTAssertEqual(cut.alpha(5 * cut.width + 5), 0)
         window.isHidden = true
     }
 

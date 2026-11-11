@@ -4,20 +4,17 @@ import Vision
 import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
-import PencilKit
 import GotItDomain
 import GotItCanvas
 
-/// Background removal and vectorisation of a picture on the page.
+/// Background removal of a picture on the page.
 ///
 /// - Photos (a person, an object, an animal): Vision's subject lifting
 ///   (`VNGenerateForegroundInstanceMaskRequest`, iOS 17) keeps the subjects and clears the rest.
 /// - Drawings and writing on paper or a whiteboard: the light paper is made transparent
-///   (`ImageVectorizer.removingPaper`); subject lifting is not made for line drawings.
+///   (`PaperRemoval.removingPaper`); subject lifting is not made for line drawings.
 ///   This is also the fallback when Vision finds no subject or cannot run (the simulator).
-///
-/// Vectorising traces the lines of the cut-out into pen strokes along their middle
-/// (`ImageVectorizer.trace`), which then behave like strokes drawn on the page.
+/// Either result can then be retouched with a brush (`MaskBrush`) in the preview.
 enum ImageCutout {
     enum Method: Sendable { case subject, paper }
 
@@ -113,55 +110,33 @@ enum ImageCutout {
     /// Runs off the main thread.
     static func removeBackground(_ image: RasterImage) -> Cutout {
         if !looksLikePaper(image), let subject = liftSubject(image) { return Cutout(image: subject, method: .subject) }
-        return Cutout(image: ImageVectorizer.removingPaper(image), method: .paper)
+        return Cutout(image: PaperRemoval.removingPaper(image), method: .paper)
     }
 
     /// What the preview shows and what "Aplicar" uses.
     struct Processed: Sendable {
         var cutout: Cutout
-        var traced: [TracedStroke]
-        /// The strokes drawn on white, for the vectorising preview.
-        var strokePreview: RasterImage?
         /// Said to the user when the chosen method could not do its job.
         var note: String?
     }
 
-    /// Runs off the main thread: the chosen method (no guessing), then the strokes if asked.
-    static func process(_ source: RasterImage, method: Method, sensitivity: Double, vectorize: Bool) -> Processed {
-        var note: String?
-        let cutout: Cutout
-        if method == .subject, let subject = liftSubject(source) { cutout = Cutout(image: subject, method: .subject) }
-        else {
-            if method == .subject { note = "Nenhum objeto foi encontrado na foto; foi usado o modo Papel ou quadro." }
-            cutout = Cutout(image: ImageVectorizer.removingPaper(source, sensitivity: sensitivity), method: .paper)
-        }
-        guard vectorize else { return Processed(cutout: cutout, traced: [], strokePreview: nil, note: note) }
-        let traced = ImageVectorizer.trace(cutout.image)
-        if traced.isEmpty { note = "Nenhum traço foi encontrado." }
-        return Processed(cutout: cutout, traced: traced, strokePreview: drawn(traced, width: cutout.image.width, height: cutout.image.height), note: note)
+    /// Runs off the main thread: the chosen method, no guessing.
+    static func process(_ source: RasterImage, method: Method, sensitivity: Double) -> Processed {
+        if method == .subject, let subject = liftSubject(source) { return Processed(cutout: Cutout(image: subject, method: .subject)) }
+        return Processed(cutout: Cutout(image: PaperRemoval.removingPaper(source, sensitivity: sensitivity), method: .paper),
+                         note: method == .subject ? "Nenhum objeto foi encontrado na foto; foi usado o modo Papel ou quadro." : nil)
     }
 
-    /// Traced strokes drawn with their colour and thickness on a white picture of the same size.
-    static func drawn(_ strokes: [TracedStroke], width: Int, height: Int) -> RasterImage? {
-        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        context.translateBy(x: 0, y: CGFloat(height)); context.scaleBy(x: 1, y: -1)
-        context.setLineCap(.round); context.setLineJoin(.round)
-        for stroke in strokes {
-            let hex = UInt32(stroke.color.dropFirst(), radix: 16) ?? 0
-            context.setStrokeColor(CGColor(red: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1))
-            context.setLineWidth(stroke.width)
-            guard let first = stroke.points.first else { continue }
-            context.move(to: CGPoint(x: first.x, y: first.y))
-            for point in stroke.points.dropFirst() { context.addLine(to: CGPoint(x: point.x, y: point.y)) }
-            if stroke.points.count == 1 || stroke.points.first == stroke.points.last && stroke.points.count == 2 {
-                context.addLine(to: CGPoint(x: first.x + 0.01, y: first.y))
-            }
-            context.strokePath()
+    /// The cut-out with a retouched mask: its colours where it kept the picture, the original
+    /// picture's colours where the brush brought pixels back.
+    static func composed(_ cutout: RasterImage, source: RasterImage, mask: [UInt8]) -> RasterImage {
+        var output = cutout
+        let sameSize = cutout.width == source.width && cutout.height == source.height
+        for i in 0..<(cutout.width * cutout.height) {
+            if sameSize, cutout.rgba[i * 4 + 3] == 0 { for c in 0..<3 { output.rgba[i * 4 + c] = source.rgba[i * 4 + c] } }
+            output.rgba[i * 4 + 3] = mask[i]
         }
-        guard let image = context.makeImage() else { return nil }
-        return raster(image)
+        return output
     }
 
     static func png(_ image: RasterImage) -> Data? {
@@ -170,42 +145,6 @@ enum ImageCutout {
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, cg, nil)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
-    }
-
-    /// Traced strokes placed where the picture is on the page: through its crop, scaled to its
-    /// frame and turned with it. Points outside the visible (cropped) part are left out.
-    @MainActor static func pageStrokes(_ traced: [TracedStroke], imageSize: (width: Int, height: Int), frame: CGRect,
-                                       crop: LogicalRect?, rotation: Double) -> [PKStroke] {
-        let crop = crop ?? LogicalRect(x: 0, y: 0, width: 1, height: 1)
-        let sx = Double(frame.width) / (crop.width * Double(imageSize.width)), sy = Double(frame.height) / (crop.height * Double(imageSize.height))
-        let center = CGPoint(x: frame.midX, y: frame.midY)
-        let turn = CGAffineTransform(rotationAngle: rotation)
-        func place(_ p: CanvasPoint) -> CGPoint? {
-            let u = p.x / Double(imageSize.width), v = p.y / Double(imageSize.height)
-            guard u >= crop.x - 1e-6, v >= crop.y - 1e-6, u <= crop.x + crop.width + 1e-6, v <= crop.y + crop.height + 1e-6 else { return nil }
-            let x = Double(frame.minX) + (u - crop.x) / crop.width * Double(frame.width) - Double(center.x)
-            let y = Double(frame.minY) + (v - crop.y) / crop.height * Double(frame.height) - Double(center.y)
-            let local = CGPoint(x: x, y: y).applying(turn)
-            return CGPoint(x: center.x + local.x, y: center.y + local.y)
-        }
-        var strokes: [PKStroke] = []
-        let created = Date()
-        for line in traced {
-            let ink = PKInk(.pen, color: UIColor(hex: line.color))
-            let width = max(0.5, line.width * (sx + sy) / 2)
-            // Split where the line leaves the visible part of the picture.
-            var runs: [[CGPoint]] = [[]]
-            for point in line.points { if let placed = place(point) { runs[runs.count - 1].append(placed) } else if !(runs.last?.isEmpty ?? true) { runs.append([]) } }
-            for run in runs where !run.isEmpty {
-                let points = run.count == 1 ? [run[0], run[0]] : run
-                let controls = points.enumerated().map { index, location in
-                    PKStrokePoint(location: location, timeOffset: TimeInterval(index) * 0.016, size: CGSize(width: width, height: width),
-                                  opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
-                }
-                strokes.append(PKStroke(ink: ink, path: PKStrokePath(controlPoints: controls, creationDate: created)))
-            }
-        }
-        return strokes
     }
 }
 #endif

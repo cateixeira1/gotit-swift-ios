@@ -1539,33 +1539,28 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         } catch { configuration.onError(error) }
     }
 
-    // MARK: Background removal and vectorising
+    // MARK: Background removal
 
     private var cutouts: [UUID: UIActivityIndicatorView] = [:]
 
-    /// Removes the picture's background (subject lifting for photos, paper for drawings); with
-    /// `vectorize`, its lines become pen strokes in its place (one undo step brings the picture back).
-    /// The work runs off the main thread; a spinner sits on the picture meanwhile.
-    func cutOut(_ id: UUID, vectorize: Bool) {
+    /// Removes the picture's background (subject lifting for photos, paper for drawings), after a
+    /// preview where the result can be retouched. The work runs off the main thread.
+    func cutOut(_ id: UUID) {
         guard cutouts[id] == nil, let block = configuration.document.blocks.first(where: { $0.id == id }),
               let hash = block.content.assetHash, let image = configuration.image(hash),
-              let source = ImageCutout.raster(image, maxSide: vectorize ? 1024 : 2048) else {
+              let source = ImageCutout.raster(image, maxSide: 2048) else {
             configuration.onError(DocumentError.invalid("Não foi possível ler esta imagem.")); return
         }
-        // A preview first: the user picks photo or paper and sees the result before the note changes.
-        let sheet = CutoutPreviewController(source: source, vectorize: vectorize) { [weak self] processed in
-            self?.applyCutout(id, processed, vectorize: vectorize)
-        }
+        let sheet = CutoutPreviewController(source: source) { [weak self] processed in self?.applyCutout(id, processed) }
         let navigation = UINavigationController(rootViewController: sheet)
         navigation.modalPresentationStyle = .pageSheet
         navigation.sheetPresentationController?.detents = [.large()]
+        // Painting on the preview must not pull the sheet down.
+        navigation.isModalInPresentation = true
         present(navigation, animated: true)
     }
 
-    private func applyCutout(_ id: UUID, _ processed: ImageCutout.Processed, vectorize: Bool) {
-        guard !vectorize else {
-            finishCutout(id, cut: processed.cutout, png: nil, traced: processed.traced, vectorize: true); return
-        }
+    private func applyCutout(_ id: UUID, _ processed: ImageCutout.Processed) {
         let spinner = UIActivityIndicatorView(style: .large)
         spinner.color = .systemBlue; spinner.accessibilityIdentifier = "cutoutProgress"
         if let view = blockViews[id] { spinner.center = view.center }
@@ -1576,26 +1571,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             let png = await Task.detached(priority: .userInitiated) { ImageCutout.png(image) }.value
             guard let self else { return }
             self.cutouts.removeValue(forKey: id)?.removeFromSuperview()
-            self.finishCutout(id, cut: processed.cutout, png: png, traced: [], vectorize: false)
+            // The picture may have been deleted meanwhile.
+            guard self.configuration.document.blocks.contains(where: { $0.id == id }) else { return }
+            guard let png else { self.configuration.onError(DocumentError.invalid("Não foi possível gravar a imagem sem fundo.")); return }
+            self.configuration.onReplaceImage?(id, png)
         }
-    }
-
-    private func finishCutout(_ id: UUID, cut: ImageCutout.Cutout, png: Data?, traced: [TracedStroke], vectorize: Bool) {
-        // The picture may have been deleted meanwhile.
-        guard let block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
-        guard vectorize else {
-            guard let png else { configuration.onError(DocumentError.invalid("Não foi possível gravar a imagem sem fundo.")); return }
-            configuration.onReplaceImage?(id, png)
-            return
-        }
-        guard !traced.isEmpty else { configuration.onError(DocumentError.invalid("Nenhum traço foi encontrado nesta imagem.")); return }
-        let frame = frames[id] ?? block.layout.frame
-        let strokes = ImageCutout.pageStrokes(traced, imageSize: (cut.image.width, cut.image.height),
-                                              frame: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
-                                              crop: block.effectivePresentation.imageCrop, rotation: block.effectivePresentation.rotationRadians)
-        if selectedObjectID == id { selectedObjectID = nil; croppingID = nil }
-        applyingDrawing = true; ink.drawing = PKDrawing(strokes: ink.drawing.strokes + strokes); applyingDrawing = false
-        saveDrawing([.removeSubtree(id)])
     }
 
     // MARK: Tables
@@ -1829,10 +1809,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         if case .pdf = block.content { actions.insert(UIAction(title: "Abrir PDF") { [weak self] _ in self?.configuration.onOpenPDF(id) }, at: 0) }
         switch block.content {
         case .image, .sticker:
-            actions.insert(UIMenu(title: "", options: .displayInline, children: [
-                UIAction(title: "Remover fundo", image: UIImage(systemName: "person.crop.rectangle.badge.plus")) { [weak self] _ in self?.cutOut(id, vectorize: false) },
-                UIAction(title: "Remover fundo e vetorizar traços", image: UIImage(systemName: "scribble.variable")) { [weak self] _ in self?.cutOut(id, vectorize: true) },
-            ]), at: 0)
+            actions.insert(UIAction(title: "Remover fundo", image: UIImage(systemName: "person.crop.rectangle.badge.plus")) { [weak self] _ in
+                self?.cutOut(id)
+            }, at: 0)
         default: break
         }
         if case .table(let table) = block.content { actions.insert(contentsOf: tableMenu(block, table), at: 0) }

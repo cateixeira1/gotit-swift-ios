@@ -681,10 +681,17 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
         usingTool = true; strokesAtStart = canvasView.drawing.strokes.count
+        handwritingTimer?.invalidate()       // still writing
         shapeCheckGeneration += 1          // writing continues: wait for the next pause
     }
     public func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         usingTool = false; toolEndedAt = Date()
+        if configuration.session?.handwritingToText == true, configuration.tool != .eraser {
+            handwritingTimer?.invalidate()
+            handwritingTimer = Timer.scheduledTimer(withTimeInterval: 1.8, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.convertHandwriting() }
+            }
+        }
         // PencilKit can deliver the final drawing change after the tool-end callback.
         Task { @MainActor [weak self] in await Task.yield(); self?.processInk() }
     }
@@ -738,6 +745,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 suspect = (conversion, earlier.union([key]))
             }
             recentInk[key] = drawn
+            if configuration.session?.handwritingToText == true { handwritingKeys.insert(key) }
             if InkIntent.holdDuration(drawn, screenScale: scale) >= InkIntent.holdToSnap { held.append(key) }
             else { awaitingShape.append(key) }
         }
@@ -1662,6 +1670,66 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         stopAudio()
+    }
+
+    // MARK: Handwriting to text
+
+    private var handwritingTimer: Timer?
+    /// Strokes written since the last conversion (figures and lines turned into shapes drop out).
+    private var handwritingKeys: Set<Double> = []
+    private var readingHandwriting = false
+
+    /// A moment after the pen stops, what was written becomes text in the chosen font, where it
+    /// was written and about as large; one undo step brings the writing back. Strokes that do not
+    /// read as text (a drawing, a scribble) stay as they are.
+    func convertHandwriting() {
+        guard !readingHandwriting, !usingTool, let session = configuration.session, session.handwritingToText else { return }
+        let keys = handwritingKeys
+        handwritingKeys.removeAll()
+        let strokes = ink.drawing.strokes.filter { keys.contains(Self.key($0)) }
+        guard !strokes.isEmpty else { return }
+        let groups = HandwritingReader.lines(strokes.map(\.renderBounds)).map { $0.map { strokes[$0] } }
+        let pictures: [(strokes: [PKStroke], bounds: CGRect, image: CGImage)] = groups.compactMap { group in
+            let bounds = group.map(\.renderBounds).reduce(CGRect.null) { $0.union($1) }
+            guard bounds.height >= 8, let image = HandwritingReader.picture(of: group, bounds: bounds) else { return nil }
+            return (group, bounds, image)
+        }
+        guard !pictures.isEmpty else { return }
+        readingHandwriting = true
+        let images = pictures.map(\.image)
+        let language = [Locale.current.language.languageCode?.identifier == "pt" ? Locale.current.identifier.replacingOccurrences(of: "_", with: "-") : "pt-BR", "en-US"]
+        let font = session.handwritingFont
+        Task { [weak self] in
+            let readings = await Task.detached(priority: .userInitiated) { images.map { HandwritingReader.read($0, languages: language) } }.value
+            guard let self else { return }
+            self.readingHandwriting = false
+            guard !self.usingTool else { self.handwritingKeys.formUnion(keys); return }
+            var removed = Set<Double>()
+            var commands: [DocumentCommand] = []
+            var order = (self.configuration.document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? 0) + 1
+            for (picture, reading) in zip(pictures, readings) {
+                guard let reading, reading.confidence >= 0.35, reading.text.contains(where: { $0.isLetter || $0.isNumber }) else { continue }
+                // Still there (not erased or turned into a shape meanwhile).
+                let alive = Set(self.ink.drawing.strokes.map(Self.key))
+                let groupKeys = picture.strokes.map(Self.key)
+                guard groupKeys.allSatisfy(alive.contains) else { continue }
+                let lineHeight = picture.bounds.height / CGFloat(max(1, reading.lines))
+                let size = min(96, max(10, (lineHeight * 0.78).rounded()))
+                let block = CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(
+                        x: picture.bounds.minX, y: picture.bounds.minY - size * 0.15,
+                        width: max(picture.bounds.width * 1.15, 60), height: max(picture.bounds.height, size * 1.4))),
+                    style: .init(fontName: font, fontSize: size, foreground: "#111827"),
+                    content: .text(RichText(reading.text)), presentation: .init(wrap: .none))
+                order += 1
+                commands.append(.insertBlock(block))
+                removed.formUnion(groupKeys)
+            }
+            guard !commands.isEmpty else { return }
+            self.applyingDrawing = true
+            self.ink.drawing = PKDrawing(strokes: self.ink.drawing.strokes.filter { !removed.contains(Self.key($0)) })
+            self.applyingDrawing = false
+            self.saveDrawing(commands)
+        }
     }
 
     // MARK: Background removal

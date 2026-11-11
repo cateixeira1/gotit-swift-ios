@@ -31,6 +31,9 @@ struct EditorWorkspace: View {
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
     @State private var showPaper = false
+    @AppStorage("handwritingToText") private var handwritingToText = false
+    @AppStorage("handwritingFont") private var handwritingFont = HandwritingFonts.defaultFont
+    @State private var importingFont = false
     @State private var reader: PDFTarget?
     private struct PDFTarget: Identifiable { var id: UUID; var documentID: UUID; var url: URL }
     @State private var photo: PhotosPickerItem?
@@ -71,6 +74,16 @@ struct EditorWorkspace: View {
         }
         .sheet(isPresented: $showStickers) { stickerPicker.presentationDetents([.medium, .large]) }
         .sheet(item: $pageSetup) { focus in PageSetupView(model: model, settings: document.canvas, focus: focus) }
+        .onAppear { session.handwritingToText = handwritingToText; session.handwritingFont = handwritingFont }
+        .onChange(of: handwritingToText) { _, on in session.handwritingToText = on }
+        .onChange(of: handwritingFont) { _, name in session.handwritingFont = name }
+        .fileImporter(isPresented: $importingFont, allowedContentTypes: [.font], allowsMultipleSelection: true) { result in
+            switch result {
+            case .success(let urls):
+                if let first = model.importFonts(urls).first { handwritingFont = first }
+            case .failure(let error): model.error = error.localizedDescription
+            }
+        }
         .sheet(isPresented: $showPaper) {
             PaperPicker(model: model, pageID: pageID,
                         current: document.pages.first { $0.id == pageID }?.paper?.style ?? document.canvas.paper)
@@ -390,6 +403,18 @@ struct EditorWorkspace: View {
                         Text("\(inkWidth.formatted(.number.precision(.fractionLength(1))))").font(.caption2.monospacedDigit()).frame(width: 26)
                     }.disabled(tool == .eraser)
                     if tool == .eraser { Toggle("Apagar o traço inteiro", isOn: $vectorEraser).font(.caption) }
+                }
+                toolSection("Escrita vira texto") {
+                    Toggle("Converter o que escrevo com a caneta", isOn: $handwritingToText).font(.caption)
+                        .accessibilityIdentifier("handwritingToggle")
+                    if handwritingToText {
+                        Picker("Fonte", selection: $handwritingFont) {
+                            ForEach(model.handwritingFonts, id: \.self) { name in
+                                Text(HandwritingFonts.displayName(name)).font(.custom(name, size: 17)).tag(name)
+                            }
+                        }.pickerStyle(.menu).accessibilityIdentifier("handwritingFont")
+                        Button("Importar fonte (.ttf, .otf)…") { importingFont = true }.font(.caption)
+                    }
                 }
                 toolSection("Inserir") {
                     TileGrid(columns: columns, spacing: 8) {

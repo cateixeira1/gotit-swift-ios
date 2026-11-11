@@ -83,6 +83,9 @@ public final class EditorSession {
     /// An Apple Pencil draws and fingers navigate, tap and select (set on the first Pencil touch,
     /// or by the system setting "Only Draw with Apple Pencil").
     @ObservationIgnored public private(set) var prefersPencil = false
+    /// Pen writing becomes typed text in `handwritingFont` a moment after the pen stops.
+    @ObservationIgnored public var handwritingToText = false
+    @ObservationIgnored public var handwritingFont = HandwritingFonts.defaultFont
     @ObservationIgnored var handler: ((TextEditingAction) -> Void)?
     /// Text selected across pages (shown with its own highlight and handles); nil otherwise.
     @ObservationIgnored public var storySelection: StorySelection? {

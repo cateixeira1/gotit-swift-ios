@@ -567,6 +567,28 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(model.document?.blocks.filter { $0.textFlowID != nil }.count, 1)
     }
 
+    /// Handwriting: the bundled fonts are usable, writing splits into lines and paragraphs, and
+    /// Vision reads text drawn in a handwriting font.
+    func testHandwritingFontsAndReading() throws {
+        let model = AppModel()
+        model.registerFonts()
+        for font in HandwritingFonts.bundled { XCTAssertNotNil(UIFont(name: font.postScript, size: 20), font.name) }
+        // Two words on a line, then a second line close below: one block; a far line: another.
+        let boxes = [CGRect(x: 10, y: 10, width: 40, height: 20), CGRect(x: 60, y: 12, width: 50, height: 18),
+                     CGRect(x: 12, y: 40, width: 60, height: 20), CGRect(x: 10, y: 300, width: 40, height: 20)]
+        XCTAssertEqual(HandwritingReader.lines(boxes).map { $0.sorted() }, [[0, 1, 2], [3]])
+        let size = CGSize(width: 520, height: 120)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 2; format.opaque = true
+        let picture = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: size))
+            NSAttributedString(string: "Reunião amanhã", attributes: [.font: UIFont(name: "Caveat-Regular", size: 64)!, .foregroundColor: UIColor.black])
+                .draw(at: CGPoint(x: 12, y: 18))
+        }
+        let reading = try XCTUnwrap(HandwritingReader.read(try XCTUnwrap(picture.cgImage), languages: ["pt-BR"]))
+        XCTAssertTrue(reading.text.lowercased().contains("amanh"), reading.text)
+        XCTAssertEqual(reading.lines, 1)
+    }
+
     /// An audio block shows its length and plays or pauses with a tap.
     func testAudioBlockPlaysAndPausesWithATap() throws {
         // One second of a 440 Hz tone as 16-bit mono WAV.

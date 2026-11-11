@@ -49,6 +49,7 @@ final class AppModel {
 
     func start() async {
         guard store == nil else { return }
+        registerFonts()
         images.totalCostLimit = 32 * 1024 * 1024; images.countLimit = 32
         do {
             var root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("GotItDemo")
@@ -662,6 +663,42 @@ final class AppModel {
         let spot = Placement.beside(audio.layout.frame, width: width, height: cardHeight, on: projection, except: [audio.id])
         enqueue(Stickers.transcript(at: spot, width: width, height: cardHeight, text: text, order: nextRootOrder(in: document)), pageID: page, documentID: document.id)
         return true
+    }
+
+    // MARK: Fonts for handwriting
+
+    /// Bundled handwriting fonts (SIL Open Font License) and the ones the user imported.
+    private(set) var handwritingFonts: [String] = HandwritingFonts.bundled.map(\.postScript)
+    private var fontsFolder: URL? {
+        try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("Fonts", isDirectory: true)
+    }
+
+    /// Makes the bundled and imported fonts usable (called once at start).
+    func registerFonts() {
+        let bundled = ["ttf", "otf"].flatMap { Bundle.main.urls(forResourcesWithExtension: $0, subdirectory: nil) ?? [] }
+        HandwritingFonts.register(bundled)
+        guard let folder = fontsFolder, let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
+        let imported = HandwritingFonts.register(files)
+        handwritingFonts = HandwritingFonts.bundled.map(\.postScript) + imported.filter { !HandwritingFonts.bundled.map(\.postScript).contains($0) }
+    }
+
+    /// Copies font files into the app (they stay on this device) and returns their names.
+    func importFonts(_ urls: [URL]) -> [String] {
+        guard let folder = fontsFolder else { return [] }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var names: [String] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let copy = folder.appendingPathComponent(url.lastPathComponent)
+            try? FileManager.default.removeItem(at: copy)
+            guard (try? FileManager.default.copyItem(at: url, to: copy)) != nil else { continue }
+            if let name = HandwritingFonts.register([copy]).first { names.append(name) }
+            else { try? FileManager.default.removeItem(at: copy); self.error = "“\(url.lastPathComponent)” não é uma fonte que o iOS consiga usar." }
+        }
+        handwritingFonts += names.filter { !handwritingFonts.contains($0) }
+        return names
     }
 
     /// Where a paper style goes.

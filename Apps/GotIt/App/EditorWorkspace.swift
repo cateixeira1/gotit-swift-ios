@@ -31,6 +31,7 @@ struct EditorWorkspace: View {
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
     @State private var showPaper = false
+    @State private var afterTools: (() -> Void)?
     @AppStorage("handwritingToText") private var handwritingToText = false
     @AppStorage("handwritingFont") private var handwritingFont = HandwritingFonts.defaultFont
     @State private var importingFont = false
@@ -68,7 +69,11 @@ struct EditorWorkspace: View {
             NavigationStack { pagesPanel(sheet: true).navigationTitle("Páginas").navigationBarTitleDisplayMode(.inline).toolbar { Button("Concluir") { showPages = false } } }
                 .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: $showTools) {
+        .sheet(isPresented: $showTools, onDismiss: {
+            // What a tool asked to open, once the tools sheet is really gone (two sheets at once:
+            // the second is dropped, and a fixed delay was not always enough on iOS 26).
+            let next = afterTools; afterTools = nil; next?()
+        }) {
             NavigationStack { toolsPanel(sheet: true).navigationTitle("Ferramentas").navigationBarTitleDisplayMode(.inline).toolbar { Button("Concluir") { showTools = false } } }
                 .presentationDetents([.medium, .large])
         }
@@ -424,14 +429,13 @@ struct EditorWorkspace: View {
                         tile("PDF", "doc.richtext", sheet: sheet) { beginImport(sticker: false, pdf: true) }
                         tile("Vídeo", "video", sheet: sheet) { beginImport(sticker: false, pdf: false, video: true) }
                         tile("Gravar áudio", "mic", sheet: sheet) {
-                            session.perform(.finish); showTools = false
-                            Task { @MainActor in try? await Task.sleep(for: .milliseconds(350)); showRecorder = true }
+                            session.perform(.finish)
+                            afterToolsClose { showRecorder = true }
                         }.accessibilityIdentifier("recordAudio")
                         tile("Arquivo de áudio", "waveform", sheet: sheet) { beginImport(sticker: false, pdf: true, audio: true) }
                         tile("Sticker", "face.smiling", sheet: sheet) {
-                            // The tools sheet closes before the sticker sheet opens (two at once: the second is dropped).
-                            session.perform(.finish); showTools = false
-                            Task { @MainActor in try? await Task.sleep(for: .milliseconds(sheet ? 350 : 0)); showStickers = true }
+                            session.perform(.finish)
+                            afterToolsClose { showStickers = true }
                         }
                     }
                 }
@@ -448,14 +452,14 @@ struct EditorWorkspace: View {
                     toolSection("Página") {
                         TileGrid(columns: columns, spacing: 8) {
                             tile("Cabeçalho e rodapé", "rectangle.topthird.inset.filled", sheet: sheet) {
-                                session.perform(.finish); showTools = false; openPageSetup(.bands)
+                                session.perform(.finish); openPageSetup(.bands)
                             }.accessibilityIdentifier("headerFooter")
                             tile("Numerar páginas", "number", sheet: sheet) {
-                                session.perform(.finish); showTools = false; openPageSetup(.numbers)
+                                session.perform(.finish); openPageSetup(.numbers)
                             }.accessibilityIdentifier("pageNumbers")
                             tile("Papel", "squareshape.split.3x3", sheet: sheet) {
-                                session.perform(.finish); showTools = false
-                                Task { @MainActor in try? await Task.sleep(for: .milliseconds(350)); showPaper = true }
+                                session.perform(.finish)
+                                afterToolsClose { showPaper = true }
                             }.accessibilityIdentifier("paperStyle")
                         }
                     }
@@ -493,23 +497,18 @@ struct EditorWorkspace: View {
                 .overlay(Circle().stroke(.primary.opacity(0.12), lineWidth: 1))
         }.accessibilityLabel("Destacar em \(title)")
     }
-    private func openPageSetup(_ focus: PageSetupView.Focus) {
-        // The tools sheet closes before another sheet is presented.
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(350))
-            pageSetup = focus
-        }
+    private func openPageSetup(_ focus: PageSetupView.Focus) { afterToolsClose { pageSetup = focus } }
+
+    /// Runs `open` once the tools sheet has closed (iPhone), or right away beside the canvas (iPad).
+    private func afterToolsClose(_ open: @escaping () -> Void) {
+        if showTools { afterTools = open; showTools = false } else { open() }
     }
     private func beginImport(sticker: Bool, pdf: Bool, audio: Bool = false, video: Bool = false) {
-        session.perform(.finish); showTools = false
+        session.perform(.finish)
         fileKind = audio ? .audio : .pdf
         pickingVideo = video
         importTarget = .init(documentID: document.id, pageID: pageID, sticker: sticker)
-        // A single sheet closes before the system picker is presented.
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(350))
-            if pdf { showPDF = true } else { showPhotos = true }
-        }
+        afterToolsClose { if pdf { showPDF = true } else { showPhotos = true } }
     }
     private var compactBar: some View {
         HStack {

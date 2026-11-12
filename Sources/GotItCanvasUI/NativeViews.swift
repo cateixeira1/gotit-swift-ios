@@ -57,6 +57,60 @@ enum TextBridge {
         return output
     }
 
+    /// Text on notebook paper: every line of a paragraph takes whole bands of the paper (one, or
+    /// more for large type) with no space added between lines, so each line sits on a rule (TextKit
+    /// puts the extra height of a fixed line above the letters). Paragraph spacing becomes whole
+    /// lines. Returns whether anything changed (callers avoid rewriting text being typed).
+    @discardableResult
+    static func rule(_ text: NSMutableAttributedString, lines: RuledLines) -> Bool {
+        let string = text.string as NSString
+        var changed = false, location = 0
+        while location < string.length {
+            let paragraph = string.paragraphRange(for: NSRange(location: location, length: 0))
+            var size: CGFloat = 0
+            text.enumerateAttribute(.font, in: paragraph) { value, _, _ in size = max(size, (value as? UIFont)?.pointSize ?? 18) }
+            let first = text.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle ?? .default
+            let wanted = ruled(first, fontSize: size, lines: lines)
+            var matches = true
+            text.enumerateAttribute(.paragraphStyle, in: paragraph) { value, _, stop in
+                if (value as? NSParagraphStyle) != wanted { matches = false; stop.pointee = true }
+            }
+            if !matches { text.addAttribute(.paragraphStyle, value: wanted, range: paragraph); changed = true }
+            location = NSMaxRange(paragraph)
+        }
+        return changed
+    }
+
+    /// `style` with the fixed line height of type of `fontSize` on the paper's lines.
+    static func ruled(_ style: NSParagraphStyle, fontSize: CGFloat, lines: RuledLines) -> NSParagraphStyle {
+        let band = CGFloat(lines.spacing)
+        let height = CGFloat(lines.bands(forFontSize: Double(fontSize))) * band
+        if style.minimumLineHeight == height, style.maximumLineHeight == height, style.lineSpacing == 0, style.lineHeightMultiple == 0,
+           style.paragraphSpacingBefore == 0, (style.paragraphSpacing / band).rounded() * band == style.paragraphSpacing { return style }
+        let fixed = (style.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+        fixed.minimumLineHeight = height; fixed.maximumLineHeight = height
+        fixed.lineSpacing = 0; fixed.lineHeightMultiple = 0; fixed.paragraphSpacingBefore = 0
+        fixed.paragraphSpacing = (style.paragraphSpacing / band).rounded() * band
+        return fixed
+    }
+
+    /// Typing attributes that continue on the paper's lines.
+    static func ruledTyping(_ attributes: [NSAttributedString.Key: Any], lines: RuledLines) -> [NSAttributedString.Key: Any] {
+        var typing = attributes
+        let size = (attributes[.font] as? UIFont)?.pointSize ?? 18
+        typing[.paragraphStyle] = ruled(attributes[.paragraphStyle] as? NSParagraphStyle ?? .default, fontSize: size, lines: lines)
+        return typing
+    }
+
+    /// The text of a block as shown on its page: on ruled paper, laid out on the lines.
+    static func shown(_ rich: RichText, block id: UUID, in document: CanvasDocument) -> NSAttributedString {
+        let text = attributed(rich, base: (try? document.resolvedStyle(for: id)) ?? .init())
+        guard document.followsRuledLines(id), let lines = document.canvas.ruledLines else { return text }
+        let mutable = NSMutableAttributedString(attributedString: text)
+        rule(mutable, lines: lines)
+        return mutable
+    }
+
     static func richText(_ text: NSAttributedString) -> RichText {
         var runs: [TextRun] = []
         text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, range, _ in
@@ -179,16 +233,33 @@ final class CanvasObjectView: UIView, UIContextMenuInteractionDelegate {
                 return
             }
             if shape.kind == .transcript {
+                let icon = UIImage(systemName: "waveform.and.person.filled") ?? UIImage(systemName: "text.bubble")
+                if shape.folded != nil {
+                    // Folded: a small rounded square with the icon; a tap opens it again.
+                    let card = UIBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), cornerRadius: min(14, bounds.width / 4))
+                    UIColor(hex: shape.fill ?? "#F5F7FB").setFill(); card.fill()
+                    UIColor(hex: shape.stroke).setStroke(); card.lineWidth = 1; card.stroke()
+                    let side = min(bounds.width, bounds.height) * 0.42
+                    icon?.withTintColor(.systemIndigo, renderingMode: .alwaysOriginal)
+                        .draw(in: CGRect(x: bounds.midX - side / 2, y: bounds.midY - side * 0.5, width: side, height: side * 0.9))
+                    let chevron = UIImage(systemName: "chevron.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8, weight: .bold))
+                    chevron?.withTintColor(.systemIndigo.withAlphaComponent(0.7), renderingMode: .alwaysOriginal)
+                        .draw(at: CGPoint(x: bounds.midX - 4, y: bounds.maxY - 13))
+                    accessibilityLabel = "Transcrição recolhida"; accessibilityHint = "Toque para abrir"
+                    return
+                }
                 // Card with a header: speech-bubble icon and "Transcrição"; the text is the child block.
+                // A tap on the header folds it (the chevron on the right says so).
                 let card = UIBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 12)
                 UIColor(hex: shape.fill ?? "#F5F7FB").setFill(); card.fill()
                 UIColor(hex: shape.stroke).setStroke(); card.lineWidth = 1; card.stroke()
-                let icon = UIImage(systemName: "waveform.and.person.filled") ?? UIImage(systemName: "text.bubble")
                 icon?.withTintColor(.systemIndigo, renderingMode: .alwaysOriginal).draw(in: CGRect(x: 12, y: 9, width: 18, height: 16))
                 NSAttributedString(string: "Transcrição", attributes: [.font: UIFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: UIColor.systemIndigo])
                     .draw(at: CGPoint(x: 36, y: 9))
+                let chevron = UIImage(systemName: "chevron.up", withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+                chevron?.withTintColor(.systemIndigo, renderingMode: .alwaysOriginal).draw(at: CGPoint(x: bounds.maxX - 26, y: 10))
                 UIColor(hex: "#DDE3EC").setFill(); UIBezierPath(rect: CGRect(x: 12, y: 30, width: bounds.width - 24, height: 1)).fill()
-                accessibilityLabel = "Transcrição"
+                accessibilityLabel = "Transcrição"; accessibilityHint = "Toque no cabeçalho para recolher"
                 return
             }
             let area = bounds.insetBy(dx: shape.lineWidth / 2, dy: shape.lineWidth / 2)

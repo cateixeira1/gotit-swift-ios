@@ -164,3 +164,53 @@ import Testing
     json.removeValue(forKey: "background")
     #expect(try JSONDecoder().decode(CanvasPage.self, from: JSONSerialization.data(withJSONObject: json)).background == nil)
 }
+
+// MARK: Ruled notebook paper
+
+@Test func notebookPaperGivesTextLinesFromTheBindingDown() throws {
+    var settings = CanvasSettings()
+    #expect(settings.ruledLines == nil)
+    settings.paper = PaperStyle(kind: .grid)
+    #expect(settings.ruledLines == nil)
+    settings.paper = PaperStyle(kind: .notebook)
+    let lines = try #require(settings.ruledLines)
+    #expect(lines.origin == PaperStyle.notebookTop && lines.spacing == PaperStyle.notebookLine)
+    // A box whose text starts between two rules moves down to the next band.
+    let top = lines.origin + 2.3 * lines.spacing
+    #expect(abs(lines.offset(below: top) - 0.7 * lines.spacing) < 1e-9)
+    #expect(lines.offset(below: lines.origin + 3 * lines.spacing) == 0)
+    #expect(lines.offset(below: lines.origin + 3 * lines.spacing - 0.001) == 0)
+    // Above the binding's edge it starts on the first band.
+    #expect(lines.offset(below: 10) == lines.origin - 10)
+    // The finger's line, and how many bands a line of type takes.
+    #expect(lines.bandTop(containing: lines.origin + 4.6 * lines.spacing) == lines.origin + 4 * lines.spacing)
+    #expect(lines.bandTop(containing: 3) == lines.origin)
+    #expect(lines.bands(forFontSize: 18) == 1 && lines.bands(forFontSize: 21) == 1)
+    #expect(lines.bands(forFontSize: 28) == 2 && lines.bands(forFontSize: 48) == 3)
+}
+
+@Test func onlyTheNotesOwnTextFollowsTheLines() throws {
+    var note = CanvasDocument(title: "N")
+    note.canvas.paper = PaperStyle(kind: .notebook)
+    var story = CanvasBlock(order: 0, layout: .init(mode: .absolute, frame: .init(x: 80, y: 80, width: 300, height: 44)), content: .text(RichText("a")))
+    story.textFlowID = story.id
+    let free = CanvasBlock(order: 1, layout: .init(mode: .absolute, frame: .init(x: 80, y: 300, width: 300, height: 44)), content: .text(RichText("b")))
+    note = try CommandEngine.applying([.insertBlock(story), .insertBlock(free)], to: note)
+    #expect(note.followsRuledLines(story.id))
+    #expect(!note.followsRuledLines(free.id))
+    note.canvas.paper = nil
+    #expect(!note.followsRuledLines(story.id))
+}
+
+@Test func aSimpleNoteIsRuledHalfA4WithItsTextBelowTheBinding() throws {
+    let settings = CanvasSettings.simpleNote()
+    #expect(settings.isSimpleNote && !CanvasSettings().isSimpleNote)
+    #expect(settings.paper?.kind == .notebook)
+    #expect(abs(settings.size.width - 148 * 72 / 25.4) < 1e-9)
+    try settings.validateLayout()
+    #expect(settings.textArea.y > PaperStyle.notebookTop)
+    var note = CanvasDocument(title: "S", canvas: settings)
+    note.title = "S"
+    let data = try JSONEncoder().encode(note)
+    #expect(try JSONDecoder().decode(CanvasDocument.self, from: data).canvas.isSimpleNote)
+}

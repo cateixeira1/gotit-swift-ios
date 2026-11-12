@@ -206,16 +206,26 @@ public struct Shape: Codable, Equatable, Sendable {
     public var vertices: [CanvasPoint]?
     /// Day shown by a calendar sticker, "yyyy-MM-dd".
     public var date: String?
+    /// A transcription card folded down to a small square (its text hidden); nil when open.
+    public var folded: FoldedCard?
     public init(kind: ShapeKind, stroke: String = "#000000", fill: String? = nil, lineWidth: Double = 1, originalStroke: InkStroke? = nil,
-                vertices: [CanvasPoint]? = nil, date: String? = nil) {
+                vertices: [CanvasPoint]? = nil, date: String? = nil, folded: FoldedCard? = nil) {
         self.kind = kind; self.stroke = stroke; self.fill = fill; self.lineWidth = lineWidth
-        self.originalStroke = originalStroke; self.vertices = vertices; self.date = date
+        self.originalStroke = originalStroke; self.vertices = vertices; self.date = date; self.folded = folded
     }
     /// The triangle's corners as fractions of its frame.
     public var triangleCorners: [CanvasPoint] {
         if let vertices, vertices.count == 3, vertices.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) { return vertices }
         return [.init(x: 0.5, y: 0), .init(x: 1, y: 1), .init(x: 0, y: 1)]
     }
+}
+
+/// Where a folded card was open and where it was folded: opening it again restores the open
+/// size, moved by as much as the folded square was moved meanwhile.
+public struct FoldedCard: Codable, Equatable, Sendable {
+    public var expanded: LogicalRect
+    public var folded: LogicalRect
+    public init(expanded: LogicalRect, folded: LogicalRect) { self.expanded = expanded; self.folded = folded }
 }
 
 public struct AssetReference: Codable, Equatable, Sendable {

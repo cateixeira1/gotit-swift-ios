@@ -57,6 +57,9 @@ public struct TextFlowFocus {
             if fragment.id == replacement.id { globalCaret += text.length }
             text.append(TextBridge.attributed(rich, base: try document.resolvedStyle(for: fragment.id)))
         }
+        // Notebook paper: the story is laid out on the paper's lines, each box starting on a band.
+        let ruling = document.followsRuledLines(first.id) ? document.canvas.ruledLines : nil
+        if let ruling { TextBridge.rule(text, lines: ruling) }
         let storage = NSTextStorage(attributedString: text)
         let manager = NSLayoutManager(); storage.addLayoutManager(manager)
         var commands: [DocumentCommand] = [], used: [CanvasBlock] = []
@@ -82,11 +85,15 @@ public struct TextFlowFocus {
             // Continuation pages start at the top of the text area (it moves with the header).
             if index > 0, fragment.layout.frame.y != area.y { fragment.layout.frame.y = area.y }
             let frame = fragment.layout.frame
+            // Same as the editor's text view: the first line starts on the band below the box's top.
+            let lead = ruling?.offset(below: frame.y + 4) ?? 0
             // A story box may grow down to the page's bottom margin before text continues on the
             // next page; afterwards the last box shrinks to its text (see below), so a box never
             // covers empty paper where the user wants to tap and start another text.
-            let available = max(minimumBoxHeight, area.y + area.height - frame.y)
-            let container = NSTextContainer(size: CGSize(width: max(1, frame.width - 8), height: max(1, available - 8)))
+            var available = max(minimumBoxHeight, area.y + area.height - frame.y)
+            // A box started on the last lines of ruled paper still holds a line of large type.
+            if let ruling { available = max(available, 8 + lead + 2 * ruling.spacing + 0.5) }
+            let container = NSTextContainer(size: CGSize(width: max(1, frame.width - 8), height: max(1, available - 8 - lead)))
             container.lineFragmentPadding = 5
             // Existing media on this page keeps the same wrapping contract as the canvas,
             // measured against the full area the box may grow into.
@@ -96,7 +103,7 @@ public struct TextFlowFocus {
                 container.exclusionPaths = (try TextFlowEngine.exclusions(for: fragment.id, in: probe)).map { exclusion in
                     let path = UIBezierPath()
                     for (i, p) in exclusion.polygon.enumerated() {
-                        let point = CGPoint(x: p.x - 4, y: p.y - 4)
+                        let point = CGPoint(x: p.x - 4, y: p.y - 4 - lead)
                         if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
                     }
                     path.close(); return path
@@ -114,7 +121,7 @@ public struct TextFlowFocus {
             if end == storage.length {
                 // Last box: as tall as its text plus one line of room for the next keystroke.
                 let used = manager.usedRect(for: container)
-                fragment.layout.frame.height = min(available, max(minimumBoxHeight, ceil(used.maxY) + 8 + 24))
+                fragment.layout.frame.height = min(available, max(minimumBoxHeight, Double(ceil(used.maxY)) + 8 + lead + 24))
             } else {
                 fragment.layout.frame.height = available
             }

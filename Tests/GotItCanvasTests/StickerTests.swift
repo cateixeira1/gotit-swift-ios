@@ -58,3 +58,62 @@ import GotItDomain
     #expect(shape.vertices == nil); #expect(shape.date == nil)
     #expect(shape.triangleCorners == [.init(x: 0.5, y: 0), .init(x: 1, y: 1), .init(x: 0, y: 1)])
 }
+
+// MARK: Folding a transcription card
+
+private func cardBesideAudio(cardX: Double, cardY: Double = 100, audioX: Double = 40) throws -> (CanvasDocument, CanvasBlock, LogicalRect) {
+    let audioFrame = LogicalRect(x: audioX, y: 100, width: 200, height: 60)
+    let audio = CanvasBlock(order: 0, layout: .init(mode: .absolute, frame: audioFrame), content: .audio(AssetReference(hash: String(repeating: "a", count: 64))))
+    var document = try CommandEngine.applying([.registerAsset(Asset(hash: String(repeating: "a", count: 64), mediaType: "audio/mp4", byteCount: 1)), .insertBlock(audio)],
+                                              to: CanvasDocument(title: "A"))
+    document = try CommandEngine.applying(Stickers.transcript(at: .init(x: cardX, y: cardY), width: 240, height: 220, text: "Olá", order: 1), to: document)
+    let card = try #require(document.blocks.first { if case .shape = $0.content { return true }; return false })
+    return (document, card, audioFrame)
+}
+
+@Test func aTranscriptionCardFoldsToASquareBesideItsAudio() throws {
+    let (document, card, audio) = try cardBesideAudio(cardX: 252)
+    #expect(Stickers.audio(near: card, in: document) == audio)
+    let folded = try Stickers.folding(card, audio: audio)
+    #expect(Stickers.isFolded(folded))
+    // A little wider than the player is tall, centred on it, on the side facing it.
+    #expect(folded.layout.frame == LogicalRect(x: 252, y: 96, width: 68, height: 68))
+    let changed = try CommandEngine.applying([.replaceBlock(folded)], to: document)
+    let text = try #require(changed.blocks.first { $0.parentID == card.id })
+    #expect(Stickers.foldedContent(in: changed) == [text.id])
+    // Its text is untouched, and opening it gives the card back as it was.
+    #expect(text == document.blocks.first { $0.id == text.id })
+    let opened = try Stickers.unfolding(folded, page: changed.canvas.size)
+    #expect(opened.layout.frame == card.layout.frame)
+    #expect(!Stickers.isFolded(opened))
+    #expect(Stickers.foldedContent(in: try CommandEngine.applying([.replaceBlock(opened)], to: changed)).isEmpty)
+}
+
+@Test func aCardLeftOfItsAudioFoldsTowardsIt() throws {
+    let (_, card, audio) = try cardBesideAudio(cardX: 48, audioX: 300)
+    let folded = try Stickers.folding(card, audio: audio)
+    // The right edge (towards the audio) stays put.
+    #expect(folded.layout.frame.x + folded.layout.frame.width == card.layout.frame.x + card.layout.frame.width)
+    // Moved while folded: it opens where it now is, still growing away from the audio side.
+    var moved = folded
+    moved.layout.frame.x += 30; moved.layout.frame.y += 40
+    let opened = try Stickers.unfolding(moved, page: CanvasSize.a4)
+    #expect(opened.layout.frame == LogicalRect(x: card.layout.frame.x + 30, y: card.layout.frame.y + 40, width: 240, height: 220))
+}
+
+@Test func aFoldedCardOpensInsideThePage() throws {
+    let (_, card, _) = try cardBesideAudio(cardX: 300)
+    var folded = try Stickers.folding(card, audio: nil)
+    #expect(folded.layout.frame.width == Stickers.audioHeight + Stickers.foldMargin)
+    folded.layout.frame.x = CanvasSize.a4.width - 70
+    let opened = try Stickers.unfolding(folded, page: CanvasSize.a4)
+    #expect(opened.layout.frame.x + opened.layout.frame.width <= CanvasSize.a4.width + 1e-9)
+    #expect(throws: DocumentError.self) { try Stickers.folding(folded, audio: nil) }
+    #expect(throws: DocumentError.self) { try Stickers.unfolding(card, page: CanvasSize.a4) }
+}
+
+@Test func aFoldedCardDecodesFromOlderNotesAsOpen() throws {
+    let json = ##"{"kind":"transcript","stroke":"#C7CFDB","fill":"#F5F7FB","lineWidth":1}"##
+    let shape = try JSONDecoder().decode(Shape.self, from: Data(json.utf8))
+    #expect(shape.folded == nil)
+}

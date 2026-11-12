@@ -24,8 +24,9 @@ public enum PagePreview {
                                    fills: document.pages.first.map { document.paperFills(on: $0.id) } ?? [],
                                    background: document.pages.first?.background)
             }
+            let folded = Stickers.foldedContent(in: document)
             for block in document.paintOrder() {
-                guard let frame = frames[block.id] else { continue }
+                guard !folded.contains(block.id), let frame = frames[block.id] else { continue }
                 let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
                 context.cgContext.saveGState()
                 context.cgContext.translateBy(x: rect.midX, y: rect.midY)
@@ -34,12 +35,13 @@ public enum PagePreview {
                 if case .text(let text) = block.content {
                     let view = UITextView(usingTextLayoutManager: true)
                     view.frame = CGRect(origin: .zero, size: rect.size); view.backgroundColor = .clear
-                    view.textContainerInset = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
-                    view.attributedText = TextBridge.attributed(text, base: (try? document.resolvedStyle(for: block.id)) ?? .init())
+                    let lead: Double = document.followsRuledLines(block.id) ? (document.canvas.ruledLines?.offset(below: frame.y + 4) ?? 0) : 0
+                    view.textContainerInset = UIEdgeInsets(top: 4 + CGFloat(lead), left: 4, bottom: 4, right: 4)
+                    view.attributedText = TextBridge.shown(text, block: block.id, in: document)
                     view.textContainer.exclusionPaths = ((try? TextFlowEngine.exclusions(for: block.id, in: document)) ?? []).map { exclusion in
                         let path = UIBezierPath()
                         for (index, point) in exclusion.polygon.enumerated() {
-                            let p = CGPoint(x: point.x - 4, y: point.y - 4)
+                            let p = CGPoint(x: point.x - 4, y: point.y - 4 - lead)
                             if index == 0 { path.move(to: p) } else { path.addLine(to: p) }
                         }
                         path.close(); return path

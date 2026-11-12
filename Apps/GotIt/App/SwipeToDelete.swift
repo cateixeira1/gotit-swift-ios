@@ -32,6 +32,9 @@ struct SwipeToDeleteRow<Content: View>: View {
     @State private var width: CGFloat = 320
     @State private var armed = false
     @State private var deleting = false
+    /// The row fades out when it is let go past half (or the trash is tapped), then leaves the list.
+    @State private var fading = false
+    static var fadeDuration: Double { 0.2 }
     private let haptic = UIImpactFeedbackGenerator(style: .light)
 
     var body: some View {
@@ -61,6 +64,7 @@ struct SwipeToDeleteRow<Content: View>: View {
                 }
         }
         .clipped()
+        .opacity(fading ? 0 : 1)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = max(1, $0) }
         .gesture(HorizontalPan(onBegan: { haptic.prepare() }, onChange: { dx in
             guard !deleting else { return }
@@ -85,12 +89,20 @@ struct SwipeToDeleteRow<Content: View>: View {
         }
     }
 
+    /// A quick fade where the row is (no slide, no jump back): it stays invisible until the list
+    /// drops it, so it never flashes back while the note moves to the Lixeira.
     private func delete() {
+        guard !deleting else { return }
         deleting = true
-        withAnimation(.easeIn(duration: 0.18)) { offset = -width }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-            onDelete()
-            offset = 0; resting = 0; armed = false; deleting = false
+        withAnimation(.easeOut(duration: Self.fadeDuration)) { fading = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeDuration) {
+            withAnimation(.easeOut(duration: 0.2)) { onDelete() }
+            // Still here a while later (the move failed): show the row again, closed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                guard deleting else { return }
+                offset = 0; resting = 0; armed = false; deleting = false
+                withAnimation(.easeOut(duration: 0.2)) { fading = false }
+            }
         }
     }
 }

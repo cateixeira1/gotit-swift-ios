@@ -44,6 +44,9 @@ public struct CanvasSettings: Codable, Equatable, Sendable {
     public var pageNumbers: PageNumbering?
     /// Paper of every page of the note (nil: plain).
     public var paper: PaperStyle?
+    /// A simple note: yellow ruled paper and text only (no drawing, no objects). Nil in other notes.
+    public var simpleNote: Bool?
+    public var isSimpleNote: Bool { simpleNote == true }
     public init(size: CanvasSize = .a4, displayUnit: CanvasUnit = .centimeters,
                 pixelsPerInch: Double = 96, textAvoidsObjects: Bool = true,
                 recognizeDiagrams: Bool = true, solveEquations: Bool = true,

@@ -37,17 +37,32 @@ public enum HandwritingFonts {
     }
 }
 
-/// Reading handwriting: the strokes are drawn dark on white and read with Vision's text
-/// recognition on the device (accurate level, language correction, the chosen language).
+/// Reading handwriting: the strokes are drawn again as clean black lines on white, sized for the
+/// recognizer, and read with Vision's text recognition on the device (accurate level, the chosen
+/// language first).
 public enum HandwritingReader {
     public struct Reading: Sendable { public var text: String; public var confidence: Float; public var lines: Int }
 
-    /// `correction` off for formulas: language correction turns "x2" or "1O" into words.
+    /// `correction` off for formulas: language correction turns "x2" or "1O" into words. With
+    /// correction on, a reading that comes back unsure is compared with one without correction
+    /// (block letters and names are often not dictionary words) and the surer one wins.
     public static func read(_ image: CGImage, languages: [String], correction: Bool = true) -> Reading? {
+        let first = recognize(image, languages: languages, correction: correction)
+        guard correction, (first?.confidence ?? 0) < 0.6 else { return first }
+        let plain = recognize(image, languages: languages, correction: false)
+        switch (first, plain) {
+        case let (a?, b?): return b.confidence > a.confidence + 0.1 ? b : a
+        default: return first ?? plain
+        }
+    }
+
+    private static func recognize(_ image: CGImage, languages: [String], correction: Bool) -> Reading? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = correction
         request.recognitionLanguages = languages
+        // The language is the user's; guessing it from a few handwritten words picks the wrong one.
+        request.automaticallyDetectsLanguage = false
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
         guard (try? handler.perform([request])) != nil, let observations = request.results, !observations.isEmpty else { return nil }
         // Top to bottom (Vision's y grows upwards), left to right within a line.
@@ -68,17 +83,44 @@ public enum HandwritingReader {
         return Reading(text: lines.joined(separator: "\n"), confidence: confidence, lines: lines.count)
     }
 
-    /// The strokes as a picture: black ink on white, `scale` pixels per point, with a margin.
-    @MainActor public static func picture(of strokes: [PKStroke], bounds: CGRect, scale: CGFloat = 3) -> CGImage? {
-        let area = bounds.insetBy(dx: -12, dy: -12)
-        let drawing = PKDrawing(strokes: strokes.map { stroke in
-            var dark = stroke; dark.ink = PKInk(stroke.ink.inkType, color: .black); return dark
-        })
+    /// How tall the letters are: the strokes' heights, ignoring dots, accents and crossbars (in
+    /// block letters most strokes are a whole letter tall).
+    static func letterHeight(_ heights: [CGFloat]) -> CGFloat {
+        let sorted = heights.filter { $0.isFinite && $0 > 0 }.sorted()
+        guard !sorted.isEmpty else { return 20 }
+        return max(6, sorted[min(sorted.count - 1, sorted.count * 3 / 4)])
+    }
+
+    /// The strokes as a picture for the recognizer: black lines of even width on white, letters
+    /// about 60 pixels tall, with room around them. The ink's own look (pencil grain, marker
+    /// width, a thin pen) does not reach the recognizer.
+    @MainActor public static func picture(of strokes: [PKStroke], bounds: CGRect) -> CGImage? {
+        let letter = letterHeight(strokes.map(\.renderBounds.height))
+        let margin = max(12, letter * 0.6)
+        let area = bounds.insetBy(dx: -margin, dy: -margin)
+        guard area.width > 0, area.height > 0 else { return nil }
+        // Letters ~60 px tall, within 1.5…6 px per point and at most 4096 px across.
+        let scale = min(6, max(1.5, 60 / letter), 4096 / max(area.width, area.height))
+        let width = min(9, max(1.6, letter * 0.085))
         let format = UIGraphicsImageRendererFormat(); format.scale = scale; format.opaque = true
-        let ink = drawing.image(from: area, scale: scale)
         return UIGraphicsImageRenderer(size: area.size, format: format).image { context in
             UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: area.size))
-            ink.draw(in: CGRect(origin: .zero, size: area.size))
+            UIColor.black.setStroke(); UIColor.black.setFill()
+            for stroke in strokes {
+                let points = stroke.path.interpolatedPoints(by: .distance(max(0.4, 1 / scale)))
+                    .map { $0.location.applying(stroke.transform) }
+                    .map { CGPoint(x: $0.x - area.minX, y: $0.y - area.minY) }
+                guard let first = points.first else { continue }
+                if points.count == 1 || points.allSatisfy({ hypot($0.x - first.x, $0.y - first.y) < width / 2 }) {
+                    UIBezierPath(ovalIn: CGRect(x: first.x - width / 2, y: first.y - width / 2, width: width, height: width)).fill()
+                    continue
+                }
+                let path = UIBezierPath()
+                path.move(to: first)
+                for point in points.dropFirst() { path.addLine(to: point) }
+                path.lineWidth = width; path.lineCapStyle = .round; path.lineJoinStyle = .round
+                path.stroke()
+            }
         }.cgImage
     }
 

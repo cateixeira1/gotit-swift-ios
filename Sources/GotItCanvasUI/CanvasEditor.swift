@@ -308,8 +308,10 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         // An embedded page is already realized only when it is near the screen (PagedCanvasViewController),
         // so everything on it is shown, also objects moved past its edge (a Teia card dragged aside).
         let visible = embedded ? CGRect.infinite : scroll.convert(scroll.bounds, to: surface).insetBy(dx: -80, dy: -80)
+        // The text of a folded transcription card is not shown.
+        let folded = Stickers.foldedContent(in: configuration.document)
         let ids = Set(configuration.document.blocks.compactMap { block -> UUID? in
-            guard let frame = frames[block.id] else { return nil }
+            guard !folded.contains(block.id), let frame = frames[block.id] else { return nil }
             let bounds = CanvasLayoutEngine.rotatedBounds(frame, radians: block.effectivePresentation.rotationRadians)
             let rect = CGRect(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height)
             return rect.intersects(visible) || blockViews[block.id]?.isFirstResponder == true || movingID == block.id || selectedObjectID == block.id || configuration.session?.pendingFocus?.blockID == block.id ? block.id : nil
@@ -330,13 +332,21 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     flow.pinsContent = block.textFlowID != nil && block.parentID == nil
                     if flow.pinsContent, flow.contentOffset != .zero { flow.contentOffset = .zero }
                 }
+                // On notebook paper the first line starts on the band below the box's top edge.
+                let ruling = configuration.document.followsRuledLines(block.id) ? configuration.document.canvas.ruledLines : nil
+                let insetTop = 4 + CGFloat(ruling?.offset(below: logical.y + 4) ?? 0)
+                if textView.textContainerInset.top != insetTop { textView.textContainerInset.top = insetTop }
                 if richText.plainText.isEmpty, !textView.isFirstResponder {
                     let style = (try? configuration.document.resolvedStyle(for: block.id)) ?? .init()
                     let size = style.fontSize ?? 18
                     let font = TextBridge.font(named: style.fontName, size: size)
-                    textView.typingAttributes = [.font: font, .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
+                    let typing: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(hex: style.foreground ?? "#111827")]
+                    textView.typingAttributes = ruling.map { TextBridge.ruledTyping(typing, lines: $0) } ?? typing
+                } else if let ruling, textView.isFirstResponder {
+                    let typing = TextBridge.ruledTyping(textView.typingAttributes, lines: ruling)
+                    if (typing[.paragraphStyle] as? NSParagraphStyle) != (textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle) { textView.typingAttributes = typing }
                 }
-                let rendered = TextBridge.attributed(richText, base: (try? configuration.document.resolvedStyle(for: block.id)) ?? .init())
+                let rendered = TextBridge.shown(richText, block: block.id, in: configuration.document)
                 let stale = textView.isFirstResponder && (sentRevision[block.id].map { configuration.document.revision <= $0 } ?? false)
                 // The box being typed in was already resized locally; an older layout must not shrink it.
                 keepFrame = stale && blockViews[block.id] === textView
@@ -462,7 +472,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         bandGuides.frame = surface.bounds; surface.bringSubviewToFront(bandGuides)
         selectionOverlay?.removeFromSuperview(); selectionOverlay = nil
         if let id = selectedObjectID, let object = blockViews[id],
-           let block = configuration.document.blocks.first(where: { $0.id == id }) {
+           let block = configuration.document.blocks.first(where: { $0.id == id }), !Stickers.isFolded(block) {
             let handles = SelectionHandles(frame: object.bounds)
             handles.center = object.center; handles.transform = object.transform
             if croppingID == id, let objectView = object as? CanvasObjectView {
@@ -555,8 +565,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
     func claimFocus(_ focus: TextFlowFocus) -> Bool {
         guard let textView = blockViews[focus.blockID] as? UITextView, textView.window != nil else { return false }
-        let base = (try? configuration.document.resolvedStyle(for: focus.blockID)) ?? .init()
-        let rendered = TextBridge.attributed(focus.text, base: base)
+        let rendered = TextBridge.shown(focus.text, block: focus.blockID, in: configuration.document)
         if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered; sentText[focus.blockID] = nil }
         if let frame = focus.frame { resize(textView, to: frame) }
         // Read the keys typed meanwhile before clearing the pending move (clearing drops the queue).
@@ -590,6 +599,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     /// then touches reach text views, handles and objects (move/resize) instead of drawing.
     private func updateInkInteraction() {
         let enabled = configuration.tool.isDrawing && activeText == nil && cellEditor == nil && selectedObjectID == nil
+            && !configuration.document.canvas.isSimpleNote
         guard ink.isUserInteractionEnabled != enabled else { return }
         ink.isUserInteractionEnabled = enabled
         applyInputMode()
@@ -957,11 +967,12 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         sentText[id] = nil; sentSelection[id] = nil
         if let text = view as? UITextView {
             text.attributedText = nil; text.textContainer.exclusionPaths = []; text.typingAttributes = [:]
+            text.textContainerInset = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
             text.undoManager?.removeAllActions()
             if textPool.count < 12 { textPool.append(text) }
         } else if let object = view as? CanvasObjectView {
             object.id = nil; object.block = nil; object.asset = nil; object.note = nil; object.onMenu = nil
-            object.layer.shadowOpacity = 0
+            object.layer.shadowOpacity = 0; object.accessibilityHint = nil
             if objectPool.count < 24 { objectPool.append(object) }
         }
     }
@@ -1110,6 +1121,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public func textViewDidChange(_ textView: UITextView) {
         guard let id = textIDs[ObjectIdentifier(textView)], var block = configuration.document.blocks.first(where: { $0.id == id }) else { return }
+        // A larger font or a new paragraph keeps to the paper's lines at once (not at the next render).
+        if textView.markedTextRange == nil, configuration.document.followsRuledLines(id), let lines = configuration.document.canvas.ruledLines {
+            let selection = textView.selectedRange
+            if TextBridge.rule(textView.textStorage, lines: lines) { textView.selectedRange = selection }
+            let typing = TextBridge.ruledTyping(textView.typingAttributes, lines: lines)
+            if (typing[.paragraphStyle] as? NSParagraphStyle) != (textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle) { textView.typingAttributes = typing }
+        }
         let rich = TextBridge.richText(textView.attributedText)
         block.content = .text(rich)
         let group = pendingTyping ? typingGroup : nil
@@ -1124,7 +1142,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 if focus.blockID == id {
                     // Only rewrite the view when pagination moved text out of it; rewriting on every
                     // key resets the keyboard's autocorrection state.
-                    let rendered = TextBridge.attributed(focus.text, base: (try? configuration.document.resolvedStyle(for: id)) ?? .init())
+                    let rendered = TextBridge.shown(focus.text, block: id, in: configuration.document)
                     if !rendered.isEqual(to: textView.attributedText ?? NSAttributedString()) { textView.attributedText = rendered }
                     if textView.selectedRange != focus.range { textView.selectedRange = focus.range }
                     sentText[id] = TextBridge.richText(textView.attributedText); sentSelection[id] = textView.selectedRange
@@ -1458,8 +1476,13 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         handleObjectTap(object, at: gesture.location(in: object))
     }
 
-    private func handleObjectTap(_ object: CanvasObjectView, at point: CGPoint) {
+    func handleObjectTap(_ object: CanvasObjectView, at point: CGPoint) {
         guard let id = object.id else { return }
+        // A transcription card folds with a tap on its header and opens with a tap on the square.
+        if connectingFrom == nil, let block = object.block, case .shape(let shape) = block.content, shape.kind == .transcript,
+           shape.folded != nil || point.y <= CGFloat(Stickers.transcriptHeader) {
+            toggleFold(block); return
+        }
         if croppingID != id { croppingID = nil }
         let wasSelected = selectedObjectID == id
         selectedObjectID = id
@@ -1484,6 +1507,21 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         else if case .noteReference(let ref) = object.block?.content { configuration.onOpenNote(ref.documentID) }
     }
 
+    /// Folds an open transcription card beside its audio, or opens a folded one (one undo step).
+    private func toggleFold(_ block: CanvasBlock) {
+        do {
+            let changed = Stickers.isFolded(block)
+                ? try Stickers.unfolding(block, page: configuration.document.canvas.size)
+                : try Stickers.folding(block, audio: Stickers.audio(near: block, in: configuration.document))
+            if selectedObjectID == block.id { selectedObjectID = nil }
+            if let text = activeText, configuration.document.blocks.contains(where: { $0.parentID == block.id && blockViews[$0.id] === text }) {
+                text.resignFirstResponder()
+            }
+            UISelectionFeedbackGenerator().selectionChanged()
+            configuration.onCommands([.replaceBlock(changed)])
+        } catch { configuration.onError(error) }
+    }
+
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         if gestureRecognizer === pencilWatcher {
             if touch.type == .pencil, !(configuration.session?.prefersPencil ?? false) {
@@ -1502,6 +1540,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     /// Tap on empty page: first ends typing or clears the selection; otherwise starts a text block.
     @objc private func tapCanvas(_ gesture: UITapGestureRecognizer) {
+        // A simple note: a tap on the paper puts the caret at the end of its text, typing or not.
+        if configuration.document.canvas.isSimpleNote { insertText(at: gesture.location(in: surface)); return }
         if let cellEditor { cellEditor.resignFirstResponder(); return }
         if let activeText { activeText.resignFirstResponder(); return }
         if selectedObjectID != nil { selectedObjectID = nil; croppingID = nil; render(); return }
@@ -1534,8 +1574,24 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         // margin starts the text at the margin's edge.
         let area = configuration.document.canvas.textArea
         let frame: LogicalRect
-        if configuration.document.kind == .note {
-            let x = min(max(point.x, area.x), area.x + area.width - 80), y = min(max(point.y, area.y), area.y + area.height - 44)
+        if configuration.document.canvas.isSimpleNote {
+            // A simple note has one text: a tap anywhere continues it (at its end), or starts it
+            // at the top of the page.
+            if let story = configuration.document.blocks.filter({ $0.parentID == nil && $0.textFlowID != nil }).max(by: { $0.order < $1.order }),
+               let textView = blockViews[story.id] as? UITextView {
+                textView.becomeFirstResponder()
+                textView.selectedRange = NSRange(location: textView.attributedText.length, length: 0)
+                return
+            }
+            frame = LogicalRect(x: area.x, y: area.y, width: area.width, height: 44)
+        } else if configuration.document.kind == .note {
+            let x = min(max(point.x, area.x), area.x + area.width - 80)
+            var y: Double = min(max(Double(point.y), area.y), area.y + area.height - 44)
+            // On notebook paper the text starts on the line under the finger.
+            if let lines = configuration.document.canvas.ruledLines {
+                let band = lines.bandTop(containing: y + 4)
+                y = band - 4 < area.y ? y : band - 4
+            }
             frame = LogicalRect(x: x, y: y, width: area.x + area.width - x, height: 44)
         } else {
             frame = LogicalRect(x: point.x, y: point.y, width: max(80, configuration.document.canvas.size.width - point.x - 24), height: 44)
@@ -2002,7 +2058,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     private var nextOrder: Int { (configuration.document.blocks.filter { $0.parentID == nil }.map(\.order).max() ?? -1) + 1 }
 
     public func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
-        UIContextMenuConfiguration(actionProvider: { [weak self] _ in
+        // A simple note holds text only: nothing to insert on the page.
+        guard !configuration.document.canvas.isSimpleNote else { return nil }
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
             guard let self else { return nil }
             return UIMenu(children: [UIAction(title: "Texto") { _ in self.insertText(at: location) },
                                      UIAction(title: "Tabela", image: UIImage(systemName: "tablecells")) { _ in self.insertTable(at: location) }] +
@@ -2048,6 +2106,14 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         default: break
         }
         if case .table(let table) = block.content { actions.insert(contentsOf: tableMenu(block, table), at: 0) }
+        if case .shape(let shape) = block.content, shape.kind == .transcript {
+            actions.insert(UIAction(title: shape.folded == nil ? "Recolher" : "Abrir",
+                                    image: UIImage(systemName: shape.folded == nil ? "chevron.up" : "chevron.down")) { [weak self] _ in
+                self?.toggleFold(block)
+            }, at: 0)
+            // A folded square keeps its size; it opens back to the card's size.
+            if shape.folded != nil { actions.removeAll { ($0 as? UIAction)?.title == "Redimensionar" } }
+        }
         if case .shape(let shape) = block.content, shape.kind == .stickyNote {
             let current = StickyNoteColor(hex: shape.fill) ?? .yellow
             actions.insert(UIMenu(title: "Cor do post-it", image: UIImage(systemName: "paintpalette"), children: StickyNoteColor.allCases.map { color in

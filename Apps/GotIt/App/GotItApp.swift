@@ -235,6 +235,18 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// A simple note: yellow ruled paper and text only, like a legal pad.
+    func createSimpleNote() async {
+        guard !isSaving, let store else { return }
+        returnStack.removeAll()
+        do {
+            let note = CanvasDocument(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18),
+                                      canvas: .simpleNote())
+            document = try await store.create(note)
+            try await refresh()
+        } catch { self.error = String(describing: error) }
+    }
+
     func createWeb(including id: UUID? = nil) async {
         guard !isSaving, let store else { return }
         returnStack.removeAll()
@@ -975,6 +987,8 @@ struct AppScreen: View {
             List {
                 Section {
                     Button("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
+                    Button("Nova nota simples", systemImage: "note.text") { Task { await model.createSimpleNote(); preferredColumn = .detail } }
+                        .accessibilityIdentifier("newSimpleNote")
                     Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
                     ForEach(model.activeSummaries) { summary in
                         // A List row with two buttons fires both on a single tap (opening a note
@@ -1020,6 +1034,8 @@ struct AppScreen: View {
                     .accessibilityElement(children: .combine)
                 }
             }.navigationTitle("Got It!")
+            // A deleted row (already faded) closes its gap smoothly instead of vanishing.
+            .animation(.easeOut(duration: 0.2), value: model.activeSummaries.map(\.id))
             .disabled(model.isSaving)
         } detail: {
             if let document = model.document {

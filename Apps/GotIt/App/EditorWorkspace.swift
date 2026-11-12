@@ -46,6 +46,8 @@ struct EditorWorkspace: View {
         var sticker: Bool
     }
     private var pageID: UUID { model.activePageID ?? document.id }
+    /// A simple note shows only its paper and text: no pages panel, tools or pen.
+    private var simple: Bool { document.canvas.isSimpleNote }
 
     var body: some View {
         GeometryReader { geometry in
@@ -54,11 +56,11 @@ struct EditorWorkspace: View {
                 formattingBar
                 Divider()
                 HStack(spacing: 0) {
-                    if wide { pagesPanel(sheet: false).frame(width: 142); Divider() }
+                    if wide && !simple { pagesPanel(sheet: false).frame(width: 142); Divider() }
                     canvas
-                    if wide { Divider(); toolsPanel(sheet: false).frame(width: 136) }
+                    if wide && !simple { Divider(); toolsPanel(sheet: false).frame(width: 136) }
                 }
-                if !wide { Divider(); compactBar }
+                if !wide && !simple { Divider(); compactBar }
             }
             .background(Color(uiColor: .systemBackground))
         }
@@ -168,7 +170,7 @@ struct EditorWorkspace: View {
                           onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
-            .overlay(alignment: .bottomTrailing) { floatingPen }
+            .overlay(alignment: .bottomTrailing) { if !simple { floatingPen } }
     }
 
     /// One tap to draw, one tap to go back to the cursor; no need to open the tools panel.
@@ -252,8 +254,11 @@ struct EditorWorkspace: View {
                         Button("Tachado") { session.perform(.strike) }
                         Button("Aumentar recuo") { session.perform(.indent(18)) }
                         Button("Diminuir recuo") { session.perform(.indent(-18)) }
-                        Menu("Espaço entre linhas") {
-                            ForEach([0, 2, 4, 8, 12], id: \.self) { spacing in Button("\(spacing) pt") { session.perform(.lineSpacing(CGFloat(spacing))) } }
+                        // On ruled paper the lines set the spacing.
+                        if document.canvas.ruledLines == nil {
+                            Menu("Espaço entre linhas") {
+                                ForEach([0, 2, 4, 8, 12], id: \.self) { spacing in Button("\(spacing) pt") { session.perform(.lineSpacing(CGFloat(spacing))) } }
+                            }
                         }
                         Menu("Cor do texto") {
                             Button("Preto") { session.perform(.foreground(.black)) }

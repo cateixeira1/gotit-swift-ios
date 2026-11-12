@@ -214,3 +214,16 @@ import Testing
     let data = try JSONEncoder().encode(note)
     #expect(try JSONDecoder().decode(CanvasDocument.self, from: data).canvas.isSimpleNote)
 }
+
+@Test func turningTheNotesPaperIntoANotebookLaysItsTextOutAgain() throws {
+    var note = CanvasDocument(title: "N")
+    var story = CanvasBlock(order: 0, layout: .init(mode: .absolute, frame: .init(x: 80, y: 80, width: 300, height: 44)), content: .text(RichText("a")))
+    story.textFlowID = story.id
+    note = try CommandEngine.applying([.insertBlock(story)], to: note)
+    var ruled = note
+    ruled.canvas.paper = PaperStyle(kind: .notebook)
+    #expect(ruled.storiesAffectedByObstacleChanges(since: note) == [story.id])
+    var squared = note
+    squared.canvas.paper = PaperStyle(kind: .grid)
+    #expect(squared.storiesAffectedByObstacleChanges(since: note).isEmpty)
+}

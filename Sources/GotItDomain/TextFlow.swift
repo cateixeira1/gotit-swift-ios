@@ -85,7 +85,8 @@ public extension CanvasDocument {
         let before = signatures(old), after = signatures(self)
         let assignments = pageAssignments()
         var pages: Set<UUID> = []
-        let everything = old.canvas.textAvoidsObjects != canvas.textAvoidsObjects
+        // Wrapping turned on or off, or the note's paper gaining or losing its ruled lines: every story.
+        let everything = old.canvas.textAvoidsObjects != canvas.textAvoidsObjects || old.canvas.ruledLines != canvas.ruledLines
         for id in Set(before.keys).union(after.keys) where before[id] != after[id] {
             if let page = before[id]?.page { pages.insert(page) }
             if let page = after[id]?.page { pages.insert(page) }

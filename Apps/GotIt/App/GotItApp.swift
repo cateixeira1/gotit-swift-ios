@@ -50,7 +50,7 @@ final class AppModel {
     func start() async {
         guard store == nil else { return }
         registerFonts()
-        images.totalCostLimit = 32 * 1024 * 1024; images.countLimit = 32
+        images.totalCostLimit = 64 * 1024 * 1024; images.countLimit = 48
         do {
             var root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("GotItDemo")
             #if DEBUG
@@ -337,6 +337,7 @@ final class AppModel {
         let retained = try await store.retainedAssetHashes()
         for url in candidates where !retained.contains(url.lastPathComponent) {
             try FileManager.default.removeItem(at: url); images.removeObject(forKey: url.lastPathComponent as NSString)
+            DerivedImages.remove(url.lastPathComponent)
         }
     }
 
@@ -348,23 +349,31 @@ final class AppModel {
         } catch { self.error = String(describing: error) }
     }
 
+    /// The picture a page shows for an asset. Large photos, a video's first frame and a PDF's
+    /// first page come from smaller copies kept in Caches (`DerivedImages`), made the first time.
     func image(_ hash: String) -> UIImage? {
         if let cached = images.object(forKey: hash as NSString) { return cached }
-        if let type = document?.assets.first(where: { $0.hash == hash })?.mediaType {
-            if type.hasPrefix("audio/") { return nil }
-            if type.hasPrefix("video/") {
-                guard let frame = poster(hash) else { return nil }
-                images.setObject(frame, forKey: hash as NSString, cost: Int(frame.size.width * frame.size.height * 4)); return frame
+        guard let url = assetURL(hash), FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let type = document?.assets.first(where: { $0.hash == hash })?.mediaType
+        let made: UIImage?
+        if type?.hasPrefix("audio/") == true { return nil }
+        else if type?.hasPrefix("video/") == true { made = DerivedImages.image(hash, role: .poster) { poster(hash)?.cgImage } }
+        else if type == "application/pdf" || (type == nil && Self.looksLikePDF(url)) {
+            made = DerivedImages.image(hash, role: .pdfPage) {
+                guard let pdf = PDFDocument(url: url), let page = pdf.page(at: 0) else { return nil }
+                return page.thumbnail(of: CGSize(width: 600, height: 850), for: .mediaBox).cgImage
             }
-        }
-        if let bytes = assetData(hash), let pdf = PDFDocument(data: bytes), let page = pdf.page(at: 0) {
-            let image = page.thumbnail(of: CGSize(width: 600, height: 850), for: .mediaBox)
-            images.setObject(image, forKey: hash as NSString, cost: Int(image.size.width * image.size.height * 4)); return image
-        }
-        guard let url = directory?.appendingPathComponent("assets").appendingPathComponent(hash),
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 2048, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { return nil }
-        let image = UIImage(cgImage: thumbnail); images.setObject(image, forKey: hash as NSString, cost: Int(image.size.width * image.size.height * 4)); return image
+        } else { made = DerivedImages.picture(hash, original: url) }
+        guard let made else { return nil }
+        images.setObject(made, forKey: hash as NSString, cost: Int(made.size.width * made.size.height * made.scale * made.scale * 4))
+        return made
+    }
+
+    /// A file that starts like a PDF (assets are stored without an extension).
+    private static func looksLikePDF(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 5)) == Data("%PDF-".utf8)
     }
 
     var activePageID: UUID? { document?.pages.first(where: { $0.id == selectedPageID })?.id ?? document?.pages.first?.id }
@@ -470,6 +479,41 @@ final class AppModel {
         return try? Data(contentsOf: directory.appendingPathComponent("assets").appendingPathComponent(hash))
     }
 
+    /// Audio and video: hashed in 1 MB pieces and copied as a file, away from the main thread, so
+    /// a long recording or a large video is never read into memory whole.
+    private func storeAsset(file url: URL, mediaType: String) async throws -> Asset {
+        guard let directory else { throw DocumentError.invalid("Storage unavailable") }
+        let folder = directory.appendingPathComponent("assets")
+        return try await Task.detached(priority: .userInitiated) { try Self.storeFile(url, mediaType: mediaType, in: folder) }.value
+    }
+
+    nonisolated static func storeFile(_ url: URL, mediaType: String, in folder: URL) throws -> Asset {
+        let hash = try sha256(of: url)
+        let destination = folder.appendingPathComponent(hash)
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            // Copied beside the target and moved into place: a half-copied file never has the hash's name.
+            let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.copyItem(at: url, to: temporary)
+            // A copy keeps the source's date; a fresh one keeps it out of the cleanup of old orphans.
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: temporary.path)
+            do { try FileManager.default.moveItem(at: temporary, to: destination) }
+            catch {
+                try? FileManager.default.removeItem(at: temporary)
+                if !FileManager.default.fileExists(atPath: destination.path) { throw error }
+            }
+        }
+        let bytes = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        return Asset(hash: hash, mediaType: mediaType, byteCount: Int64(bytes))
+    }
+
+    nonisolated static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     private func storeAsset(_ data: Data, mediaType: String) throws -> Asset {
         guard let directory else { throw DocumentError.invalid("Storage unavailable") }
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -552,8 +596,7 @@ final class AppModel {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let type = UTType(filenameExtension: url.pathExtension)
             guard type?.conforms(to: .movie) ?? true else { throw DocumentError.invalid("O arquivo não é um vídeo.") }
-            let data = try Data(contentsOf: url)
-            let asset = try storeAsset(data, mediaType: type?.preferredMIMEType ?? "video/quicktime")
+            let asset = try await storeAsset(file: url, mediaType: type?.preferredMIMEType ?? "video/quicktime")
             var aspect = 9.0 / 16.0
             if let track = try await AVURLAsset(url: url).loadTracks(withMediaType: .video).first {
                 let (size, transform) = try await track.load(.naturalSize, .preferredTransform)
@@ -595,19 +638,20 @@ final class AppModel {
     /// A recording or an audio file goes on the page as a player (first free spot); with
     /// `transcribe`, its text is written below it once the device has transcribed it.
     func insertAudio(from url: URL, transcribe: TranscriptPlacement?, pageID: UUID, documentID: UUID) async {
-        guard let document, document.id == documentID else { return }
+        guard document?.id == documentID else { return }
         do {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: url)
             let type = UTType(filenameExtension: url.pathExtension)
             guard type?.conforms(to: .audio) ?? true else { throw DocumentError.invalid("O arquivo não é um áudio.") }
-            let asset = try storeAsset(data, mediaType: type?.preferredMIMEType ?? "audio/mp4")
-            let size = (width: 320.0, height: 60.0)
-            let spot = freeSpot(width: size.width, height: size.height, pageID: pageID, in: document)
+            let asset = try await storeAsset(file: url, mediaType: type?.preferredMIMEType ?? "audio/mp4")
+            // The note may have changed while the file was copied.
+            guard let latest = self.document, latest.id == documentID, latest.pages.contains(where: { $0.id == pageID }) else { return }
+            let size = (width: 320.0, height: Stickers.audioHeight)
+            let spot = freeSpot(width: size.width, height: size.height, pageID: pageID, in: latest)
             let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: spot.x, y: spot.y, width: size.width, height: size.height)),
                                     content: .audio(AssetReference(hash: asset.hash)))
-            enqueue((document.assets.contains { $0.hash == asset.hash } ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
+            enqueue((latest.assets.contains { $0.hash == asset.hash } ? [] : [.registerAsset(asset)]) + [.insertBlock(block)], pageID: pageID, documentID: documentID)
             if let transcribe { await self.transcribe(block.id, placement: transcribe) }
         } catch DocumentError.invalid(let reason) { self.error = reason }
         catch { self.error = error.localizedDescription }

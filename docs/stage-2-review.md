@@ -281,3 +281,41 @@ CI (f892d53): 143 testes do núcleo, 35 nativos e 5 de interface em iPad e iPhon
 Já existiam e cobrem critérios da etapa 3: views fora da tela não são instanciadas, histórico
 com limite de grupos e bytes por nota, coleta de assets que considera o histórico (desfazer e
 refazer) e só apaga arquivos com mais de um dia.
+
+## Pedidos de 12/11/2026
+
+- **Transcrição recolhível**: tocar no cabeçalho do bloco de transcrição o recolhe a um quadrado
+  8 pt mais largo que a altura do áudio vizinho (60 pt → 68 pt), do lado voltado para o áudio e
+  centrado nele quando está ao lado; o texto fica oculto (não é apagado). Tocar no quadrado abre o
+  bloco no tamanho anterior, deslocado o quanto o quadrado foi movido. Um passo de desfazer; também
+  no menu ("Recolher"/"Abrir"). Campo opcional `Shape.folded` (notas antigas abrem iguais).
+- **Texto nas pautas do papel caderno** (nota inteira em papel caderno): cada linha do texto da
+  nota ocupa uma faixa de 0,8 cm (duas ou mais para letras grandes, a partir de ~22 pt), sem espaço
+  extra entre linhas; o espaço entre parágrafos vira linhas inteiras; a caixa começa numa faixa e
+  um toque põe o texto na linha sob o dedo. O TextKit coloca a altura extra de uma linha fixa acima
+  das letras, então a base fica sobre a pauta (descendentes tocam a linha). Papel caderno só numa
+  página ou meia página não muda o texto (a altura de linha vale para a história inteira).
+- **Nota simples**: "Nova nota simples" na lista. Meia folha A4 (A5), papel amarelo pautado, margem
+  vermelha, texto começando na segunda linha abaixo da faixa marrom; sem caneta, ferramentas, painel
+  de páginas nem menu de inserção; tocar no papel leva o cursor ao fim do texto.
+- **Letra de forma**: os traços são redesenhados como linhas pretas de espessura uniforme (a
+  textura do lápis ou a largura do marcador não chegam ao Vision), com as letras a ~60 px de altura
+  e margem proporcional; idioma fixo (sem detecção automática); se a leitura com correção vier
+  insegura (< 0,6), é comparada com uma sem correção e fica a mais confiável.
+- **Apagar deslizando**: ao soltar, a linha some num fade de 0,2 s e o espaço fecha animado; ela não
+  volta a aparecer enquanto a nota vai para a Lixeira (antes voltava por um instante).
+
+### Etapa 3: derivados e importação de mídia grande
+
+- **Derivados** (`DerivedImages`): fotos grandes (> 2048 px ou > 1,5 MB), o primeiro quadro de
+  vídeos e a primeira página de PDFs são mostrados a partir de cópias menores em Caches, criadas na
+  primeira vez. Antes, cada falta no cache decodificava o original (HEIC de 12 MP, PDF inteiro lido
+  na memória, gerador de quadros do vídeo) na thread principal. As cópias não fazem parte da nota
+  (nem do desfazer): o asset original por hash continua a única fonte, elas são refeitas quando
+  faltam e o iOS pode apagá-las. A limpeza de assets órfãos apaga também as cópias. Cache de imagens
+  decodificadas passou de 32 para 64 MiB.
+- **Áudio e vídeo importados em pedaços**: o hash SHA-256 é calculado lendo blocos de 1 MB e o
+  arquivo é copiado (fora da thread principal), em vez de carregar o vídeo inteiro na memória.
+- Escolha registrada: derivados em cache e não em `Asset.derivatives` (que entraria no histórico
+  de desfazer e exigiria migrar notas antigas). Compactar vídeos ao importar fica para decidir com o
+  usuário (perda de qualidade do original).

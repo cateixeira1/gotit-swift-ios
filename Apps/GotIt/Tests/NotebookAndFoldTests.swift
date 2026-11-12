@@ -37,7 +37,7 @@ final class NotebookAndFoldTests: XCTestCase {
         let controller = CanvasViewController(configuration: CanvasEditor(document: document, onCommands: { _ in }))
         let window = try show(controller)
         defer { window.isHidden = true }
-        let text = try XCTUnwrap(controller.view.findAll(UITextView.self).first { $0.attributedText.length > 100 })
+        let text = try XCTUnwrap(controller.view.descendants(UITextView.self).first { $0.attributedText.length > 100 })
         let style = try XCTUnwrap(text.attributedText.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
         XCTAssertEqual(style.minimumLineHeight, CGFloat(lines.spacing), accuracy: 0.001)
         XCTAssertEqual(style.maximumLineHeight, CGFloat(lines.spacing), accuracy: 0.001)
@@ -89,7 +89,7 @@ final class NotebookAndFoldTests: XCTestCase {
         XCTAssertFalse(controller.fingerDraws, "no ink on a simple note")
         let menu = controller.contextMenuInteraction(UIContextMenuInteraction(delegate: controller), configurationForMenuAtLocation: CGPoint(x: 200, y: 400))
         XCTAssertNil(menu)
-        let text = try XCTUnwrap(controller.view.findAll(UITextView.self).first { $0.text == "Compras" })
+        let text = try XCTUnwrap(controller.view.descendants(UITextView.self).first { $0.text == "Compras" })
         XCTAssertGreaterThan(text.textContainerInset.top, 4, "its first line moves down to the first band")
     }
 
@@ -111,8 +111,8 @@ final class NotebookAndFoldTests: XCTestCase {
         controller = CanvasViewController(configuration: editor())
         let window = try show(controller)
         defer { window.isHidden = true }
-        XCTAssertNotNil(controller.view.findAll(UITextView.self).first { $0.text == "Texto transcrito" })
-        var view = try XCTUnwrap(controller.view.findAll(CanvasObjectView.self).first { $0.id == card.id })
+        XCTAssertNotNil(controller.view.descendants(UITextView.self).first { $0.text == "Texto transcrito" })
+        var view = try XCTUnwrap(controller.view.descendants(CanvasObjectView.self).first { $0.id == card.id })
         controller.handleObjectTap(view, at: CGPoint(x: 100, y: 120))
         XCTAssertFalse(document.blocks.contains { Stickers.isFolded($0) }, "a tap on the text area does not fold")
         controller.handleObjectTap(view, at: CGPoint(x: 100, y: 12))
@@ -120,12 +120,12 @@ final class NotebookAndFoldTests: XCTestCase {
         XCTAssertTrue(Stickers.isFolded(folded))
         XCTAssertEqual(folded.layout.frame.width, 68, accuracy: 0.001)
         XCTAssertEqual(folded.layout.frame.height, 68, accuracy: 0.001)
-        XCTAssertNil(controller.view.findAll(UITextView.self).first { $0.text == "Texto transcrito" }, "the text is hidden")
-        view = try XCTUnwrap(controller.view.findAll(CanvasObjectView.self).first { $0.id == card.id })
+        XCTAssertNil(controller.view.descendants(UITextView.self).first { $0.text == "Texto transcrito" }, "the text is hidden")
+        view = try XCTUnwrap(controller.view.descendants(CanvasObjectView.self).first { $0.id == card.id })
         XCTAssertEqual(view.accessibilityLabel, "Transcrição recolhida")
         controller.handleObjectTap(view, at: CGPoint(x: 30, y: 30))
         XCTAssertEqual(document.blocks.first { $0.id == card.id }?.layout.frame, card.layout.frame)
-        XCTAssertNotNil(controller.view.findAll(UITextView.self).first { $0.text == "Texto transcrito" })
+        XCTAssertNotNil(controller.view.descendants(UITextView.self).first { $0.text == "Texto transcrito" })
     }
 
     /// Block letters written with a grey pencil are redrawn as even black lines and read.
@@ -160,4 +160,8 @@ final class NotebookAndFoldTests: XCTestCase {
         let reading = try XCTUnwrap(HandwritingReader.read(image, languages: ["pt-BR", "en-US"]))
         XCTAssertEqual(reading.text.uppercased().filter { !$0.isWhitespace }, "LEITE", reading.text)
     }
+}
+
+private extension UIView {
+    func descendants<T: UIView>(_ type: T.Type) -> [T] { ((self as? T).map { [$0] } ?? []) + subviews.flatMap { $0.descendants(type) } }
 }

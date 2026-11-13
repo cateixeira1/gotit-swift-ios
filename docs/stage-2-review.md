@@ -319,3 +319,10 @@ refazer) e só apaga arquivos com mais de um dia.
 - Escolha registrada: derivados em cache e não em `Asset.derivatives` (que entraria no histórico
   de desfazer e exigiria migrar notas antigas). Compactar vídeos ao importar fica para decidir com o
   usuário (perda de qualidade do original).
+
+CI (`327e5fe`): 151 testes do núcleo (Linux e macOS), 48 nativos e os de interface em iPad e
+iPhone aprovados (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43335034763). Entre
+os nativos novos: texto na pauta, letras grandes em duas faixas, nota simples, recolher/abrir a
+transcrição, "LEITE" em letra de forma lido pelo Vision, derivados e importação em pedaços. Na
+execução de push do mesmo commit, um teste de interface do iPad expirou ao abrir o app no simulador
+(passou na outra execução). Falta validar no aparelho.

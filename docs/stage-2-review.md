@@ -367,3 +367,7 @@ vídeo 1080p para 720p e as pastas (persistência e lista). Falta validar no apa
   página do trecho, com a palavra selecionada.
 - Próximos itens da etapa 4: miniaturas por revisão e referências estáveis entre notas; busca
   espacial e por significado (embeddings) depois.
+
+CI (`e77434f`): 155 testes do núcleo (Linux e macOS, com FTS5), 51 nativos e os de interface em
+iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43354628495).
+Falta validar no aparelho.

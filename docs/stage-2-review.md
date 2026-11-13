@@ -387,3 +387,7 @@ Falta validar no aparelho.
 - **Citada em…** (menu da nota): notas e Teias que apontam para ela (links no texto, células de
   tabela e cartões de Teia), mantidas na tabela `note_links` (esquema v10) na mesma transação de cada
   edição, desfazer e refazer, junto com o índice de busca (versão 2, reconstruído uma vez).
+
+CI (`bf671a2`): 157 testes do núcleo, 53 nativos e os de interface em iPad e iPhone aprovados,
+nas duas execuções (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43367825064).
+Corrigido também: duas notas apagadas no mesmo milissegundo podiam trocar de ordem na Lixeira.

@@ -425,3 +425,26 @@ Corrigido também: duas notas apagadas no mesmo milissegundo podiam trocar de or
 CI (`6972b05`): 159 testes do núcleo, 56 nativos (3 novos da busca por significado, um deles com o
 modelo real) e os de interface em iPad e iPhone aprovados
 (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43478210117). Falta validar no aparelho.
+
+## Etapa 5 — assistente com Gemma 4 E2B (13/11/2026)
+
+- **Modelo**: Gemma 4 E2B instruído, do Google (Apache 2.0, sem cadastro), no formato LiteRT-LM
+  (`litert-community/gemma-4-E2B-it-litert-lm`, revisão fixa `2d74ac4`, arquivo
+  `gemma-4-E2B-it.litertlm`, 2.588.147.712 bytes, SHA-256 `18193810…a63c`). Baixado só quando a
+  pessoa pede, conferido (tamanho e SHA-256), fora do backup do iCloud, pode ser apagado.
+- **Download de 2,6 GB**: confere o espaço livre antes; a tela fica acesa durante o download; se
+  parar (rede, app fechado, "Pausar"), "Continuar download" retoma de onde estava (dados de
+  retomada do URLSession; se não servirem mais, recomeça uma vez do zero). O EmbeddingGemma usa o
+  mesmo código (`ModelFile`).
+- **Execução**: LiteRT-LM (o mesmo runtime da busca por significado), janela de 4.096 tokens, até
+  700 tokens de resposta, temperatura 0,3, sem "thinking". Tenta a GPU primeiro e cai para o
+  processador se a GPU falhar ao carregar ou se o app tiver sido fechado pelo sistema usando a GPU
+  (provável falta de memória); dá para desligar a GPU. Números publicados pelo Google para iPhone 17
+  Pro: GPU 56,5 tokens/s e 1.450 MB; CPU 25 tokens/s e 607 MB. O modelo é liberado quando o app
+  vai para o fundo.
+- **O que faz** (botão ✦ acima da caneta, ou "Assistente" na lista): resumir a nota aberta,
+  criar 5 perguntas de revisão com respostas, e "Perguntar às notas": a busca por significado
+  escolhe até 6 trechos (até 6.000 caracteres), o modelo responde só com eles citando [1], [2]…, e a
+  lista "Fontes" mostra os trechos citados; tocar abre a nota no trecho. A resposta pode ser
+  copiada ou inserida na nota (abaixo do conteúdo da página aberta, com as fontes), em texto
+  simples. Notas longas são cortadas em 9.000 caracteres, e o app avisa.

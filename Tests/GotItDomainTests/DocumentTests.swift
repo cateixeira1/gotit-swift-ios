@@ -186,3 +186,36 @@ func rejectsInvalidDimensions(_ width: Double) {
     #expect(abs(unit[0] - 0.6) < 1e-6 && abs(SemanticChunks.similarity(unit, unit) - 1) < 1e-6)
     #expect(SemanticChunks.normalized([0, 0]) == [0, 0])
 }
+
+@Test func assistantPromptsCutLongNotesAndNumberTheSources() {
+    var note = CanvasDocument(title: "Reunião")
+    note.blocks = [CanvasBlock(order: 0, content: .text(RichText("Primeiro ponto."))),
+                   CanvasBlock(order: 1, content: .text(RichText("  "))),
+                   CanvasBlock(order: 2, content: .text(RichText(String(repeating: "Frase longa aqui. ", count: 40))))]
+    let whole = AssistantPrompts.noteText(note)
+    #expect(!whole.truncated && whole.text.hasPrefix("Primeiro ponto.\n\nFrase longa") && !whole.text.contains("Reunião"))
+    let cut = AssistantPrompts.noteText(note, limit: 300)
+    #expect(cut.truncated && cut.text.count <= 300 && cut.text.hasSuffix("aqui."))
+    #expect(AssistantPrompts.summary(title: "", text: "x", truncated: true).contains("Nota sem título"))
+    #expect(AssistantPrompts.summary(title: "Reunião", text: "x", truncated: false).contains("Nota: Reunião\n---\nx\n---"))
+
+    let doc = UUID(), block = UUID(), other = UUID()
+    let sources = AssistantPrompts.pick([
+        .init(documentID: doc, blockID: block, title: "A", text: String(repeating: "a", count: 50)),
+        .init(documentID: doc, blockID: block, title: "A", text: "repetido"),
+        .init(documentID: doc, blockID: other, title: "B", text: String(repeating: "b", count: 80)),
+        .init(documentID: doc, blockID: UUID(), title: "C", text: "fora"),
+    ], limit: 100)
+    #expect(sources.map(\.title) == ["A", "B"])
+    #expect(sources[1].text == String(repeating: "b", count: 50) + "…")
+    let prompt = AssistantPrompts.question(" Quando vence? ", sources: sources)
+    #expect(prompt.contains("[1] Nota: A\n") && prompt.contains("[2] Nota: B\n") && prompt.hasSuffix("Pergunta: Quando vence?"))
+    #expect(AssistantPrompts.citations(in: "Vence em março [2]. Valor de R$ 10 [1, 2][7] e [x].", count: 2) == [2, 1])
+    #expect(AssistantPrompts.citations(in: "Nada aqui", count: 3).isEmpty)
+    #expect(AssistantPrompts.citations(in: "[1]", count: 0).isEmpty)
+}
+
+@Test func assistantMarkdownBecomesPlainNoteText() {
+    let markdown = "## Resumo\n* **Prazo:** 10/12\n  - item\n- outro\n\nTexto __final__."
+    #expect(AssistantPrompts.plainText(markdown) == "Resumo\n• Prazo: 10/12\n  • item\n• outro\n\nTexto final.")
+}

@@ -71,7 +71,7 @@ repita automaticamente um comando sobre uma versão que o usuário não viu.
 | 2 — Canvas Engine | A4/customizado, contorno de texto, diagramas, Teia, gestos e TextKit 2 | Motor inicial implementado; UI e recursos restantes em validação/desenvolvimento |
 | 3 — Multimídia e armazenamento | Importação, arquivos por hash, derivados, compressão e limpeza segura | Áudio, vídeo (com redução opcional), PDF para anotar, derivados em cache e importação em pedaços |
 | 4 — Semantic Memory | Pastas, indexação, busca textual/espacial e embeddings locais | Pastas, busca por palavras (FTS5), ligações entre notas e busca por significado (EmbeddingGemma 2, opcional) |
-| 5 — Local Intelligence | Inferência local e propostas de operações validadas | Planejada: Gemma 4 E2B pelo mesmo LiteRT-LM |
+| 5 — Local Intelligence | Inferência local e propostas de operações validadas | Iniciada: assistente com Gemma 4 E2B (resumo, perguntas de revisão, perguntas às notas com fontes) |
 
 As decisões preservadas são: aparelhos recentes, funcionamento offline completo,
 conteúdo criado e importado, prioridade à qualidade do SLM, canvas híbrido,

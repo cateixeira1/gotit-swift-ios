@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import CryptoKit
 import GotItDomain
 import GotItPersistence
 #if canImport(LiteRTLM)
@@ -12,110 +11,25 @@ import GotItPersistence
 /// a fixed revision on Hugging Face and checked against its published size and SHA-256 before
 /// use; after that everything runs on the device, without internet.
 enum EmbeddingModel {
-    static let fileName = "embeddinggemma-2-text-270m.litertlm"
-    static let revision = "9be6e8b90982095dc05c2bd162e4b954ee4dbac7"
-    static let url = URL(string: "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/\(revision)/\(fileName)")!
-    static let byteCount: Int64 = 164_626_432
-    static let sha256 = "2d079ee2f6f066b1f368e8d7c819f55214eaef1d0513b312321901f30ab286fb"
+    static let model = ModelFile(repository: "litert-community/embeddinggemma-2-text-270m-litert-lm",
+                                 revision: "9be6e8b90982095dc05c2bd162e4b954ee4dbac7",
+                                 fileName: "embeddinggemma-2-text-270m.litertlm", byteCount: 164_626_432,
+                                 sha256: "2d079ee2f6f066b1f368e8d7c819f55214eaef1d0513b312321901f30ab286fb")
     /// Matryoshka size kept: 256 of the 768 dimensions (a quarter of the space, little loss).
     static let dimensions = 256
     /// Stored with every vector: another file or size means the notes are read again.
     static let identifier = "embeddinggemma-2-text-270m@9be6e8b/256"
 
-    static var directory: URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return support.appendingPathComponent("Models", isDirectory: true)
-    }
-    static var file: URL { directory.appendingPathComponent(fileName) }
-    static var isInstalled: Bool {
-        let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value
-        return size == byteCount
-    }
+    static var file: URL { model.location }
+    static var isInstalled: Bool { model.isInstalled }
+    static func download(progress: @escaping @Sendable (Double) -> Void) async throws { try await model.download(progress: progress) }
+    static func verify(_ url: URL) throws -> Bool { try model.verify(url) }
+    static func remove() { model.remove() }
+    static var cacheDirectory: URL { ModelFile.cacheDirectory }
 
     enum Problem: LocalizedError {
-        case http(Int), damaged, unavailable
-        var errorDescription: String? {
-            switch self {
-            case .http(let code): "O servidor do modelo respondeu com o código \(code)."
-            case .damaged: "O arquivo baixado não confere com o publicado (tamanho ou SHA-256) e foi descartado."
-            case .unavailable: "A busca por significado não está disponível neste aparelho."
-            }
-        }
-    }
-
-    /// Downloads, checks and installs the model. `progress` gets 0…1 while downloading.
-    static func download(progress: @escaping @Sendable (Double) -> Void) async throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let partial = directory.appendingPathComponent(fileName + ".part")
-        try? FileManager.default.removeItem(at: partial)
-        let box = DownloadBox()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                let task = URLSession.shared.downloadTask(with: url) { temporary, response, error in
-                    if let error { continuation.resume(throwing: error); return }
-                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                    guard let temporary, status == 200 else { continuation.resume(throwing: Problem.http(status)); return }
-                    // The temporary file is gone once this closure returns.
-                    do { try FileManager.default.moveItem(at: temporary, to: partial); continuation.resume() }
-                    catch { continuation.resume(throwing: error) }
-                }
-                box.start(task, progress: progress)
-            }
-        } onCancel: { box.cancel() }
-        try Task.checkCancellation()
-        let valid = try await Task.detached(priority: .userInitiated) { try verify(partial) }.value
-        guard valid else { try? FileManager.default.removeItem(at: partial); throw Problem.damaged }
-        try? FileManager.default.removeItem(at: file)
-        try FileManager.default.moveItem(at: partial, to: file)
-        // Downloadable again at any time: not worth 165 MB of the person's iCloud backup.
-        var values = URLResourceValues(); values.isExcludedFromBackup = true
-        var installed = file; try installed.setResourceValues(values)
-    }
-
-    /// Size and SHA-256 of `url` equal the published ones.
-    static func verify(_ url: URL) throws -> Bool {
-        let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value
-        guard size == byteCount else { return false }
-        let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
-        var hasher = SHA256()
-        while true {
-            let chunk = try autoreleasepool { try handle.read(upToCount: 4 << 20) }
-            guard let chunk, !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined() == sha256
-    }
-
-    static func remove() {
-        try? FileManager.default.removeItem(at: file)
-        try? FileManager.default.removeItem(at: directory.appendingPathComponent(fileName + ".part"))
-        try? FileManager.default.removeItem(at: cacheDirectory)
-    }
-
-    /// Where LiteRT-LM keeps what it prepares from the model on first load (rebuilt if removed).
-    static var cacheDirectory: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("LiteRTLM", isDirectory: true)
-    }
-}
-
-/// The download task, its progress observation, and a cancel that may come before it starts.
-private final class DownloadBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var task: URLSessionDownloadTask?
-    private var observation: NSKeyValueObservation?
-    private var cancelled = false
-
-    func start(_ task: URLSessionDownloadTask, progress: @escaping @Sendable (Double) -> Void) {
-        lock.lock(); defer { lock.unlock() }
-        self.task = task
-        observation = task.progress.observe(\.fractionCompleted) { value, _ in progress(value.fractionCompleted) }
-        if cancelled { task.cancel() } else { task.resume() }
-    }
-
-    func cancel() {
-        lock.lock(); defer { lock.unlock() }
-        cancelled = true
-        task?.cancel()
+        case unavailable
+        var errorDescription: String? { "A busca por significado não está disponível neste aparelho." }
     }
 }
 

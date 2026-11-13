@@ -28,6 +28,7 @@ struct EditorWorkspace: View {
     @State private var playing: PlayingVideo?
     private struct PlayingVideo: Identifiable { let id: UUID; let player: AVPlayer }
     @State private var showStickers = false
+    @State private var showAssistant = false
     /// Video whose "Reduzir tamanho…" was chosen (asks for the quality).
     @State private var reducing: UUID?
     @AppStorage(VideoReduction.importKey) private var videoImport = "original"
@@ -212,7 +213,16 @@ struct EditorWorkspace: View {
                           onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
-            .overlay(alignment: .bottomTrailing) { if !simple { floatingPen } }
+            .overlay(alignment: .bottomTrailing) {
+                VStack(alignment: .trailing, spacing: 0) {
+                    if model.assistant.isAvailable {
+                        AssistantButton { session.perform(.finish); showAssistant = true }
+                            .padding(.trailing, 22).padding(.bottom, simple ? 18 : 0)
+                    }
+                    if !simple { floatingPen }
+                }
+            }
+            .sheet(isPresented: $showAssistant) { AssistantView(model: model, document: document) }
     }
 
     /// One tap to draw, one tap to go back to the cursor; no need to open the tools panel.

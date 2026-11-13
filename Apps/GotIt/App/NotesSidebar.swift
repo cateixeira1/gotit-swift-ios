@@ -21,6 +21,7 @@ struct NotesSidebar: View {
     @State private var results: [AppModel.SearchResult] = []
     @State private var meaning: [AppModel.SearchResult] = []
     @State private var showSemantic = false
+    @State private var showAssistant = false
     private var searching: Bool { SearchText.query(query) != nil }
 
     var body: some View {
@@ -75,6 +76,15 @@ struct NotesSidebar: View {
                         }
                     }.accessibilityIdentifier("semanticSearch")
                 }
+                if model.assistant.isAvailable {
+                    Button { showAssistant = true } label: {
+                        HStack {
+                            Label("Assistente", systemImage: "sparkles")
+                            Spacer()
+                            Text(model.assistant.install == .installed ? "Gemma 4" : "Falta o modelo").foregroundStyle(.secondary)
+                        }
+                    }.accessibilityIdentifier("openAssistant")
+                }
             } footer: {
                 HStack(spacing: 8) {
                     Image("LaunchLogo").resizable().frame(width: 22, height: 22)
@@ -102,6 +112,7 @@ struct NotesSidebar: View {
             if !Task.isCancelled { meaning = related }
         }
         .sheet(isPresented: $showSemantic) { SemanticSearchSettings(search: model.semantic) }
+        .sheet(isPresented: $showAssistant) { AssistantView(model: model, document: nil) }
         .navigationTitle(model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder))
         // A deleted row (already faded) closes its gap smoothly instead of vanishing.
         .animation(.easeOut(duration: 0.2), value: model.visibleSummaries.map(\.id))

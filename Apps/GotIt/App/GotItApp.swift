@@ -17,7 +17,10 @@ struct GotItAppApp: App {
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup { AppScreen(model: model).task { await model.start() } }
-            .onChange(of: scenePhase) { _, phase in model.semantic.setActive(phase == .active) }
+            .onChange(of: scenePhase) { _, phase in
+                model.semantic.setActive(phase == .active)
+                model.assistant.setActive(phase == .active)
+            }
     }
 }
 
@@ -52,6 +55,8 @@ final class AppModel {
     private let images = NSCache<NSString, UIImage>()
     /// Search by meaning (optional, model downloaded on request).
     let semantic = SemanticSearch()
+    /// Gemma 4 E2B on the device (optional, model downloaded on request).
+    let assistant = Assistant()
 
     func start() async {
         guard store == nil else { return }
@@ -227,6 +232,56 @@ final class AppModel {
     /// query's subject scored 0.69–0.76, notes on other subjects 0.54–0.66. To be revisited with
     /// more real notes.
     static let meaningFloor: Float = 0.66, meaningSpread: Float = 0.06
+
+    /// Passages of the notes to answer `question` from: found by meaning (the assistant reads
+    /// them), best first. A wider net than the list's "Por significado": the model is told to say
+    /// when they do not answer.
+    func assistantSources(for question: String) async -> [AssistantPrompts.Source] {
+        let hits = await semantic.search(question)
+        guard let best = hits.first?.score else { return [] }
+        let candidates = hits.filter { $0.score >= max(Self.meaningFloor - 0.08, best - 0.1) }.compactMap { hit -> AssistantPrompts.Source? in
+            guard let summary = summaries.first(where: { $0.id == hit.documentID && !$0.isTrashed }) else { return nil }
+            return .init(documentID: hit.documentID, blockID: hit.blockID, title: summary.title, text: hit.text)
+        }
+        return AssistantPrompts.pick(candidates)
+    }
+
+    /// Opens `documentID` with the caret at `blockID` (a source of the assistant's answer).
+    func openSource(_ source: AssistantPrompts.Source) async {
+        let hit = SearchHit(documentID: source.documentID, blockID: source.blockID, kind: .text, snippet: "")
+        let kind = summaries.first { $0.id == source.documentID }?.kind ?? .note
+        await open(SearchResult(documentID: source.documentID, title: source.title, kind: kind, folder: nil, hit: hit, matches: 1), query: "")
+    }
+
+    /// Puts the assistant's text in the open note, below what is on the page being shown. False
+    /// (with a message) when the page has no room left.
+    @discardableResult
+    func insertAssistantText(_ text: String) async -> Bool {
+        let body = AssistantPrompts.plainText(text)
+        guard !body.isEmpty, let current = document, let page = activePageID,
+              let projection = try? current.pageDocument(page) else { return false }
+        let area = current.canvas.textArea
+        let bottom = projection.blocks.filter { $0.parentID == nil && !Stickers.isFolded($0) }.compactMap { block -> Double? in
+            switch block.content {
+            case .drawing: return nil
+            case .text(let rich) where rich.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty: return nil
+            default: return block.layout.frame.y + block.layout.frame.height
+            }
+        }.max()
+        let y = max(area.y, (bottom ?? area.y) + 12)
+        guard y + 44 <= area.y + area.height else {
+            self.error = "Não há espaço nesta página para o texto do assistente. Vá para uma página com espaço (ou crie uma) e toque em Inserir de novo, ou copie o texto."
+            return false
+        }
+        var box = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: area.x, y: y, width: area.width, height: 44)), content: .text(RichText("")))
+        box.textFlowID = box.id
+        enqueue([.insertBlock(box)], pageID: page, documentID: current.id)
+        while isSaving { try? await Task.sleep(for: .milliseconds(30)) }
+        guard var inserted = self.document?.blocks.first(where: { $0.id == box.id }) else { return false }
+        inserted.content = .text(RichText(body))
+        _ = editText(inserted, group: nil, selection: NSRange(location: 0, length: 0))
+        return true
+    }
 
     /// Where to take the caret once a note opened from the search results is on screen.
     private var reveal: (blockID: UUID, query: String)?

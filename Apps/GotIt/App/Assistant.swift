@@ -56,7 +56,7 @@ actor LiteRTGenerator: TextGenerator {
     private func run(system: String, prompt: String, maxTokens: Int, into continuation: AsyncThrowingStream<String, Error>.Continuation) async {
         do {
             let engine = try await ready()
-            let config = ConversationConfig(systemMessage: Message(system, role: .system),
+            let config = try ConversationConfig(systemMessage: Message(system, role: .system),
                                             samplerConfig: SamplerConfig(topK: 64, topP: 0.95, temperature: 0.3),
                                             thinkingConfig: ThinkingConfig(enableThinking: false))
             let conversation = try await engine.createConversation(with: config)
@@ -77,7 +77,7 @@ actor LiteRTGenerator: TextGenerator {
         if defaults.bool(forKey: Self.gpuInUseKey) { defaults.set(true, forKey: Self.gpuFailedKey) }
         if allowGPU() && !defaults.bool(forKey: Self.gpuFailedKey) {
             defaults.set(true, forKey: Self.gpuInUseKey)
-            let gpu = Engine(engineConfig: EngineConfig(modelPath: path, backend: .gpu, maxNumTokens: AssistantModel.contextTokens,
+            let gpu = try Engine(engineConfig: EngineConfig(modelPath: path, backend: .gpu, maxNumTokens: AssistantModel.contextTokens,
                                                         cacheDir: ModelFile.cacheDirectory.path))
             do {
                 try await gpu.initialize()
@@ -88,7 +88,7 @@ actor LiteRTGenerator: TextGenerator {
                 defaults.set(true, forKey: Self.gpuFailedKey)
             }
         }
-        let cpu = Engine(engineConfig: EngineConfig(modelPath: path, backend: .cpu(), maxNumTokens: AssistantModel.contextTokens,
+        let cpu = try Engine(engineConfig: EngineConfig(modelPath: path, backend: .cpu(), maxNumTokens: AssistantModel.contextTokens,
                                                     cacheDir: ModelFile.cacheDirectory.path))
         try await cpu.initialize()
         engine = cpu; running = "CPU"

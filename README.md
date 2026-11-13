@@ -69,8 +69,8 @@ repita automaticamente um comando sobre uma versão que o usuário não viu.
 | --- | --- | --- |
 | 1 — Document Core | SQLite, blocos, estilos, comandos, undo/redo e persistência verificável | Primeira implementação neste repositório |
 | 2 — Canvas Engine | A4/customizado, contorno de texto, diagramas, Teia, gestos e TextKit 2 | Motor inicial implementado; UI e recursos restantes em validação/desenvolvimento |
-| 3 — Multimídia e armazenamento | Importação, arquivos por hash, derivados, compressão e limpeza segura | Em andamento: áudio, vídeo, PDF para anotar, derivados em cache e importação em pedaços |
-| 4 — Semantic Memory | Indexação, busca textual/espacial e embeddings locais | Planejada |
+| 3 — Multimídia e armazenamento | Importação, arquivos por hash, derivados, compressão e limpeza segura | Áudio, vídeo (com redução opcional), PDF para anotar, derivados em cache e importação em pedaços |
+| 4 — Semantic Memory | Pastas, indexação, busca textual/espacial e embeddings locais | Iniciada: pastas |
 | 5 — Local Intelligence | Inferência local e propostas de operações validadas | Planejada |
 
 As decisões preservadas são: aparelhos recentes, funcionamento offline completo,

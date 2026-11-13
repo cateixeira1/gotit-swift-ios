@@ -326,3 +326,27 @@ os nativos novos: texto na pauta, letras grandes em duas faixas, nota simples, r
 transcrição, "LEITE" em letra de forma lido pelo Vision, derivados e importação em pedaços. Na
 execução de push do mesmo commit, um teste de interface do iPad expirou ao abrir o app no simulador
 (passou na outra execução). Falta validar no aparelho.
+
+## Pedidos de 12/11/2026 (noite)
+
+- **Reduzir vídeo, por escolha do usuário**: no menu do vídeo, "Reduzir tamanho…" mostra o tamanho
+  atual e oferece Alta (até 1080p, HEVC quando o aparelho codifica) ou Média (até 720p). A cópia
+  menor substitui o vídeo num passo de desfazer; se não economizar ao menos 10 %, nada muda e o
+  app avisa. Em Ferramentas › "Vídeos ao inserir" o padrão é Original; dá para escolher inserir já
+  reduzido. O original continua guardado enquanto o histórico de desfazer precisar dele.
+
+## Início da etapa 4 — catálogo: pastas
+
+- Esquema v8: tabelas `folders` (aninhadas) e `document_folders`. Como a Lixeira, arquivar uma nota
+  numa pasta fica fora da nota: não muda a revisão nem entra no desfazer.
+- Lista: a pasta aberta (com "Voltar para…"), suas subpastas (com contagem) e as notas e Teias dela;
+  notas novas entram na pasta aberta, que é lembrada ao reabrir o app. Menu de nota e de pasta:
+  "Mover para" (início ou qualquer pasta, recuadas por nível); pasta: Renomear e Apagar.
+- Apagar uma pasta nunca apaga notas: o conteúdo sobe para a pasta de cima. Uma pasta não vai para
+  dentro dela mesma nem de uma subpasta. Nota na Lixeira mantém a pasta e volta para ela.
+- Próximos itens da etapa 4: miniaturas por revisão, referências estáveis entre notas e indexação
+  incremental para a busca.
+
+CI (`c11b527`): 152 testes do núcleo, 50 nativos e os de interface em iPad e iPhone aprovados
+(https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43343445083), incluindo a redução de um
+vídeo 1080p para 720p e as pastas (persistência e lista). Falta validar no aparelho.

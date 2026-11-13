@@ -421,3 +421,7 @@ Corrigido também: duas notas apagadas no mesmo milissegundo podiam trocar de or
   palavras: similaridade 0,69–0,76 com a nota certa e 0,54–0,66 com as outras. Por isso a lista
   guarda trechos com similaridade ≥ 0,66 e até 0,06 abaixo do melhor. É uma amostra pequena; os
   limiares devem ser revistos com notas reais.
+
+CI (`6972b05`): 159 testes do núcleo, 56 nativos (3 novos da busca por significado, um deles com o
+modelo real) e os de interface em iPad e iPhone aprovados
+(https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43478210117). Falta validar no aparelho.

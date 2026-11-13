@@ -318,6 +318,7 @@ final class AppModel {
 
     // MARK: Lixeira
 
+    private var lastTrashed = Date.distantPast
     var activeSummaries: [DocumentSummary] { summaries.filter { !$0.isTrashed } }
     /// Most recently deleted first.
     var trashedSummaries: [DocumentSummary] {
@@ -334,7 +335,10 @@ final class AppModel {
         await waitForSaves()
         guard !isSaving, let store else { return }
         do {
-            try await store.moveToTrash(id)
+            // Times are kept in milliseconds: two deletions in the same millisecond keep their order.
+            let when = max(Date(), lastTrashed.addingTimeInterval(0.002))
+            lastTrashed = when
+            try await store.moveToTrash(id, at: when)
             if document?.id == id { document = nil; selectedPageID = nil }
             returnStack.removeAll { $0 == id }
             try await refresh()

@@ -46,6 +46,8 @@ jobs:
           test -d "$APP"
           # Fail early if the binary is not a device build.
           lipo -info "$APP/GotItApp" | tee /dev/stderr | grep -q arm64
+          # The on-device model runtime (search by meaning) must travel inside the app.
+          test -d "$APP/Frameworks/CLiteRTLM.framework"
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"

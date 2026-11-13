@@ -19,19 +19,28 @@ struct NotesSidebar: View {
     @State private var deleting: Folder?
     @State private var query = ""
     @State private var results: [AppModel.SearchResult] = []
+    @State private var meaning: [AppModel.SearchResult] = []
+    @State private var showSemantic = false
     private var searching: Bool { SearchText.query(query) != nil }
 
     var body: some View {
         List {
             if searching {
                 Section {
-                    if results.isEmpty {
+                    if results.isEmpty && meaning.isEmpty {
                         Text("Nada encontrado para “\(query.trimmingCharacters(in: .whitespaces))”.").foregroundStyle(.secondary)
                             .accessibilityIdentifier("searchEmpty")
                     }
                     ForEach(results) { result in resultRow(result) }
                 } header: { Text("Resultados") } footer: {
                     Text("Procura no título, no texto, em post-its, transcrições, tabelas e legendas, em todas as pastas. Escrita à mão entra na busca depois de convertida em texto.")
+                }
+                if !meaning.isEmpty {
+                    Section {
+                        ForEach(meaning) { result in resultRow(result) }
+                    } header: { Text("Por significado") } footer: {
+                        Text("Notas sobre o mesmo assunto, mesmo sem as palavras buscadas. Calculado no próprio aparelho.")
+                    }
                 }
             } else {
             Section {
@@ -57,6 +66,15 @@ struct NotesSidebar: View {
                         if !model.trashedSummaries.isEmpty { Text("\(model.trashedSummaries.count)").foregroundStyle(.secondary) }
                     }
                 }.accessibilityIdentifier("openTrash")
+                if model.semantic.isAvailable {
+                    Button { showSemantic = true } label: {
+                        HStack {
+                            Label("Busca por significado", systemImage: "sparkle.magnifyingglass")
+                            Spacer()
+                            Text(SemanticSearchSettings.shortStatus(model.semantic)).foregroundStyle(.secondary)
+                        }
+                    }.accessibilityIdentifier("semanticSearch")
+                }
             } footer: {
                 HStack(spacing: 8) {
                     Image("LaunchLogo").resizable().frame(width: 22, height: 22)
@@ -70,12 +88,20 @@ struct NotesSidebar: View {
         .searchable(text: $query, placement: .sidebar, prompt: "Buscar nas notas")
         .task(id: query) {
             // A short pause after typing, then the index is asked (it answers in milliseconds).
-            guard searching else { results = []; return }
+            guard searching else { results = []; meaning = []; return }
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
             let found = await model.search(query)
-            if !Task.isCancelled { results = found }
+            guard !Task.isCancelled else { return }
+            results = found
+            // By meaning: the model reads the query (tens of milliseconds), so a little later.
+            guard model.semantic.canSearch else { meaning = []; return }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            let related = await model.searchByMeaning(query, excluding: Set(found.map(\.documentID)))
+            if !Task.isCancelled { meaning = related }
         }
+        .sheet(isPresented: $showSemantic) { SemanticSearchSettings(search: model.semantic) }
         .navigationTitle(model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder))
         // A deleted row (already faded) closes its gap smoothly instead of vanishing.
         .animation(.easeOut(duration: 0.2), value: model.visibleSummaries.map(\.id))

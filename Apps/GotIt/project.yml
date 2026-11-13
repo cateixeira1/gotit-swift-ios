@@ -6,6 +6,8 @@ options:
 packages:
   GotIt:
     path: ../..
+  LiteRTLM:
+    path: ../../Packages/LiteRTLM
 targets:
   GotItApp:
     type: application
@@ -33,6 +35,11 @@ targets:
         product: GotItCanvas
       - package: GotIt
         product: GotItCanvasUI
+      # LiteRT-LM ships for iPhone/iPad and their Simulator only: not linked into Mac Catalyst
+      # (the code checks `canImport(LiteRTLM)`; there the search by meaning is not offered).
+      - package: LiteRTLM
+        product: LiteRTLM
+        platformFilter: iOS
   GotItAppTests:
     type: bundle.unit-test
     platform: iOS

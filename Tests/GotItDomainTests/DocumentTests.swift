@@ -166,3 +166,23 @@ func rejectsInvalidDimensions(_ width: Double) {
                    CanvasBlock(order: 1, layout: .init(mode: .absolute), content: .table(table))]
     #expect(NoteLinks.targets(in: note) == [other, third], "a link to itself is not a reference")
 }
+
+@Test func semanticPassagesStayWithinTheLimitAndCutAtSentences() {
+    let sentence = "O réu foi citado em março. "
+    let long = String(repeating: sentence, count: 60)
+    let pieces = SemanticChunks.split("Primeiro parágrafo.\nSegundo parágrafo.\n\n" + long, limit: 300)
+    #expect(pieces.allSatisfy { $0.count <= 300 && !$0.isEmpty })
+    #expect(pieces.first?.hasPrefix("Primeiro parágrafo.\nSegundo parágrafo.") == true)
+    #expect(pieces.dropFirst().allSatisfy { $0.hasSuffix(".") })
+    #expect(pieces.joined().filter { $0 == "." }.count == 62)
+    let word = String(repeating: "a", count: 700)
+    #expect(SemanticChunks.split(word, limit: 300).map(\.count) == [300, 300, 100])
+    #expect(SemanticChunks.split("  \n ").isEmpty)
+    #expect(SemanticChunks.hash("abc") == SemanticChunks.hash("abc") && SemanticChunks.hash("abc") != SemanticChunks.hash("abd"))
+    #expect(SemanticChunks.documentPrompt(title: "", text: "x") == "title: none | text: x")
+    #expect(SemanticChunks.documentPrompt(title: "Ação", text: "x") == "title: Ação | text: x")
+    #expect(SemanticChunks.queryPrompt("contrato") == "task: search result | query: contrato")
+    let unit = SemanticChunks.normalized([3, 4])
+    #expect(abs(unit[0] - 0.6) < 1e-6 && abs(SemanticChunks.similarity(unit, unit) - 1) < 1e-6)
+    #expect(SemanticChunks.normalized([0, 0]) == [0, 0])
+}

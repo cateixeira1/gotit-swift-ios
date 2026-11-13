@@ -257,7 +257,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 10)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 11)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -693,4 +693,72 @@ private func multimediaDocument() -> CanvasDocument {
     _ = try await store.emptyTrash()
     #expect(try await store.backlinks(to: target.id) == [source.id])
     try await store.close()
+}
+
+/// A stand-in for the embedding model: one axis per known word, so passages sharing words are close.
+private func fakeVector(_ text: String) -> [Float] {
+    let words = ["contrato", "aluguel", "hospital", "laudo", "receita", "bolo"]
+    let lower = text.lowercased()
+    return words.map { lower.contains($0) ? 1 : 0 } + [0.01]
+}
+
+private func indexAll(_ store: SQLiteStore, model: String = "fake") async throws -> Int {
+    var embedded = 0
+    while true {
+        let work = try await store.semanticWork(model: model)
+        if work.isEmpty { return embedded }
+        for item in work {
+            var vectors: [String: [Float]] = [:]
+            for passage in item.missing { vectors[passage.hash] = fakeVector(passage.text); embedded += 1 }
+            try await store.storeSemantic(item, vectors: vectors, model: model)
+        }
+    }
+}
+
+@Test func searchByMeaningKeepsVectorsOfUnchangedPassagesAndFollowsEdits() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let rent = try await store.create(CanvasDocument(title: "Locação"))
+    let cake = try await store.create(CanvasDocument(title: "Cozinha"))
+    func story(_ text: String, y: Double = 0) -> CanvasBlock {
+        var block = CanvasBlock(order: Int(y), layout: .init(mode: .absolute, frame: .init(x: 0, y: y, width: 300, height: 44)),
+                                content: .text(RichText(text)))
+        block.textFlowID = block.id
+        return block
+    }
+    let first = story("Contrato de aluguel do apartamento"), second = story("Laudo do hospital", y: 100)
+    var edited = try await store.execute([.insertBlock(first), .insertBlock(second)], documentID: rent.id, expectedRevision: 0)
+    _ = try await store.execute([.insertBlock(story("Receita de bolo de cenoura"))], documentID: cake.id, expectedRevision: 0)
+    #expect(try await indexAll(store) == 3)
+    #expect(try await store.semanticProgress(model: "fake") == (2, 2))
+    var hits = try await store.semanticSearch(fakeVector("aluguel"), model: "fake")
+    #expect(hits.first?.documentID == rent.id && hits.first?.blockID == first.id)
+    #expect(try await store.semanticSearch(fakeVector("bolo"), model: "fake").first?.documentID == cake.id)
+    // Editing one passage re-reads only that one.
+    var changed = second; changed.content = .text(RichText("Receita médica do hospital"))
+    edited = try await store.execute([.replaceBlock(changed)], documentID: rent.id, expectedRevision: edited.revision)
+    #expect(try await store.semanticProgress(model: "fake") == (1, 2))
+    #expect(try await indexAll(store) == 1)
+    hits = try await store.semanticSearch(fakeVector("laudo"), model: "fake")
+    #expect(!hits.contains { $0.text.contains("Laudo") })
+    // Removed passages go; another model starts over; the Lixeira is left out.
+    edited = try await store.execute([.removeSubtree(first.id)], documentID: rent.id, expectedRevision: edited.revision)
+    #expect(try await indexAll(store) == 0)
+    #expect(try await store.semanticSearch(fakeVector("contrato aluguel"), model: "fake").allSatisfy { $0.blockID != first.id })
+    #expect(try await indexAll(store, model: "other") == 2)
+    // Renaming changes what the model reads (the title goes with every passage).
+    _ = try await store.execute([.rename("Aluguel")], documentID: rent.id, expectedRevision: edited.revision)
+    #expect(try await indexAll(store, model: "other") == 1)
+    #expect(try await store.semanticSearch(fakeVector("bolo"), model: "fake").isEmpty)
+    try await store.moveToTrash(cake.id)
+    #expect(try await store.semanticSearch(fakeVector("bolo"), model: "other").allSatisfy { $0.documentID != cake.id })
+    #expect(try await store.semanticProgress(model: "other") == (1, 1))
+    _ = try await store.emptyTrash()
+    try await store.clearSemantic()
+    #expect(try await store.semanticSearch(fakeVector("hospital"), model: "other").isEmpty)
+    try await store.close()
+    let db = try SQLiteConnection(path: fixture.url.path)
+    #expect(try db.execute("SELECT COUNT(*) FROM semantic_documents").first?.first?.int == 0)
+    #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
+    try db.close()
 }

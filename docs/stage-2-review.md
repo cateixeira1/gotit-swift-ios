@@ -391,3 +391,29 @@ Falta validar no aparelho.
 CI (`bf671a2`): 157 testes do núcleo, 53 nativos e os de interface em iPad e iPhone aprovados,
 nas duas execuções (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43367825064).
 Corrigido também: duas notas apagadas no mesmo milissegundo podiam trocar de ordem na Lixeira.
+
+## Etapa 4 — busca por significado (13/11/2026)
+
+- **Modelo**: EmbeddingGemma 2 Text 270M, do Google (Apache 2.0, sem cadastro), no formato
+  LiteRT-LM (`litert-community/embeddinggemma-2-text-270m-litert-lm`, revisão fixa `9be6e8b`,
+  164.626.432 bytes, SHA-256 `2d079ee2…6fb`). Vetores de 256 das 768 dimensões (Matryoshka),
+  normalizados; prompts do modelo para documento (`title: … | text: …`) e consulta
+  (`task: search result | query: …`).
+- **Runtime**: LiteRT-LM 0.19.1 (o mesmo que vai rodar o Gemma 4 E2B na etapa 5), em CPU. O pacote
+  Swift foi copiado sem mudanças para `Packages/LiteRTLM` com o xcframework da release (verificado
+  por checksum), para não clonar o repositório inteiro com Git LFS e para o núcleo continuar
+  compilando no Linux. Só existe para iPhone/iPad e Simulator: no Mac Catalyst a opção não aparece
+  (`platformFilter: iOS`, `canImport(LiteRTLM)`). O framework acrescenta cerca de 47 MB ao app.
+- **Opcional**: "Busca por significado" na lista liga a função e baixa o modelo (165 MB) uma vez;
+  o arquivo é conferido (tamanho e SHA-256) antes de usar, fica fora do backup do iCloud e pode ser
+  apagado com o índice. Depois disso nada usa a internet e nada das notas sai do aparelho.
+- **Índice** (esquema v11): `semantic_chunks` guarda um vetor por trecho (até 900 caracteres,
+  cortado em parágrafo ou frase) de cada texto, post-it, transcrição, tabela e legenda, com o hash do
+  que o modelo leu (título + trecho); `semantic_documents` guarda a revisão lida. Alguns segundos
+  depois de cada mudança só os trechos novos ou alterados são lidos de novo; trechos removidos saem;
+  outro modelo recomeça do zero; Lixeira fica de fora; apagar a nota apaga os vetores (cascata).
+  A leitura para quando o app vai para o fundo e devolve a memória do modelo.
+- **Resultados**: abaixo dos resultados por palavra, a seção "Por significado" mostra até 8 notas
+  que as palavras não acharam, com o trecho mais próximo; tocar abre a nota no trecho. Os limiares
+  (similaridade ≥ 0,35 e até 0,15 abaixo do melhor) são valores iniciais, a ajustar com notas reais;
+  o teste com o modelo real no CI imprime as similaridades em português para isso.

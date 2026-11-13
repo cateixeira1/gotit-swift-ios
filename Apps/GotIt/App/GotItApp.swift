@@ -14,7 +14,11 @@ import GotItCanvasUI
 @main
 struct GotItAppApp: App {
     @State private var model = AppModel()
-    var body: some Scene { WindowGroup { AppScreen(model: model).task { await model.start() } } }
+    @Environment(\.scenePhase) private var scenePhase
+    var body: some Scene {
+        WindowGroup { AppScreen(model: model).task { await model.start() } }
+            .onChange(of: scenePhase) { _, phase in model.semantic.setActive(phase == .active) }
+    }
 }
 
 @Observable @MainActor
@@ -46,6 +50,8 @@ final class AppModel {
     #endif
     private var nextAssetCleanup = Date.distantPast
     private let images = NSCache<NSString, UIImage>()
+    /// Search by meaning (optional, model downloaded on request).
+    let semantic = SemanticSearch()
 
     func start() async {
         guard store == nil else { return }
@@ -65,6 +71,7 @@ final class AppModel {
             let repository = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
             store = repository
             await recoverPendingEdits(root: root, store: repository)
+            semantic.attach(repository)
             try await collectUnusedAssets()
             try await refresh()
             if activeSummaries.isEmpty { await createNote() }
@@ -124,6 +131,7 @@ final class AppModel {
             noteMetadata[summary.id] = .init(title: summary.title, createdAt: summary.createdAt, preview: image)
             previewRevisions[summary.id] = summary.revision
         }
+        semantic.changed()
     }
 
     /// Opens a note or Teia. `returningTo` is the Teia it was opened from; opening from the list
@@ -195,6 +203,28 @@ final class AppModel {
             }
         } catch { self.error = String(describing: error); return [] }
     }
+
+    /// Notes about what was searched, found by meaning rather than by the words (best first, one
+    /// row per note), leaving out `excluding` (the notes the words already found). Only passages
+    /// close enough to the query and to the best one are kept.
+    func searchByMeaning(_ input: String, excluding: Set<UUID>) async -> [SearchResult] {
+        let hits = await semantic.search(input)
+        guard let best = hits.first?.score else { return [] }
+        var order: [UUID] = [], first: [UUID: SemanticHit] = [:], counts: [UUID: Int] = [:]
+        for hit in hits where hit.score >= max(Self.meaningFloor, best - Self.meaningSpread) && !excluding.contains(hit.documentID) {
+            if first[hit.documentID] == nil { first[hit.documentID] = hit; order.append(hit.documentID) }
+            counts[hit.documentID, default: 0] += 1
+        }
+        return order.prefix(8).compactMap { id in
+            guard let summary = summaries.first(where: { $0.id == id && !$0.isTrashed }), let hit = first[id] else { return nil }
+            let excerpt = hit.text.count > 180 ? String(hit.text.prefix(180)) + "…" : hit.text
+            return SearchResult(documentID: id, title: summary.title, kind: summary.kind, folder: summary.folderID.map { folderName($0) },
+                                hit: SearchHit(documentID: id, blockID: hit.blockID, kind: .text, snippet: excerpt), matches: counts[id] ?? 1)
+        }
+    }
+
+    /// Starting values for EmbeddingGemma's cosine scores, to be adjusted with use on real notes.
+    static let meaningFloor: Float = 0.35, meaningSpread: Float = 0.15
 
     /// Where to take the caret once a note opened from the search results is on screen.
     private var reveal: (blockID: UUID, query: String)?

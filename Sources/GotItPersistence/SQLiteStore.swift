@@ -24,6 +24,29 @@ public struct SearchHit: Equatable, Sendable {
     /// A short excerpt; the words found are between `SearchHit.markStart` and `markEnd`.
     public let snippet: String
     public static let markStart: Character = "\u{2}", markEnd: Character = "\u{3}"
+    public init(documentID: UUID, blockID: UUID?, kind: SearchText.Kind, snippet: String) {
+        self.documentID = documentID; self.blockID = blockID; self.kind = kind; self.snippet = snippet
+    }
+}
+
+/// A note to read (again) for the search by meaning: the passages whose vectors are missing.
+public struct SemanticWork: Sendable {
+    public let documentID: UUID
+    public let revision: Int64
+    public let title: String
+    /// Every passage of this revision (the others are dropped when the work is stored).
+    public let passages: [SemanticChunks.Chunk]
+    /// The passages without a vector for this text.
+    public let missing: [SemanticChunks.Chunk]
+}
+
+/// A passage close in meaning to what was searched.
+public struct SemanticHit: Equatable, Sendable {
+    public let documentID: UUID
+    public let blockID: UUID
+    public let text: String
+    /// Cosine similarity, −1…1.
+    public let score: Float
 }
 
 /// A folder of notes and Teias, possibly inside another one.
@@ -307,6 +330,113 @@ public actor SQLiteStore {
         for entry in entries {
             try db.execute("INSERT INTO search_text(document_id, block_id, kind, text) VALUES (?, ?, ?, ?)",
                            [.text(documentID.uuidString), entry.blockID.map { SQLValue.text($0.uuidString) } ?? .null, .text(entry.kind.rawValue), .text(entry.text)])
+        }
+    }
+
+    // MARK: Search by meaning
+
+    /// Up to `limit` notes (not in the Lixeira) whose vectors are missing or older than the note,
+    /// or made by another model.
+    public func semanticWork(model: String, limit: Int = 8) throws -> [SemanticWork] {
+        let rows = try db.execute("""
+            SELECT documents.id, semantic_documents.model FROM documents
+            LEFT JOIN semantic_documents ON semantic_documents.document_id = documents.id
+            WHERE documents.id NOT IN (SELECT document_id FROM trash)
+              AND (semantic_documents.document_id IS NULL OR semantic_documents.model != ?1
+                   OR semantic_documents.revision != \(Self.revisionSQL))
+            ORDER BY documents.id LIMIT ?2
+            """, [.text(model), .integer(Int64(max(1, limit)))])
+        return try rows.compactMap { row -> SemanticWork? in
+            guard case .text(let value) = row[0], let id = UUID(uuidString: value) else { return nil }
+            var sameModel = false
+            if case .text(let stored) = row[1] { sameModel = stored == model }
+            let document = try readDocument(id)
+            // The title goes into what the model reads, so a new title means new vectors.
+            let passages = SemanticChunks.chunks(document).map { passage -> SemanticChunks.Chunk in
+                var passage = passage
+                passage.hash = SemanticChunks.hash(SemanticChunks.documentPrompt(title: document.title, text: passage.text))
+                return passage
+            }
+            var kept: Set<String> = []
+            if sameModel {
+                for stored in try db.execute("SELECT block_id, chunk, text_hash FROM semantic_chunks WHERE document_id = ?", [.text(value)]) {
+                    if case .text(let block) = stored[0], case .text(let hash) = stored[2] { kept.insert("\(block)#\(stored[1].int ?? -1)#\(hash)") }
+                }
+            }
+            let missing = passages.filter { !kept.contains("\($0.blockID.uuidString)#\($0.index)#\($0.hash)") }
+            return SemanticWork(documentID: id, revision: document.revision, title: document.title, passages: passages, missing: missing)
+        }
+    }
+
+    /// The revision kept in a document's metadata (JSON), for comparing in SQL.
+    private static let revisionSQL = "json_extract(CAST(documents.metadata AS TEXT), '$.revision')"
+
+    /// Keeps the vectors made for `work` (keyed by passage hash) and drops passages the note no
+    /// longer has, then records the revision read. One transaction.
+    public func storeSemantic(_ work: SemanticWork, vectors: [String: [Float]], model: String) throws {
+        try db.transaction {
+            guard try !db.execute("SELECT 1 FROM documents WHERE id = ?", [.text(work.documentID.uuidString)]).isEmpty else { return }
+            let key = SQLValue.text(work.documentID.uuidString)
+            let modelRow = try db.execute("SELECT model FROM semantic_documents WHERE document_id = ?", [key]).first
+            if let modelRow, case .text(let stored) = modelRow[0], stored != model {
+                try db.execute("DELETE FROM semantic_chunks WHERE document_id = ?", [key])
+            }
+            let wanted = Set(work.passages.map { "\($0.blockID.uuidString)#\($0.index)#\($0.hash)" })
+            for stored in try db.execute("SELECT block_id, chunk, text_hash FROM semantic_chunks WHERE document_id = ?", [key]) {
+                guard case .text(let block) = stored[0], case .text(let hash) = stored[2], let chunk = stored[1].int else { continue }
+                if !wanted.contains("\(block)#\(chunk)#\(hash)") {
+                    try db.execute("DELETE FROM semantic_chunks WHERE document_id = ? AND block_id = ? AND chunk = ?", [key, .text(block), .integer(chunk)])
+                }
+            }
+            for passage in work.missing {
+                guard let vector = vectors[passage.hash], !vector.isEmpty else { continue }
+                let data = SemanticChunks.normalized(vector).withUnsafeBufferPointer { Data(buffer: $0) }
+                try db.execute("INSERT OR REPLACE INTO semantic_chunks(document_id, block_id, chunk, text_hash, text, vector) VALUES (?, ?, ?, ?, ?, ?)",
+                               [key, .text(passage.blockID.uuidString), .integer(Int64(passage.index)), .text(passage.hash), .text(passage.text), .blob(data)])
+            }
+            try db.execute("INSERT OR REPLACE INTO semantic_documents(document_id, revision, model) VALUES (?, ?, ?)",
+                           [key, .integer(work.revision), .text(model)])
+        }
+    }
+
+    /// Passages closest in meaning to `query` (a vector from the same model), best first, at most
+    /// one per block. Notes in the Lixeira are left out.
+    public func semanticSearch(_ query: [Float], model: String, limit: Int = 30) throws -> [SemanticHit] {
+        let target = SemanticChunks.normalized(query)
+        var best: [String: SemanticHit] = [:]
+        for row in try db.execute("""
+            SELECT semantic_chunks.document_id, block_id, text, vector FROM semantic_chunks
+            JOIN semantic_documents ON semantic_documents.document_id = semantic_chunks.document_id
+            WHERE semantic_documents.model = ? AND semantic_chunks.document_id NOT IN (SELECT document_id FROM trash)
+            """, [.text(model)]) {
+            guard case .text(let documentValue) = row[0], let document = UUID(uuidString: documentValue),
+                  case .text(let blockValue) = row[1], let block = UUID(uuidString: blockValue),
+                  case .text(let text) = row[2], case .blob(let data) = row[3] else { continue }
+            var vector = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+            _ = vector.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+            let score = SemanticChunks.similarity(target, vector)
+            let key = documentValue + blockValue
+            if (best[key]?.score ?? -2) < score { best[key] = SemanticHit(documentID: document, blockID: block, text: text, score: score) }
+        }
+        return best.values.sorted { $0.score > $1.score }.prefix(max(1, limit)).map { $0 }
+    }
+
+    /// Notes read for the search by meaning with `model`, out of the notes not in the Lixeira.
+    public func semanticProgress(model: String) throws -> (indexed: Int, total: Int) {
+        let total = try db.execute("SELECT COUNT(*) FROM documents WHERE id NOT IN (SELECT document_id FROM trash)").first?.first?.int ?? 0
+        let indexed = try db.execute("""
+            SELECT COUNT(*) FROM documents JOIN semantic_documents ON semantic_documents.document_id = documents.id
+            WHERE semantic_documents.model = ? AND semantic_documents.revision = \(Self.revisionSQL)
+              AND documents.id NOT IN (SELECT document_id FROM trash)
+            """, [.text(model)]).first?.first?.int ?? 0
+        return (Int(indexed), Int(total))
+    }
+
+    /// Forgets every vector (the model was removed from the device).
+    public func clearSemantic() throws {
+        try db.transaction {
+            try db.execute("DELETE FROM semantic_chunks")
+            try db.execute("DELETE FROM semantic_documents")
         }
     }
 

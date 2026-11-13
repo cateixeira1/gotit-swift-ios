@@ -104,6 +104,8 @@ final class AppModel {
     func refresh() async throws {
         guard let store else { return }
         summaries = try await store.listDocuments()
+        folders = try await store.listFolders()
+        if let current = currentFolder, !folders.contains(where: { $0.id == current }) { currentFolder = nil }
         if let document, !document.pages.contains(where: { $0.id == selectedPageID }) { selectedPageID = document.pages.first?.id }
         let updatePreviews = Date().timeIntervalSince(lastPreviewTime) > 2
         if updatePreviews { lastPreviewTime = Date() }
@@ -152,6 +154,89 @@ final class AppModel {
         enqueue([.insertBlock(block)], pageID: firstPage, documentID: document.id)
         guard self.document?.blocks.contains(where: { $0.id == block.id }) == true else { return nil }
         return TextFlowFocus(blockID: block.id, pageID: firstPage, range: NSRange(location: 0, length: 0), frame: block.layout.frame)
+    }
+
+    // MARK: Pastas
+
+    var folders: [Folder] = []
+    /// The folder the list shows (nil: the top level); new notes and Teias are filed there.
+    var currentFolder: UUID? = UserDefaults.standard.string(forKey: "currentFolder").flatMap(UUID.init(uuidString:)) {
+        didSet { UserDefaults.standard.set(currentFolder?.uuidString, forKey: "currentFolder") }
+    }
+
+    func folder(_ id: UUID?) -> Folder? { id.flatMap { id in folders.first { $0.id == id } } }
+    func folderName(_ id: UUID?) -> String { folder(id)?.name ?? "Início" }
+    func subfolders(of parent: UUID?) -> [Folder] { folders.filter { $0.parentID == parent } }
+    /// Notes and Teias filed in the folder shown (not in the Lixeira).
+    var visibleSummaries: [DocumentSummary] { activeSummaries.filter { $0.folderID == currentFolder } }
+    /// Notes and Teias directly inside a folder.
+    func count(in folder: UUID) -> Int { activeSummaries.filter { $0.folderID == folder }.count + subfolders(of: folder).count }
+
+    struct FolderItem: Identifiable { let folder: Folder; let depth: Int; var id: UUID { folder.id } }
+    /// Every folder with its depth, parents before their subfolders (for "Mover para").
+    var folderTree: [FolderItem] {
+        var result: [FolderItem] = [], seen: Set<UUID> = []
+        func add(_ parent: UUID?, _ depth: Int) {
+            for folder in subfolders(of: parent) where seen.insert(folder.id).inserted {
+                result.append(FolderItem(folder: folder, depth: depth)); add(folder.id, depth + 1)
+            }
+        }
+        add(nil, 0)
+        return result
+    }
+
+    /// `id` and every folder inside it (a folder cannot be moved into any of them).
+    func descendants(of id: UUID) -> Set<UUID> {
+        var found: Set<UUID> = [id], pending = [id]
+        while let next = pending.popLast() {
+            for child in subfolders(of: next) where found.insert(child.id).inserted { pending.append(child.id) }
+        }
+        return found
+    }
+
+    func createFolder(named name: String) async {
+        guard let store else { return }
+        do { _ = try await store.createFolder(named: name, in: currentFolder); try await refresh() }
+        catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = String(describing: error) }
+    }
+
+    func renameFolder(_ id: UUID, to name: String) async {
+        guard let store else { return }
+        do { try await store.renameFolder(id, to: name); try await refresh() }
+        catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = String(describing: error) }
+    }
+
+    func moveFolder(_ id: UUID, to parent: UUID?) async {
+        guard let store else { return }
+        do { try await store.moveFolder(id, to: parent); try await refresh() }
+        catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = String(describing: error) }
+    }
+
+    /// The folder goes; what was inside it moves up to its parent.
+    func deleteFolder(_ id: UUID) async {
+        guard let store else { return }
+        let parent = folder(id)?.parentID
+        do {
+            try await store.deleteFolder(id)
+            if let current = currentFolder, descendants(of: id).contains(current) { currentFolder = current == id ? parent : current }
+            try await refresh()
+        } catch { self.error = String(describing: error) }
+    }
+
+    func moveDocument(_ id: UUID, to folder: UUID?) async {
+        guard let store else { return }
+        do { try await store.moveDocument(id, to: folder); try await refresh() }
+        catch DocumentError.invalid(let reason) { self.error = reason }
+        catch { self.error = String(describing: error) }
+    }
+
+    /// A note or Teia just made goes into the folder being shown.
+    private func file(_ document: CanvasDocument) async throws {
+        guard let store, let folder = currentFolder else { return }
+        try await store.moveDocument(document.id, to: folder)
     }
 
     // MARK: Lixeira
@@ -231,6 +316,7 @@ final class AppModel {
             var note = CanvasDocument(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18))
             note.canvas.margins = .word
             document = try await store.create(note)
+            if let created = document { try await file(created) }
             try await refresh()
         } catch { self.error = String(describing: error) }
     }
@@ -243,6 +329,7 @@ final class AppModel {
             let note = CanvasDocument(title: "Nota \(summaries.filter { $0.kind == .note }.count + 1)", defaultStyle: .init(fontSize: 18),
                                       canvas: .simpleNote())
             document = try await store.create(note)
+            if let created = document { try await file(created) }
             try await refresh()
         } catch { self.error = String(describing: error) }
     }
@@ -258,6 +345,7 @@ final class AppModel {
                 web = try CommandEngine.applying(TeiaEngine.addNotes([.init(id: summary.id, title: summary.title, createdAt: summary.createdAt)], to: web), to: web)
             }
             document = try await store.create(web)
+            if let created = document { try await file(created) }
             try await refresh()
         } catch { self.error = String(describing: error) }
     }
@@ -1073,59 +1161,7 @@ struct AppScreen: View {
     @State private var showTrash = false
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $preferredColumn) {
-            List {
-                Section {
-                    Button("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
-                    Button("Nova nota simples", systemImage: "note.text") { Task { await model.createSimpleNote(); preferredColumn = .detail } }
-                        .accessibilityIdentifier("newSimpleNote")
-                    Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
-                    ForEach(model.activeSummaries) { summary in
-                        // A List row with two buttons fires both on a single tap (opening a note
-                        // also created a Teia). One button per row; Teia is in the context menu.
-                        // Swipe left once to delete (haptic past half the row, delete on release).
-                        SwipeToDeleteRow(onDelete: { Task { await model.moveToTrash(summary.id) } }) {
-                            Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
-                                VStack(alignment: .leading) {
-                                    if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
-                                    Text(summary.title).font(.headline)
-                                    Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
-                        .contextMenu {
-                            if summary.kind == .note {
-                                Button("Criar Teia com esta nota", systemImage: "point.3.connected.trianglepath.dotted") {
-                                    Task { await model.createWeb(including: summary.id); preferredColumn = .detail }
-                                }
-                            }
-                            Button("Apagar", systemImage: "trash", role: .destructive) { Task { await model.moveToTrash(summary.id) } }
-                        }
-                        .accessibilityIdentifier("document-\(summary.title)")
-                    }
-                } header: { Text("Todas as notas e Teias") }
-                Section {
-                    Button { showTrash = true } label: {
-                        HStack {
-                            Label("Lixeira", systemImage: "trash")
-                            Spacer()
-                            if !model.trashedSummaries.isEmpty { Text("\(model.trashedSummaries.count)").foregroundStyle(.secondary) }
-                        }
-                    }.accessibilityIdentifier("openTrash")
-                } footer: {
-                    HStack(spacing: 8) {
-                        Image("LaunchLogo").resizable().frame(width: 22, height: 22)
-                        Text("Color Software").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity).padding(.top, 28)
-                    .accessibilityElement(children: .combine)
-                }
-            }.navigationTitle("Got It!")
-            // A deleted row (already faded) closes its gap smoothly instead of vanishing.
-            .animation(.easeOut(duration: 0.2), value: model.activeSummaries.map(\.id))
-            .disabled(model.isSaving)
+            NotesSidebar(model: model, preferredColumn: $preferredColumn, showTrash: $showTrash)
         } detail: {
             if let document = model.document {
                 VStack(spacing: 0) {

@@ -7,7 +7,7 @@ enum MigrationManager {
             guard let version = try db.execute("PRAGMA user_version").first?.first?.int else {
                 throw PersistenceError.corruptData("Missing schema version")
             }
-            guard version <= 7 else { throw PersistenceError.unsupportedSchema(version) }
+            guard version <= 8 else { throw PersistenceError.unsupportedSchema(version) }
             if version == 0 {
                 guard let url = Bundle.module.url(forResource: "001_document_core", withExtension: "sql") else {
                     throw PersistenceError.corruptData("Missing bundled migration")
@@ -51,6 +51,17 @@ enum MigrationManager {
             if version < 7 {
                 try db.script("CREATE TABLE IF NOT EXISTS trash (document_id TEXT PRIMARY KEY NOT NULL REFERENCES documents(id) ON DELETE CASCADE, trashed_at INTEGER NOT NULL);")
                 try db.execute("PRAGMA user_version = 7")
+            }
+            // Version 8: folders. Like the Lixeira, where a note is filed lives outside the note
+            // (moving it is not an edit to undo). A deleted note takes its filing with it.
+            if version < 8 {
+                try db.script("""
+                CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY NOT NULL, parent_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+                                                    name TEXT NOT NULL, created_at INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS document_folders (document_id TEXT PRIMARY KEY NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                                                             folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE);
+                """)
+                try db.execute("PRAGMA user_version = 8")
             }
         }
         try db.execute("PRAGMA journal_mode = WAL")

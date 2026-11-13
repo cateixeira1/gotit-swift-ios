@@ -11,6 +11,27 @@ public struct DocumentSummary: Equatable, Sendable, Identifiable {
     /// When it went to the Lixeira; nil for documents in use.
     public let trashedAt: Date?
     public var isTrashed: Bool { trashedAt != nil }
+    /// The folder it is filed in; nil at the top level.
+    public var folderID: UUID? = nil
+}
+
+/// A folder of notes and Teias, possibly inside another one.
+public struct Folder: Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public var name: String
+    public var parentID: UUID?
+    public let createdAt: Date
+    public init(id: UUID = UUID(), name: String, parentID: UUID? = nil, createdAt: Date = Date()) {
+        self.id = id; self.name = name; self.parentID = parentID; self.createdAt = createdAt
+    }
+
+    /// Names are trimmed, not empty and at most 120 characters.
+    public static func validName(_ name: String) throws -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw DocumentError.invalid("Dê um nome à pasta.") }
+        guard trimmed.count <= 120 else { throw DocumentError.invalid("O nome da pasta pode ter até 120 caracteres.") }
+        return trimmed
+    }
 }
 
 /// Offline document repository. No async suspension occurs inside a database transaction.
@@ -55,12 +76,18 @@ public actor SQLiteStore {
     }
 
     public func listDocuments() throws -> [DocumentSummary] {
-        try db.execute("SELECT documents.metadata, trash.trashed_at FROM documents LEFT JOIN trash ON trash.document_id = documents.id ORDER BY documents.id").map { row in
+        try db.execute("""
+            SELECT documents.metadata, trash.trashed_at, document_folders.folder_id FROM documents
+            LEFT JOIN trash ON trash.document_id = documents.id LEFT JOIN document_folders ON document_folders.document_id = documents.id
+            ORDER BY documents.id
+            """).map { row in
             let document: CanvasDocument = try decode(row[0])
             // Milliseconds since 1970; NULL when the document is not in the Lixeira.
             let trashedAt = row[1].int.map { Date(timeIntervalSince1970: Double($0) / 1000) }
+            var folder: UUID?
+            if case .text(let id) = row[2] { folder = UUID(uuidString: id) }
             return DocumentSummary(id: document.id, title: document.title, revision: document.revision, updatedAt: document.updatedAt,
-                                   createdAt: document.createdAt, kind: document.kind, trashedAt: trashedAt)
+                                   createdAt: document.createdAt, kind: document.kind, trashedAt: trashedAt, folderID: folder)
         }.sorted { $0.updatedAt == $1.updatedAt ? $0.id.uuidString < $1.id.uuidString : $0.updatedAt > $1.updatedAt }
     }
 
@@ -179,6 +206,92 @@ public actor SQLiteStore {
         }
         cachedDocument = nil
         return count
+    }
+
+    // MARK: Folders
+
+    /// Every folder, by name (case and accents ignored) within each parent.
+    public func listFolders() throws -> [Folder] {
+        try db.execute("SELECT id, parent_id, name, created_at FROM folders").compactMap { row -> Folder? in
+            guard case .text(let id) = row[0], let uuid = UUID(uuidString: id), case .text(let name) = row[2] else { return nil }
+            var parent: UUID?
+            if case .text(let value) = row[1] { parent = UUID(uuidString: value) }
+            return Folder(id: uuid, name: name, parentID: parent, createdAt: Date(timeIntervalSince1970: Double(row[3].int ?? 0) / 1000))
+        }.sorted { $0.name.compare($1.name, options: [.caseInsensitive, .diacriticInsensitive, .numeric]) == .orderedAscending }
+    }
+
+    @discardableResult
+    public func createFolder(named name: String, in parent: UUID? = nil, at date: Date = Date()) throws -> Folder {
+        let folder = Folder(name: try Folder.validName(name), parentID: parent, createdAt: date)
+        try db.transaction {
+            if let parent { try requireFolder(parent) }
+            try db.execute("INSERT INTO folders(id, parent_id, name, created_at) VALUES (?, ?, ?, ?)",
+                           [.text(folder.id.uuidString), parent.map { SQLValue.text($0.uuidString) } ?? .null, .text(folder.name),
+                            .integer(Int64((date.timeIntervalSince1970 * 1000).rounded()))])
+        }
+        return folder
+    }
+
+    public func renameFolder(_ id: UUID, to name: String) throws {
+        let valid = try Folder.validName(name)
+        try db.transaction {
+            try requireFolder(id)
+            try db.execute("UPDATE folders SET name = ? WHERE id = ?", [.text(valid), .text(id.uuidString)])
+        }
+    }
+
+    /// Puts a folder inside another (nil: the top level). A folder never goes inside itself or
+    /// inside one of its own subfolders.
+    public func moveFolder(_ id: UUID, to parent: UUID?) throws {
+        try db.transaction {
+            try requireFolder(id)
+            if let parent {
+                try requireFolder(parent)
+                var current: UUID? = parent
+                var seen: Set<UUID> = []
+                while let folder = current, seen.insert(folder).inserted {
+                    guard folder != id else { throw DocumentError.invalid("Uma pasta não pode ir para dentro dela mesma.") }
+                    current = try db.execute("SELECT parent_id FROM folders WHERE id = ?", [.text(folder.uuidString)]).first.flatMap { row in
+                        if case .text(let value) = row[0] { return UUID(uuidString: value) }; return nil
+                    }
+                }
+            }
+            try db.execute("UPDATE folders SET parent_id = ? WHERE id = ?", [parent.map { SQLValue.text($0.uuidString) } ?? .null, .text(id.uuidString)])
+        }
+    }
+
+    /// Deletes a folder, never its contents: its notes and subfolders move up to its parent.
+    public func deleteFolder(_ id: UUID) throws {
+        try db.transaction {
+            try requireFolder(id)
+            let parent: SQLValue = try db.execute("SELECT parent_id FROM folders WHERE id = ?", [.text(id.uuidString)]).first?[0] ?? .null
+            try db.execute("UPDATE folders SET parent_id = ? WHERE parent_id = ?", [parent, .text(id.uuidString)])
+            if case .text = parent {
+                try db.execute("UPDATE document_folders SET folder_id = ? WHERE folder_id = ?", [parent, .text(id.uuidString)])
+            } else {
+                try db.execute("DELETE FROM document_folders WHERE folder_id = ?", [.text(id.uuidString)])
+            }
+            try db.execute("DELETE FROM folders WHERE id = ?", [.text(id.uuidString)])
+        }
+    }
+
+    /// Files a note or Teia in a folder (nil: the top level). Not an edit of the note: no history.
+    public func moveDocument(_ id: UUID, to folder: UUID?) throws {
+        try db.transaction {
+            _ = try readHeader(id)
+            if let folder {
+                try requireFolder(folder)
+                try db.execute("INSERT OR REPLACE INTO document_folders(document_id, folder_id) VALUES (?, ?)", [.text(id.uuidString), .text(folder.uuidString)])
+            } else {
+                try db.execute("DELETE FROM document_folders WHERE document_id = ?", [.text(id.uuidString)])
+            }
+        }
+    }
+
+    private func requireFolder(_ id: UUID) throws {
+        guard try !db.execute("SELECT 1 FROM folders WHERE id = ?", [.text(id.uuidString)]).isEmpty else {
+            throw DocumentError.invalid("A pasta não existe mais.")
+        }
     }
 
     private func readHeader(_ id: UUID) throws -> CanvasDocument {

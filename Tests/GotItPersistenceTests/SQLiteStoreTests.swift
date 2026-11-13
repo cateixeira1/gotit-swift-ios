@@ -257,7 +257,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 7)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 8)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -554,4 +554,53 @@ private func multimediaDocument() -> CanvasDocument {
     let none = try await store.emptyTrash()
     #expect(none == 0)
     try await store.close()
+}
+
+@Test func foldersFileNotesAndDeletingOneNeverDeletesItsNotes() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    var store = try SQLiteStore(url: fixture.url)
+    let note = try await store.create(CanvasDocument(title: "Nota"))
+    let web = try await store.create(CanvasDocument(title: "Teia", kind: .web))
+    let work = try await store.createFolder(named: "  Trabalho  ")
+    #expect(work.name == "Trabalho")
+    let cases = try await store.createFolder(named: "Processos", in: work.id)
+    await #expect(throws: DocumentError.self) { try await store.createFolder(named: "   ") }
+    await #expect(throws: DocumentError.self) { try await store.createFolder(named: "X", in: UUID()) }
+    try await store.moveDocument(note.id, to: cases.id)
+    try await store.moveDocument(web.id, to: work.id)
+    // Filing a note is not an edit of it: same revision, no history.
+    #expect(try await store.load(note.id).revision == note.revision)
+    #expect(try await store.historyState(documentID: note.id).canUndo == false)
+    // Kept after reopening, and listed by name.
+    try await store.close()
+    store = try SQLiteStore(url: fixture.url)
+    var listed = try await store.listDocuments()
+    #expect(listed.first { $0.id == note.id }?.folderID == cases.id)
+    #expect(listed.first { $0.id == web.id }?.folderID == work.id)
+    _ = try await store.createFolder(named: "arquivo")
+    #expect(try await store.listFolders().map(\.name) == ["arquivo", "Processos", "Trabalho"])
+    try await store.renameFolder(cases.id, to: "Casos")
+    await #expect(throws: DocumentError.self) { try await store.renameFolder(cases.id, to: "") }
+    // A folder cannot go inside itself or its own subfolder.
+    await #expect(throws: DocumentError.self) { try await store.moveFolder(work.id, to: cases.id) }
+    await #expect(throws: DocumentError.self) { try await store.moveFolder(work.id, to: work.id) }
+    // Deleting "Trabalho": "Casos" and the Teia move to the top level; the note stays in "Casos".
+    try await store.deleteFolder(work.id)
+    let folders = try await store.listFolders()
+    #expect(folders.first { $0.id == cases.id }?.parentID == nil && folders.first { $0.id == cases.id }?.name == "Casos")
+    listed = try await store.listDocuments()
+    #expect(listed.first { $0.id == web.id }?.folderID == nil)
+    #expect(listed.first { $0.id == note.id }?.folderID == cases.id)
+    // A trashed note keeps its folder; deleting it for good takes its filing with it.
+    try await store.moveToTrash(note.id)
+    #expect(try await store.listDocuments().first { $0.id == note.id }?.folderID == cases.id)
+    try await store.deleteDocument(note.id, expectedRevision: note.revision)
+    try await store.moveDocument(web.id, to: nil)
+    try await store.deleteFolder(cases.id)
+    #expect(try await store.listDocuments().map(\.id) == [web.id])
+    try await store.close()
+    let db = try SQLiteConnection(path: fixture.url.path)
+    #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
+    #expect(try db.execute("SELECT COUNT(*) FROM document_folders").first?.first?.int == 0)
+    try db.close()
 }

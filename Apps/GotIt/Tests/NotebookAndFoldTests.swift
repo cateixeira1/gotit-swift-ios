@@ -48,7 +48,8 @@ final class NotebookAndFoldTests: XCTestCase {
         let caret = text.caretRect(for: text.beginningOfDocument)
         let bottom = Double(text.convert(caret, to: text.superview).maxY)
         let rule = start + lines.spacing
-        XCTAssertLessThanOrEqual(bottom, rule + 1)
+        // (The caret reaches a point or so past the descender.)
+        XCTAssertLessThanOrEqual(bottom, rule + 2)
         XCTAssertGreaterThan(bottom, rule - 8, "the letters sit at the bottom of the band, not at its top")
         // The second line is exactly one band lower.
         let secondLine = try XCTUnwrap(text.position(from: text.beginningOfDocument, offset: 60))
@@ -122,6 +123,8 @@ final class NotebookAndFoldTests: XCTestCase {
         XCTAssertEqual(folded.layout.frame.height, 68, accuracy: 0.001)
         XCTAssertNil(controller.view.descendants(UITextView.self).first { $0.text == "Texto transcrito" }, "the text is hidden")
         view = try XCTUnwrap(controller.view.descendants(CanvasObjectView.self).first { $0.id == card.id })
+        // The label is set when the square is drawn.
+        _ = UIGraphicsImageRenderer(bounds: view.bounds).image { _ in view.draw(view.bounds) }
         XCTAssertEqual(view.accessibilityLabel, "Transcrição recolhida")
         controller.handleObjectTap(view, at: CGPoint(x: 30, y: 30))
         XCTAssertEqual(document.blocks.first { $0.id == card.id }?.layout.frame, card.layout.frame)

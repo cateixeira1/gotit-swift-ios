@@ -111,8 +111,17 @@ final class AppModel {
         if updatePreviews { lastPreviewTime = Date() }
         for summary in summaries where summary.kind == .note {
             guard previewRevisions[summary.id] != summary.revision, updatePreviews || noteMetadata[summary.id] == nil else { continue }
-            let note = try await store.load(summary.id)
-            noteMetadata[summary.id] = .init(title: summary.title, createdAt: summary.createdAt, preview: preview(note))
+            // A thumbnail kept for this revision is used as it is; otherwise the note is drawn
+            // (from memory when it is the one open) and its thumbnail kept for next time.
+            let image: UIImage
+            if let kept = PreviewCache.load(summary.id, revision: summary.revision) { image = kept }
+            else {
+                let note: CanvasDocument
+                if let open = document, open.id == summary.id, open.revision == summary.revision { note = open } else { note = try await store.load(summary.id) }
+                image = preview(note)
+                PreviewCache.store(image, id: summary.id, revision: summary.revision)
+            }
+            noteMetadata[summary.id] = .init(title: summary.title, createdAt: summary.createdAt, preview: image)
             previewRevisions[summary.id] = summary.revision
         }
     }
@@ -210,6 +219,18 @@ final class AppModel {
               case .text(let rich) = block.content, let page = document.pageID(for: block.id) else { return nil }
         let range = SearchText.firstMatch(of: target.query, in: rich.plainText) ?? NSRange(location: 0, length: 0)
         return TextFlowFocus(blockID: block.id, pageID: page, range: range, text: rich, frame: block.layout.frame)
+    }
+
+    // MARK: Ligações entre notas
+
+    /// Notes and Teias (not in the Lixeira) that cite `id`, by title.
+    func backlinks(to id: UUID) async -> [DocumentSummary] {
+        guard let store else { return [] }
+        do {
+            let sources = Set(try await store.backlinks(to: id))
+            return activeSummaries.filter { sources.contains($0.id) }
+                .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        } catch { self.error = String(describing: error); return [] }
     }
 
     // MARK: Pastas
@@ -347,6 +368,7 @@ final class AppModel {
 
     private func forget(_ id: UUID) {
         noteMetadata[id] = nil; previewRevisions[id] = nil
+        PreviewCache.remove(id)
         if document?.id == id { document = nil; selectedPageID = nil }
         returnStack.removeAll { $0 == id }
     }
@@ -1215,6 +1237,7 @@ struct AppScreen: View {
     @State private var showDiagnostics = false
     @State private var sharing: ShareFile?
     @State private var showTrash = false
+    @State private var showBacklinks = false
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $preferredColumn) {
             NotesSidebar(model: model, preferredColumn: $preferredColumn, showTrash: $showTrash)
@@ -1254,12 +1277,14 @@ struct AppScreen: View {
                                 catch let DocumentError.invalid(text) { model.error = text }
                                 catch { model.error = String(describing: error) }
                             }
+                            Button("Citada em…", systemImage: "link") { showBacklinks = true }.accessibilityIdentifier("backlinks")
                             Button("Medir desempenho do aparelho", systemImage: "speedometer") { showDiagnostics = true }
                         } label: { Image(systemName: "ellipsis.circle") }.accessibilityIdentifier("documentOptions")
                     }
                 }
                 .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.applyPageLayout($0) } }
                 .sheet(isPresented: $showDiagnostics) { DiagnosticsView() }
+                .sheet(isPresented: $showBacklinks) { BacklinksView(model: model, documentID: document.id) }
                 .sheet(item: $sharing) { file in ActivitySheet(url: file.url) }
                 .alert("Equação de uma incógnita", isPresented: $showEquation) {
                     TextField("Ex.: x² - 5x + 6 = 0", text: $equation)

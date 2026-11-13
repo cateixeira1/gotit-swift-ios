@@ -371,3 +371,19 @@ vídeo 1080p para 720p e as pastas (persistência e lista). Falta validar no apa
 CI (`e77434f`): 155 testes do núcleo (Linux e macOS, com FTS5), 51 nativos e os de interface em
 iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43354628495).
 Falta validar no aparelho.
+
+## Etapa 4 — miniaturas por revisão e ligações entre notas (13/11/2026)
+
+- **Miniaturas por revisão** (`PreviewCache`): a miniatura de cada nota fica em Caches com o número
+  da revisão. Ao abrir o app ou voltar à lista, só é aberta e desenhada a nota que mudou desde a
+  última miniatura (antes, todas as notas eram carregadas do SQLite e desenhadas a cada início); a
+  nota aberta é desenhada da memória. A revisão anterior é apagada ao gravar a nova, e as de uma nota
+  apagada para sempre também.
+- **Ligações entre notas**: no menu do texto, "Ligar a outra nota…" abre a lista de notas e Teias
+  (busca por título); o texto selecionado vira link, ou, sem seleção, o título da nota é escrito como
+  link. O link guarda o identificador da nota (`gotit://nota/<id>`), então continua valendo se ela
+  mudar de nome ou de pasta. Num texto em edição links não abrem com um toque: o menu de edição sobre
+  o link mostra "Abrir “título”". Voltar retorna à nota de origem.
+- **Citada em…** (menu da nota): notas e Teias que apontam para ela (links no texto, células de
+  tabela e cartões de Teia), mantidas na tabela `note_links` (esquema v10) na mesma transação de cada
+  edição, desfazer e refazer, junto com o índice de busca (versão 2, reconstruído uma vez).

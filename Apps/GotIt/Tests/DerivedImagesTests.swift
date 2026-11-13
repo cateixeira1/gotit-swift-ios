@@ -68,6 +68,25 @@ final class DerivedImagesTests: XCTestCase {
         XCTAssertEqual(Array(kept.prefix(4)), [0x89, 0x50, 0x4E, 0x47], "PNG, not JPEG")
     }
 
+    func testNoteThumbnailsAreKeptByRevision() throws {
+        let id = UUID()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 170)).image { context in
+            UIColor.yellow.setFill(); context.fill(CGRect(x: 0, y: 0, width: 120, height: 170))
+        }
+        XCTAssertNil(PreviewCache.load(id, revision: 3, in: folder))
+        PreviewCache.store(image, id: id, revision: 3, in: folder)
+        XCTAssertNotNil(PreviewCache.load(id, revision: 3, in: folder))
+        // A newer revision replaces the older file; another note's thumbnail stays.
+        let other = UUID()
+        PreviewCache.store(image, id: other, revision: 1, in: folder)
+        PreviewCache.store(image, id: id, revision: 4, in: folder)
+        XCTAssertNil(PreviewCache.load(id, revision: 3, in: folder))
+        XCTAssertNotNil(PreviewCache.load(id, revision: 4, in: folder))
+        PreviewCache.remove(id, in: folder)
+        XCTAssertNil(PreviewCache.load(id, revision: 4, in: folder))
+        XCTAssertNotNil(PreviewCache.load(other, revision: 1, in: folder))
+    }
+
     func testOnlyHashesNameCopies() {
         XCTAssertNil(DerivedImages.url("../../escape", .display, in: folder))
         XCTAssertNotNil(DerivedImages.url(String(repeating: "f", count: 64), .poster, in: folder))

@@ -151,3 +151,18 @@ func rejectsInvalidDimensions(_ width: Double) {
     #expect(SearchText.query(" \"; ") == nil)
     #expect(SearchText.firstMatch(of: "acao", in: "Uma Ação aqui") == NSRange(location: 4, length: 4))
 }
+
+@Test func noteLinksNameNotesByIdentifier() throws {
+    let other = UUID()
+    #expect(NoteLinks.target(of: NoteLinks.url(for: other)) == other)
+    #expect(NoteLinks.target(of: "GOTIT://nota/" + other.uuidString) == other)
+    #expect(NoteLinks.target(of: "https://exemplo.com") == nil && NoteLinks.target(of: nil) == nil)
+    var note = CanvasDocument(title: "N")
+    var table = CanvasTable(rows: 1, columns: 1, width: 100)
+    let third = UUID()
+    table.cells[0][0].text = RichText(runs: [TextRun("x", style: .init(link: NoteLinks.url(for: third)))])
+    note.blocks = [CanvasBlock(order: 0, content: .text(RichText(runs: [TextRun("a", style: .init(link: NoteLinks.url(for: other))),
+                                                                       TextRun("eu", style: .init(link: NoteLinks.url(for: note.id)))]))),
+                   CanvasBlock(order: 1, layout: .init(mode: .absolute), content: .table(table))]
+    #expect(NoteLinks.targets(in: note) == [other, third], "a link to itself is not a reference")
+}

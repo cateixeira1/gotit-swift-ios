@@ -5,7 +5,8 @@ import Foundation
 /// Handwriting stays ink until it is converted to text; it is not searched.
 public enum SearchText {
     /// Raised when what is indexed changes, so stored indexes are built again.
-    public static let indexVersion = 1
+    /// 2: links between notes are indexed with the text.
+    public static let indexVersion = 2
 
     public enum Kind: String, Codable, Sendable { case title, text, table, caption }
 

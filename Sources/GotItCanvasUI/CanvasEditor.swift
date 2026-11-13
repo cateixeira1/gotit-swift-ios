@@ -48,6 +48,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onPlayVideo: ((UUID) -> Void)?
     /// "Reduzir tamanho…" on a video block: the host offers a smaller copy.
     public var onReduceVideo: ((UUID) -> Void)?
+    /// "Ligar a outra nota…": the host lets the user pick a note and answers with it (id, title).
+    public var onPickNote: ((@escaping @MainActor (UUID, String) -> Void) -> Void)?
 
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
@@ -1178,9 +1180,48 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
-        guard let session = configuration.session, let selection = session.storySelection, let id = textIDs[ObjectIdentifier(textView)],
-              session.fragmentRanges[id]?.story == selection.story, let menu = session.storyMenu else { return nil }
-        return menu()
+        if let session = configuration.session, let selection = session.storySelection, let id = textIDs[ObjectIdentifier(textView)],
+           session.fragmentRanges[id]?.story == selection.story, let menu = session.storyMenu { return menu() }
+        // On a link to another note: "Abrir" first (links cannot be tapped open while editing).
+        guard let target = linkedNote(in: textView, at: range) else { return nil }
+        let title = configuration.note(target)?.title
+        let open = UIAction(title: title.map { "Abrir “\($0)”" } ?? "Abrir nota", image: UIImage(systemName: "arrow.up.right.square")) { [weak self] _ in
+            self?.configuration.onOpenNote(target)
+        }
+        return UIMenu(children: [open] + suggestedActions)
+    }
+
+    /// The note linked from the text at `range` (or just before the caret).
+    func linkedNote(in textView: UITextView, at range: NSRange) -> UUID? {
+        let text = textView.attributedText ?? NSAttributedString()
+        guard text.length > 0 else { return nil }
+        for location in [range.location, range.location - 1] where location >= 0 && location < text.length {
+            let value = text.attribute(.link, at: location, effectiveRange: nil)
+            if let id = NoteLinks.target(of: (value as? URL)?.absoluteString ?? (value as? String)) { return id }
+        }
+        return nil
+    }
+
+    /// Links the selection to a note the user picks; with nothing selected, writes the note's
+    /// title as the link.
+    private func linkNote(_ text: UITextView) {
+        guard let pick = configuration.onPickNote else { return }
+        let range = text.selectedRange
+        pick { [weak self, weak text] id, title in
+            guard let self, let text, let url = URL(string: NoteLinks.url(for: id)) else { return }
+            let length = text.textStorage.length
+            let location = min(range.location, length)
+            if range.length > 0, location + range.length <= length {
+                text.textStorage.addAttribute(.link, value: url, range: NSRange(location: location, length: range.length))
+            } else {
+                var attributes = text.typingAttributes
+                attributes[.link] = url
+                text.textStorage.insert(NSAttributedString(string: title, attributes: attributes), at: location)
+                text.selectedRange = NSRange(location: location + (title as NSString).length, length: 0)
+                text.typingAttributes[.link] = nil
+            }
+            self.textViewDidChange(text)
+        }
     }
 
     // MARK: Selection across pages
@@ -1294,6 +1335,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             UIAction(title: "Espaçamento entre linhas: +2 pt") { [weak self, weak text] _ in if let text { self?.paragraph(text) { $0.lineSpacing += 2 } } },
             UIAction(title: "Espaçamento padrão") { [weak self, weak text] _ in if let text { self?.paragraph(text) { $0.lineSpacing = 0; $0.paragraphSpacing = 0 } } },
             UIAction(title: "Inserir link") { [weak self, weak text] _ in if let text { self?.insertLink(text) } },
+            UIAction(title: "Ligar a outra nota…", image: UIImage(systemName: "link")) { [weak self, weak text] _ in if let text { self?.linkNote(text) } },
             UIAction(title: "Localizar e substituir") { [weak text] _ in text?.findInteraction?.presentFindNavigator(showingReplace: true) }
         ])
     }

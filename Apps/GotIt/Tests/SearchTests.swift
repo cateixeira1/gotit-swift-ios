@@ -1,6 +1,8 @@
 import XCTest
+import UIKit
 import GotItDomain
 import GotItPersistence
+@testable import GotItCanvasUI
 @testable import GotItApp
 
 /// Search from the list: finds notes in any folder, ignoring accents, and opens them at the word.
@@ -45,5 +47,47 @@ final class SearchTests: XCTestCase {
         await model.deleteForever(note.id)
         await model.deleteFolder(folder.id)
         XCTAssertNil(model.error)
+    }
+
+    /// A link to another note opens it from the text's menu, and the other note lists who cites it.
+    func testLinksBetweenNotesOpenAndAreListedAsBacklinks() async throws {
+        let model = AppModel()
+        await model.start()
+        model.currentFolder = nil
+        await model.createNote()
+        let target = try XCTUnwrap(model.document)
+        await model.createNote()
+        let source = try XCTUnwrap(model.document)
+        let block = CanvasBlock(layout: .init(mode: .absolute, frame: .init(x: 80, y: 80, width: 300, height: 60)), content: .text(RichText(runs: [
+            TextRun("ver "), TextRun("laudo", style: .init(link: NoteLinks.url(for: target.id))),
+        ])))
+        model.enqueue([.insertBlock(block)], pageID: source.pages[0].id, documentID: source.id)
+        while model.isSaving { try await Task.sleep(for: .milliseconds(20)) }
+        let cited = await model.backlinks(to: target.id)
+        XCTAssertEqual(cited.map(\.id), [source.id])
+        // In the editor, the text's menu on the link offers to open the note.
+        var opened: UUID?
+        let page = try XCTUnwrap(model.document)
+        let controller = CanvasViewController(configuration: CanvasEditor(document: page,
+            note: { $0 == target.id ? NoteCardPresentation(title: "Laudo", createdAt: Date()) : nil },
+            onCommands: { _ in }, onOpenNote: { opened = $0 }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene); window.frame = CGRect(x: 0, y: 0, width: 834, height: 1194)
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        controller.view.layoutIfNeeded()
+        let text = try XCTUnwrap(Self.textViews(in: controller.view).first { $0.text == "ver laudo" })
+        XCTAssertEqual(controller.linkedNote(in: text, at: NSRange(location: 6, length: 0)), target.id)
+        XCTAssertNil(controller.linkedNote(in: text, at: NSRange(location: 1, length: 0)))
+        let menu = try XCTUnwrap(controller.textView(text, editMenuForTextIn: NSRange(location: 6, length: 0), suggestedActions: []))
+        let action = try XCTUnwrap(menu.children.first as? UIAction)
+        XCTAssertEqual(action.title, "Abrir “Laudo”")
+        XCTAssertNil(opened, "opens only when chosen")
+        for id in [source.id, target.id] { await model.moveToTrash(id); await model.deleteForever(id) }
+        XCTAssertNil(model.error)
+    }
+
+    private static func textViews(in view: UIView) -> [UITextView] {
+        ((view as? UITextView).map { [$0] } ?? []) + view.subviews.flatMap(textViews)
     }
 }

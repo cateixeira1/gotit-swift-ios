@@ -88,3 +88,42 @@ enum DerivedImages {
         do { try FileManager.default.moveItem(at: temporary, to: url) } catch { try? FileManager.default.removeItem(at: temporary) }
     }
 }
+
+/// Note thumbnails kept on disk by revision. Starting the app (or coming back to the list) shows
+/// each note's thumbnail without opening the note again; only a note that changed since its
+/// thumbnail was made is opened and drawn. The previous revision's file is removed when a newer
+/// one is written. Like the other copies, they live in Caches and are made again when missing.
+enum PreviewCache {
+    /// Raised when thumbnails are drawn differently, so older ones are not reused.
+    static let drawingVersion = 1
+
+    static var folder: URL? {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
+        let folder = caches.appendingPathComponent("GotIt-previews", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    static func url(_ id: UUID, revision: Int64, in folder: URL? = PreviewCache.folder) -> URL? {
+        folder?.appendingPathComponent("\(id.uuidString)-r\(revision)-v\(drawingVersion).png")
+    }
+
+    static func load(_ id: UUID, revision: Int64, in folder: URL? = PreviewCache.folder) -> UIImage? {
+        guard let url = url(id, revision: revision, in: folder), let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
+
+    static func store(_ image: UIImage, id: UUID, revision: Int64, in folder: URL? = PreviewCache.folder) {
+        guard let url = url(id, revision: revision, in: folder), let data = image.pngData() else { return }
+        try? data.write(to: url, options: .atomic)
+        remove(id, keeping: url.lastPathComponent, in: folder)
+    }
+
+    /// Removes the note's thumbnails (all of them, or all but `keeping`).
+    static func remove(_ id: UUID, keeping: String? = nil, in folder: URL? = PreviewCache.folder) {
+        guard let folder, let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
+        for name in names where name.hasPrefix(id.uuidString + "-") && name != keeping {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+        }
+    }
+}

@@ -253,9 +253,12 @@ public actor SQLiteStore {
         if built != Int64(SearchText.indexVersion) {
             try db.transaction {
                 try db.execute("DELETE FROM search_text")
+                try db.execute("DELETE FROM note_links")
                 for row in try db.execute("SELECT id FROM documents") {
                     guard case .text(let value) = row[0], let id = UUID(uuidString: value) else { continue }
-                    try write(SearchText.entries(try readDocument(id)), documentID: id)
+                    let document = try readDocument(id)
+                    try write(SearchText.entries(document), documentID: id)
+                    try link(id, adding: NoteLinks.targets(in: document), removing: [])
                 }
                 try db.execute("INSERT OR REPLACE INTO search_state(key, value) VALUES ('version', ?)", [.integer(Int64(SearchText.indexVersion))])
             }
@@ -277,6 +280,27 @@ public actor SQLiteStore {
             else { try db.execute("DELETE FROM search_text WHERE document_id = ? AND block_id IS NULL", [key]) }
         }
         try write(change.written, documentID: new.id)
+        let before = old.map(NoteLinks.targets) ?? [], after = NoteLinks.targets(in: new)
+        if before != after { try link(new.id, adding: after.subtracting(before), removing: before.subtracting(after)) }
+    }
+
+    private func link(_ source: UUID, adding: Set<UUID>, removing: Set<UUID>) throws {
+        for target in removing {
+            try db.execute("DELETE FROM note_links WHERE source_id = ? AND target_id = ?", [.text(source.uuidString), .text(target.uuidString)])
+        }
+        for target in adding {
+            try db.execute("INSERT OR IGNORE INTO note_links(source_id, target_id) VALUES (?, ?)", [.text(source.uuidString), .text(target.uuidString)])
+        }
+    }
+
+    /// Notes and Teias (not in the Lixeira) that point to `id`: links in their text, Teia cards.
+    public func backlinks(to id: UUID) throws -> [UUID] {
+        try ensureSearchIndex()
+        return try db.execute("""
+            SELECT source_id FROM note_links WHERE target_id = ? AND source_id NOT IN (SELECT document_id FROM trash) ORDER BY source_id
+            """, [.text(id.uuidString)]).compactMap { row in
+            if case .text(let value) = row[0] { return UUID(uuidString: value) }; return nil
+        }
     }
 
     private func write(_ entries: [SearchText.Entry], documentID: UUID) throws {

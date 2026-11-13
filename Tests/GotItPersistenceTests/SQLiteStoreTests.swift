@@ -257,7 +257,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 9)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 10)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -661,5 +661,36 @@ private func multimediaDocument() -> CanvasDocument {
     try db.execute("DELETE FROM search_text"); try db.execute("DELETE FROM search_state"); try db.close()
     store = try SQLiteStore(url: fixture.url)
     #expect(try await store.search("antiga").map(\.documentID) == [note.id])
+    try await store.close()
+}
+
+@Test func backlinksFollowLinksAndTeiaCardsAcrossEditsAndRenames() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let target = try await store.create(CanvasDocument(title: "Laudo"))
+    let source = try await store.create(CanvasDocument(title: "Petição"))
+    var web = CanvasDocument(title: "Teia", kind: .web)
+    web.blocks = [CanvasBlock(layout: .init(mode: .absolute), content: .noteReference(.init(documentID: target.id)))]
+    let teia = try await store.create(web)
+    #expect(try await store.backlinks(to: target.id) == [teia.id])
+    var text = CanvasBlock(order: 0, layout: .init(mode: .absolute), content: .text(RichText(runs: [
+        TextRun("ver "), TextRun("Laudo", style: .init(link: NoteLinks.url(for: target.id))),
+    ])))
+    var edited = try await store.execute([.insertBlock(text)], documentID: source.id, expectedRevision: 0)
+    #expect(Set(try await store.backlinks(to: target.id)) == [teia.id, source.id])
+    // Renaming the cited note keeps the link (it names the note by its identifier).
+    _ = try await store.execute([.rename("Laudo pericial")], documentID: target.id, expectedRevision: target.revision)
+    #expect(Set(try await store.backlinks(to: target.id)) == [teia.id, source.id])
+    // Removing the link removes the reference; undo brings it back.
+    text.content = .text(RichText("ver laudo"))
+    edited = try await store.execute([.replaceBlock(text)], documentID: source.id, expectedRevision: edited.revision)
+    #expect(try await store.backlinks(to: target.id) == [teia.id])
+    _ = try await store.undo(documentID: source.id, expectedRevision: edited.revision)
+    #expect(Set(try await store.backlinks(to: target.id)) == [teia.id, source.id])
+    // A Teia in the Lixeira does not count; deleted for good, its reference goes.
+    try await store.moveToTrash(teia.id)
+    #expect(try await store.backlinks(to: target.id) == [source.id])
+    _ = try await store.emptyTrash()
+    #expect(try await store.backlinks(to: target.id) == [source.id])
     try await store.close()
 }

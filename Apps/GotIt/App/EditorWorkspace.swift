@@ -31,6 +31,9 @@ struct EditorWorkspace: View {
     /// Video whose "Reduzir tamanho…" was chosen (asks for the quality).
     @State private var reducing: UUID?
     @AppStorage(VideoReduction.importKey) private var videoImport = "original"
+    /// "Ligar a outra nota…": the note chosen goes back to the text through `answer`.
+    @State private var linking: NoteLinkRequest?
+    private struct NoteLinkRequest: Identifiable { let id = UUID(); let answer: @MainActor (UUID, String) -> Void }
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
     @State private var showPaper = false
@@ -155,6 +158,9 @@ struct EditorWorkspace: View {
             Button("Bloco próprio ao lado do áudio") { Task { await model.transcribe(id, placement: .card) } }
             Button("Texto na nota, abaixo do áudio") { Task { await model.transcribe(id, placement: .text) } }
         }
+        .sheet(item: $linking) { request in
+            NotePicker(model: model, excluding: document.id) { summary in request.answer(summary.id, summary.title) }
+        }
         .confirmationDialog("Reduzir o vídeo?", isPresented: Binding(get: { reducing != nil }, set: { if !$0 { reducing = nil } }),
                             titleVisibility: .visible, presenting: reducing) { id in
             ForEach(VideoReduction.Quality.allCases) { quality in
@@ -245,7 +251,8 @@ struct EditorWorkspace: View {
                     reader = .init(id: id, documentID: targetDocument, url: url)
                 }
             },
-            onOpenNote: { id in Task { await model.open(id, returningTo: document.kind == .web ? document.id : nil) } },
+            // From a Teia card or a link in a note: "back" returns here.
+            onOpenNote: { id in Task { await model.open(id, returningTo: document.id) } },
             onError: { error in
                 if case .invalid(let text)? = error as? DocumentError { model.error = text } else { model.error = String(describing: error) }
             },
@@ -258,6 +265,7 @@ struct EditorWorkspace: View {
             },
             onReplaceImage: { id, png in model.replaceImage(id, png: png, pageID: targetPage, documentID: targetDocument) })
         editor.onReduceVideo = { id in reducing = id }
+        editor.onPickNote = { answer in linking = NoteLinkRequest(answer: answer) }
         return editor
     }
 

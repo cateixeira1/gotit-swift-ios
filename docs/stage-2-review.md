@@ -414,6 +414,10 @@ Corrigido também: duas notas apagadas no mesmo milissegundo podiam trocar de or
   outro modelo recomeça do zero; Lixeira fica de fora; apagar a nota apaga os vetores (cascata).
   A leitura para quando o app vai para o fundo e devolve a memória do modelo.
 - **Resultados**: abaixo dos resultados por palavra, a seção "Por significado" mostra até 8 notas
-  que as palavras não acharam, com o trecho mais próximo; tocar abre a nota no trecho. Os limiares
-  (similaridade ≥ 0,35 e até 0,15 abaixo do melhor) são valores iniciais, a ajustar com notas reais;
-  o teste com o modelo real no CI imprime as similaridades em português para isso.
+  que as palavras não acharam, com o trecho mais próximo; tocar abre a nota no trecho.
+- **Medido no CI com o modelo real** (Simulator, CPU): 4 trechos em 2,3–5,5 s incluindo carregar
+  o modelo. Quatro consultas em português ("contrato de aluguel", "receita de sobremesa", "exame no
+  hospital", "voo atrasado processo") acharam cada uma a nota do assunto em primeiro, sem as mesmas
+  palavras: similaridade 0,69–0,76 com a nota certa e 0,54–0,66 com as outras. Por isso a lista
+  guarda trechos com similaridade ≥ 0,66 e até 0,06 abaixo do melhor. É uma amostra pequena; os
+  limiares devem ser revistos com notas reais.

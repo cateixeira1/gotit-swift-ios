@@ -124,7 +124,11 @@ final class SemanticSearchTests: XCTestCase {
             let vector = try await embedder.embed(SemanticChunks.queryPrompt(query))
             let scores = vectors.map { SemanticChunks.similarity(vector, $0) }
             print("EmbeddingGemma: “\(query)” → " + scores.map { String(format: "%.3f", $0) }.joined(separator: " "))
-            XCTAssertEqual(scores.firstIndex(of: scores.max()!), expected, "“\(query)”: \(scores)")
+            let best = scores.max()!
+            XCTAssertEqual(scores.firstIndex(of: best), expected, "“\(query)”: \(scores)")
+            // What the list keeps: the note on the subject, none of the others.
+            let kept = scores.indices.filter { scores[$0] >= max(AppModel.meaningFloor, best - AppModel.meaningSpread) }
+            XCTAssertEqual(kept, [expected], "“\(query)”: \(scores)")
         }
         await embedder.close()
     }

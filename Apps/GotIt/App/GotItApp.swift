@@ -223,8 +223,10 @@ final class AppModel {
         }
     }
 
-    /// Starting values for EmbeddingGemma's cosine scores, to be adjusted with use on real notes.
-    static let meaningFloor: Float = 0.35, meaningSpread: Float = 0.15
+    /// From EmbeddingGemma 2 on Portuguese notes (the real-model test in CI): a note on the
+    /// query's subject scored 0.69–0.76, notes on other subjects 0.54–0.66. To be revisited with
+    /// more real notes.
+    static let meaningFloor: Float = 0.66, meaningSpread: Float = 0.06
 
     /// Where to take the caret once a note opened from the search results is on screen.
     private var reveal: (blockID: UUID, query: String)?

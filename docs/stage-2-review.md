@@ -448,3 +448,11 @@ modelo real) e os de interface em iPad e iPhone aprovados
   lista "Fontes" mostra os trechos citados; tocar abre a nota no trecho. A resposta pode ser
   copiada ou inserida na nota (abaixo do conteúdo da página aberta, com as fontes), em texto
   simples. Notas longas são cortadas em 9.000 caracteres, e o app avisa.
+- **Medido no CI com o modelo real** (Simulator do runner, CPU, cache frio): pergunta "Quando vence
+  o contrato do apartamento?" com dois trechos (um de receita, um do contrato). Resposta: "O contrato
+  de locação do apartamento da Rua Augusta vence em 15 de março de 2027 [2]." Primeiras palavras
+  depois de 32–43 s contando o carregamento do modelo; resposta completa em 35–60 s. No aparelho o
+  tempo deve ser outro (GPU, cache do LiteRT-LM preenchido após o primeiro uso) e precisa ser medido.
+
+CI (`d3e64df`): 161 testes do núcleo, 59 nativos (3 do assistente, um com o Gemma real) e os de
+interface em iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43516437871).

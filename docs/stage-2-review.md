@@ -350,3 +350,20 @@ execução de push do mesmo commit, um teste de interface do iPad expirou ao abr
 CI (`c11b527`): 152 testes do núcleo, 50 nativos e os de interface em iPad e iPhone aprovados
 (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43343445083), incluindo a redução de um
 vídeo 1080p para 720p e as pastas (persistência e lista). Falta validar no aparelho.
+
+## Etapa 4 — busca (13/11/2026)
+
+- Esquema v9: índice FTS5 (`search_text`, tokenizador `unicode61 remove_diacritics 2`): acentos e
+  maiúsculas não contam. Entram título, texto da nota, caixas de texto, post-its, transcrições,
+  células de tabela e legendas de imagens, PDFs, áudios e vídeos. Escrita à mão só depois de
+  convertida em texto.
+- **Indexação incremental**: cada edição atualiza, na mesma transação SQLite, só os blocos cujo
+  texto mudou; desfazer e refazer também. Notas apagadas para sempre saem do índice; as da Lixeira
+  ficam fora dos resultados. O índice é construído a partir das notas na primeira busca (bancos
+  anteriores) e de novo se `SearchText.indexVersion` mudar.
+- **Busca na lista** ("Buscar nas notas"): cada palavra precisa aparecer e pode ser o começo de uma
+  palavra maior ("proc" acha "processo"); procura em todas as pastas; uma linha por nota, com o
+  trecho e as palavras em destaque, a pasta e quantos lugares combinaram. Tocar abre a nota na
+  página do trecho, com a palavra selecionada.
+- Próximos itens da etapa 4: miniaturas por revisão e referências estáveis entre notas; busca
+  espacial e por significado (embeddings) depois.

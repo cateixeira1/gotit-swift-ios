@@ -132,3 +132,22 @@ func rejectsInvalidDimensions(_ width: Double) {
     let old = try JSONDecoder().decode(AssetReference.self, from: Data(#"{"hash":"x"}"#.utf8))
     #expect(old.parts == nil); #expect(old.allHashes == ["x"])
 }
+
+@Test func searchTextCoversTitleTextTablesAndCaptionsAndOnlyWhatChanged() throws {
+    var note = CanvasDocument(title: "Nota")
+    let text = CanvasBlock(order: 0, content: .text(RichText("olá")))
+    let image = CanvasBlock(order: 1, layout: .init(mode: .absolute), content: .image(AssetReference(hash: String(repeating: "a", count: 64), caption: "Raio-X")))
+    let empty = CanvasBlock(order: 2, content: .text(RichText("  ")))
+    note.assets = [Asset(hash: String(repeating: "a", count: 64), mediaType: "image/png", byteCount: 1)]
+    note.blocks = [text, image, empty]
+    let entries = SearchText.entries(note)
+    #expect(entries.map(\.kind) == [.title, .text, .caption])
+    var changed = note
+    changed.blocks[0].content = .text(RichText("olá mundo"))
+    let change = SearchText.changes(from: note, to: changed)
+    #expect(change.removed == [text.id] && change.written.map(\.blockID) == [text.id])
+    #expect(SearchText.changes(from: note, to: note).written.isEmpty)
+    #expect(SearchText.query("Ação, 2026!") == "\"Ação\"* \"2026\"*")
+    #expect(SearchText.query(" \"; ") == nil)
+    #expect(SearchText.firstMatch(of: "acao", in: "Uma Ação aqui") == NSRange(location: 4, length: 4))
+}

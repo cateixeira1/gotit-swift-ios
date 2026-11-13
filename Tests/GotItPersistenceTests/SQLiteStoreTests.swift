@@ -257,7 +257,7 @@ private func multimediaDocument() -> CanvasDocument {
     let reopened = try SQLiteStore(url: fixture.url)
     try await reopened.close()
     let db = try SQLiteConnection(path: fixture.url.path)
-    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 8)
+    #expect(try db.execute("PRAGMA user_version").first?.first?.int == 9)
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     let failingFixture = try DatabaseFixture(); defer { failingFixture.clean() }
     let failing = try SQLiteConnection(path: failingFixture.url.path)
@@ -603,4 +603,63 @@ private func multimediaDocument() -> CanvasDocument {
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     #expect(try db.execute("SELECT COUNT(*) FROM document_folders").first?.first?.int == 0)
     try db.close()
+}
+
+@Test func searchFindsWordsIgnoringAccentsAndFollowsEveryEdit() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    var store = try SQLiteStore(url: fixture.url)
+    let note = try await store.create(CanvasDocument(title: "Audiência"))
+    let other = try await store.create(CanvasDocument(title: "Compras"))
+    var story = CanvasBlock(order: 0, layout: .init(mode: .absolute, frame: .init(x: 0, y: 0, width: 300, height: 44)),
+                            content: .text(RichText("Petição inicial contra o hospital, ação de indenização")))
+    story.textFlowID = story.id
+    var edited = try await store.execute([.insertBlock(story)], documentID: note.id, expectedRevision: 0)
+    var hits = try await store.search("acao HOSP")
+    #expect(hits.map(\.documentID) == [note.id])
+    #expect(hits.first?.blockID == story.id && hits.first?.kind == .text)
+    #expect(hits.first?.snippet.contains("\u{2}hospital\u{3}") == true)
+    #expect(try await store.search("audiencia").first?.kind == .title)
+    #expect(try await store.search("ação inexistente").isEmpty)
+    #expect(try await store.search("  ,.  ").isEmpty)
+    // Editing the text changes what is found; undo and redo follow.
+    story.content = .text(RichText("Laudo pericial"))
+    edited = try await store.execute([.replaceBlock(story)], documentID: note.id, expectedRevision: edited.revision)
+    #expect(try await store.search("hospital").isEmpty)
+    #expect(try await store.search("peric").map(\.blockID) == [story.id])
+    edited = try await store.undo(documentID: note.id, expectedRevision: edited.revision)
+    #expect(try await store.search("hospital").map(\.documentID) == [note.id])
+    edited = try await store.redo(documentID: note.id, expectedRevision: edited.revision)
+    #expect(try await store.search("hospital").isEmpty)
+    // Tables and captions are found too.
+    let table = CanvasBlock(order: 1, layout: .init(mode: .absolute, frame: .init(x: 0, y: 100, width: 300, height: 90)),
+                            content: .table(CanvasTable(rows: 1, columns: 1, width: 300)))
+    guard case .table(var grid) = table.content else { return }
+    grid.cells[0][0].text = RichText("Honorários")
+    var filled = table; filled.content = .table(grid); filled.layout.frame.height = grid.height
+    _ = try await store.execute([.insertBlock(filled)], documentID: other.id, expectedRevision: 0)
+    #expect(try await store.search("honorarios").first?.kind == .table)
+    // Not in the Lixeira; gone for good when the note is deleted. Kept across reopening.
+    try await store.moveToTrash(other.id)
+    #expect(try await store.search("honorarios").isEmpty)
+    try await store.restoreFromTrash(other.id)
+    try await store.close()
+    store = try SQLiteStore(url: fixture.url)
+    #expect(try await store.search("honorarios").count == 1)
+    try await store.deleteDocument(note.id, expectedRevision: edited.revision)
+    #expect(try await store.search("pericial").isEmpty)
+    try await store.close()
+}
+
+@Test func searchIndexIsBuiltForNotesWrittenBeforeIt() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    var store = try SQLiteStore(url: fixture.url)
+    _ = try await store.search("x")          // builds the (empty) index
+    let note = try await store.create(CanvasDocument(title: "Antiga"))
+    try await store.close()
+    // As in a database from before search existed: no index, no version.
+    let db = try SQLiteConnection(path: fixture.url.path)
+    try db.execute("DELETE FROM search_text"); try db.execute("DELETE FROM search_state"); try db.close()
+    store = try SQLiteStore(url: fixture.url)
+    #expect(try await store.search("antiga").map(\.documentID) == [note.id])
+    try await store.close()
 }

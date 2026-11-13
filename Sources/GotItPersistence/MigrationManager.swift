@@ -7,7 +7,7 @@ enum MigrationManager {
             guard let version = try db.execute("PRAGMA user_version").first?.first?.int else {
                 throw PersistenceError.corruptData("Missing schema version")
             }
-            guard version <= 8 else { throw PersistenceError.unsupportedSchema(version) }
+            guard version <= 9 else { throw PersistenceError.unsupportedSchema(version) }
             if version == 0 {
                 guard let url = Bundle.module.url(forResource: "001_document_core", withExtension: "sql") else {
                     throw PersistenceError.corruptData("Missing bundled migration")
@@ -62,6 +62,17 @@ enum MigrationManager {
                                                              folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE);
                 """)
                 try db.execute("PRAGMA user_version = 8")
+            }
+            // Version 9: search. An FTS5 index of the text of every note (accents and case ignored),
+            // updated in the same transaction as each edit. It is built from the notes the first
+            // time it is needed, and again whenever `SearchText.indexVersion` changes.
+            if version < 9 {
+                try db.script("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS search_text USING fts5(document_id UNINDEXED, block_id UNINDEXED, kind UNINDEXED, text,
+                                                                         tokenize = 'unicode61 remove_diacritics 2');
+                CREATE TABLE IF NOT EXISTS search_state (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);
+                """)
+                try db.execute("PRAGMA user_version = 9")
             }
         }
         try db.execute("PRAGMA journal_mode = WAL")

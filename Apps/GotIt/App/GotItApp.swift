@@ -156,6 +156,62 @@ final class AppModel {
         return TextFlowFocus(blockID: block.id, pageID: firstPage, range: NSRange(location: 0, length: 0), frame: block.layout.frame)
     }
 
+    // MARK: Busca
+
+    /// One note in the search results: its best excerpt and how many places matched.
+    struct SearchResult: Identifiable {
+        let documentID: UUID
+        let title: String
+        let kind: DocumentKind
+        let folder: String?
+        let hit: SearchHit
+        let matches: Int
+        var id: UUID { documentID }
+    }
+
+    /// Notes where the words appear (best first, one row per note).
+    func search(_ input: String) async -> [SearchResult] {
+        guard let store else { return [] }
+        do {
+            let hits = try await store.search(input)
+            var order: [UUID] = [], best: [UUID: SearchHit] = [:], counts: [UUID: Int] = [:]
+            for hit in hits {
+                if best[hit.documentID] == nil { best[hit.documentID] = hit; order.append(hit.documentID) }
+                counts[hit.documentID, default: 0] += 1
+            }
+            return order.compactMap { id in
+                guard let summary = summaries.first(where: { $0.id == id && !$0.isTrashed }), let hit = best[id] else { return nil }
+                return SearchResult(documentID: id, title: summary.title, kind: summary.kind,
+                                    folder: summary.folderID.map { folderName($0) }, hit: hit, matches: counts[id] ?? 1)
+            }
+        } catch { self.error = String(describing: error); return [] }
+    }
+
+    /// Where to take the caret once a note opened from the search results is on screen.
+    private var reveal: (blockID: UUID, query: String)?
+    /// Changes when a found place should be shown (the editor then calls `takeRevealFocus`).
+    var revealRequest = 0
+
+    /// Opens a note at what was found: its page, and in a text the found word selected.
+    func open(_ result: SearchResult, query: String) async {
+        await open(result.documentID)
+        guard let document, document.id == result.documentID, let block = result.hit.blockID else { return }
+        if let page = document.pageID(for: block) { selectedPageID = page }
+        reveal = (block, query)
+        revealRequest += 1
+    }
+
+    var revealPending: Bool { reveal != nil }
+
+    func takeRevealFocus() -> TextFlowFocus? {
+        guard let target = reveal else { return nil }
+        reveal = nil
+        guard let document, let block = document.blocks.first(where: { $0.id == target.blockID }),
+              case .text(let rich) = block.content, let page = document.pageID(for: block.id) else { return nil }
+        let range = SearchText.firstMatch(of: target.query, in: rich.plainText) ?? NSRange(location: 0, length: 0)
+        return TextFlowFocus(blockID: block.id, pageID: page, range: range, text: rich, frame: block.layout.frame)
+    }
+
     // MARK: Pastas
 
     var folders: [Folder] = []

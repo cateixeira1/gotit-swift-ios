@@ -174,13 +174,29 @@ struct EditorWorkspace: View {
         .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
         // Opening a note puts the caret in its text and brings up the keyboard, ready to type.
         .task(id: document.id) {
-            guard document.kind == .note, model.autofocusOnOpen else { return }
+            guard document.kind == .note else { return }
+            if model.revealPending {
+                // Opened from the search results while no note was on screen.
+                try? await Task.sleep(for: .milliseconds(450))
+                if !Task.isCancelled, let focus = model.takeRevealFocus() { session.focusText(focus) }
+                return
+            }
+            guard model.autofocusOnOpen else { return }
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled, model.document?.id == document.id, let focus = model.caretOnOpen() else { return }
+            guard !Task.isCancelled, model.document?.id == document.id, !model.revealPending, let focus = model.caretOnOpen() else { return }
             try? await Task.sleep(for: .milliseconds(120))
             session.focusText(focus)
         }
         .onChange(of: scenePhase) { _, phase in if phase != .active { session.perform(.finish) } }
+        // Opened from the search results: the page is already chosen; the found word is selected
+        // once the page's text is on screen.
+        .onChange(of: model.revealRequest) { _, _ in
+            pageScrollRequest += 1
+            Task {
+                try? await Task.sleep(for: .milliseconds(450))
+                if let focus = model.takeRevealFocus() { session.focusText(focus) }
+            }
+        }
     }
 
     private var canvas: some View {

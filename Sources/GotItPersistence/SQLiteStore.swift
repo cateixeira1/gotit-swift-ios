@@ -15,6 +15,17 @@ public struct DocumentSummary: Equatable, Sendable, Identifiable {
     public var folderID: UUID? = nil
 }
 
+/// A place in a note where the words searched for appear.
+public struct SearchHit: Equatable, Sendable {
+    public let documentID: UUID
+    /// The block holding them; nil when it is the note's title.
+    public let blockID: UUID?
+    public let kind: SearchText.Kind
+    /// A short excerpt; the words found are between `SearchHit.markStart` and `markEnd`.
+    public let snippet: String
+    public static let markStart: Character = "\u{2}", markEnd: Character = "\u{3}"
+}
+
 /// A folder of notes and Teias, possibly inside another one.
 public struct Folder: Equatable, Sendable, Identifiable {
     public let id: UUID
@@ -40,6 +51,8 @@ public actor SQLiteStore {
     private let historyLimit: Int
     private let historyByteLimit: Int
     private var cachedDocument: CanvasDocument?
+    /// Whether the search index matches the notes (checked once, built if needed).
+    private var searchReady = false
 
     /// Use an app-owned Application Support URL. Parent directory must already exist.
     /// History keeps at most `historyLimit` groups and about `historyByteLimit` bytes of deltas per document.
@@ -65,6 +78,7 @@ public actor SQLiteStore {
             try db.execute("INSERT INTO documents(id, metadata) VALUES (?, ?)",
                            [.text(document.id.uuidString), .blob(try metadata(document))])
             try writeContents(document)
+            try index(from: nil, to: document)
             return document
         }
     }
@@ -107,6 +121,7 @@ public actor SQLiteStore {
             var after = try CommandEngine.applying(commands, to: before)
             try advance(&after, from: before)
             try writeContents(after, previous: before)
+            try index(from: before, to: after)
             try HistoryStore.record(db, before: before, after: after, commands: commands, limit: historyLimit, byteLimit: historyByteLimit, group: historyGroup)
             if let operationID {
                 try db.execute("INSERT INTO edit_receipts VALUES (?, ?, ?, ?)", [.text(operationID.uuidString), .text(documentID.uuidString), .integer(expectedRevision), .blob(try JSONEncoder().encode(commands))])
@@ -175,6 +190,7 @@ public actor SQLiteStore {
     public func deleteDocument(_ id: UUID, expectedRevision: Int64) throws {
         try db.transaction {
             try checkRevision(readDocument(id), expected: expectedRevision)
+            try db.execute("DELETE FROM search_text WHERE document_id = ?", [.text(id.uuidString)])
             try db.execute("DELETE FROM documents WHERE id = ?", [.text(id.uuidString)])
         }
         if cachedDocument?.id == id { cachedDocument = nil }
@@ -201,11 +217,73 @@ public actor SQLiteStore {
     public func emptyTrash() throws -> Int {
         let count = try db.transaction {
             let ids = try db.execute("SELECT document_id FROM trash")
+            try db.execute("DELETE FROM search_text WHERE document_id IN (SELECT document_id FROM trash)")
             try db.execute("DELETE FROM documents WHERE id IN (SELECT document_id FROM trash)")
             return ids.count
         }
         cachedDocument = nil
         return count
+    }
+
+    // MARK: Search
+
+    /// Notes (not in the Lixeira) where every word typed appears, best matches first; at most one
+    /// hit per block. Accents and case are ignored; each word may be the start of a longer one.
+    public func search(_ input: String, limit: Int = 60) throws -> [SearchHit] {
+        guard let query = SearchText.query(input) else { return [] }
+        try ensureSearchIndex()
+        let rows = try db.execute("""
+            SELECT document_id, block_id, kind, snippet(search_text, 3, char(2), char(3), '…', 12) FROM search_text
+            WHERE search_text MATCH ? AND document_id NOT IN (SELECT document_id FROM trash)
+            ORDER BY bm25(search_text) LIMIT ?
+            """, [.text(query), .integer(Int64(max(1, limit)))])
+        return rows.compactMap { row in
+            guard case .text(let document) = row[0], let id = UUID(uuidString: document), case .text(let kind) = row[2],
+                  let kind = SearchText.Kind(rawValue: kind), case .text(let snippet) = row[3] else { return nil }
+            var block: UUID?
+            if case .text(let value) = row[1] { block = UUID(uuidString: value) }
+            return SearchHit(documentID: id, blockID: block, kind: kind, snippet: snippet)
+        }
+    }
+
+    /// Builds the index from every note when it was never built or was built by an older version.
+    public func ensureSearchIndex() throws {
+        guard !searchReady else { return }
+        let built = try db.execute("SELECT value FROM search_state WHERE key = 'version'").first?.first?.int
+        if built != Int64(SearchText.indexVersion) {
+            try db.transaction {
+                try db.execute("DELETE FROM search_text")
+                for row in try db.execute("SELECT id FROM documents") {
+                    guard case .text(let value) = row[0], let id = UUID(uuidString: value) else { continue }
+                    try write(SearchText.entries(try readDocument(id)), documentID: id)
+                }
+                try db.execute("INSERT OR REPLACE INTO search_state(key, value) VALUES ('version', ?)", [.integer(Int64(SearchText.indexVersion))])
+            }
+        }
+        searchReady = true
+    }
+
+    /// Only the blocks whose searchable text changed are rewritten. Before the index is built
+    /// (first use, older version) nothing is written: building it reads every note anyway.
+    private func index(from old: CanvasDocument?, to new: CanvasDocument) throws {
+        if !searchReady {
+            let built = try db.execute("SELECT value FROM search_state WHERE key = 'version'").first?.first?.int
+            guard built == Int64(SearchText.indexVersion) else { return }
+        }
+        let change = SearchText.changes(from: old, to: new)
+        let key = SQLValue.text(new.id.uuidString)
+        for block in change.removed {
+            if let block { try db.execute("DELETE FROM search_text WHERE document_id = ? AND block_id = ?", [key, .text(block.uuidString)]) }
+            else { try db.execute("DELETE FROM search_text WHERE document_id = ? AND block_id IS NULL", [key]) }
+        }
+        try write(change.written, documentID: new.id)
+    }
+
+    private func write(_ entries: [SearchText.Entry], documentID: UUID) throws {
+        for entry in entries {
+            try db.execute("INSERT INTO search_text(document_id, block_id, kind, text) VALUES (?, ?, ?, ?)",
+                           [.text(documentID.uuidString), entry.blockID.map { SQLValue.text($0.uuidString) } ?? .null, .text(entry.kind.rawValue), .text(entry.text)])
+        }
     }
 
     // MARK: Folders
@@ -309,6 +387,7 @@ public actor SQLiteStore {
             try advance(&restored, from: before)
             try DocumentValidator.validate(restored)
             try writeContents(restored, previous: before)
+            try index(from: before, to: restored)
             return restored
         }
     }

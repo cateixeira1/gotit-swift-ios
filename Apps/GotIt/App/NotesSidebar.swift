@@ -17,9 +17,23 @@ struct NotesSidebar: View {
     @State private var naming: NameRequest?
     @State private var name = ""
     @State private var deleting: Folder?
+    @State private var query = ""
+    @State private var results: [AppModel.SearchResult] = []
+    private var searching: Bool { SearchText.query(query) != nil }
 
     var body: some View {
         List {
+            if searching {
+                Section {
+                    if results.isEmpty {
+                        Text("Nada encontrado para “\(query.trimmingCharacters(in: .whitespaces))”.").foregroundStyle(.secondary)
+                            .accessibilityIdentifier("searchEmpty")
+                    }
+                    ForEach(results) { result in resultRow(result) }
+                } header: { Text("Resultados") } footer: {
+                    Text("Procura no título, no texto, em post-its, transcrições, tabelas e legendas, em todas as pastas. Escrita à mão entra na busca depois de convertida em texto.")
+                }
+            } else {
             Section {
                 if let current = model.folder(model.currentFolder) {
                     Button { model.currentFolder = current.parentID } label: {
@@ -51,6 +65,16 @@ struct NotesSidebar: View {
                 .frame(maxWidth: .infinity).padding(.top, 28)
                 .accessibilityElement(children: .combine)
             }
+            }
+        }
+        .searchable(text: $query, placement: .sidebar, prompt: "Buscar nas notas")
+        .task(id: query) {
+            // A short pause after typing, then the index is asked (it answers in milliseconds).
+            guard searching else { results = []; return }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            let found = await model.search(query)
+            if !Task.isCancelled { results = found }
         }
         .navigationTitle(model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder))
         // A deleted row (already faded) closes its gap smoothly instead of vanishing.
@@ -81,6 +105,42 @@ struct NotesSidebar: View {
 
     private var namingTitle: String { if case .rename = naming { "Renomear pasta" } else { "Nova pasta" } }
     private var namingAction: String { if case .rename = naming { "Renomear" } else { "Criar" } }
+
+    private func resultRow(_ result: AppModel.SearchResult) -> some View {
+        Button { Task { await model.open(result, query: query); preferredColumn = .detail } } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: result.kind == .web ? "point.3.connected.trianglepath.dotted" : "note.text").foregroundStyle(.secondary)
+                    Text(result.title).font(.headline).lineLimit(1)
+                    Spacer()
+                    if result.matches > 1 { Text("\(result.matches)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                }
+                if result.hit.kind != .title { Text(Self.highlighted(result.hit.snippet)).font(.subheadline).lineLimit(3) }
+                if let folder = result.folder { Label(folder, systemImage: "folder").font(.caption).foregroundStyle(.secondary) }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("searchResult-\(result.title)")
+    }
+
+    /// The excerpt with the words found in bold.
+    static func highlighted(_ snippet: String) -> AttributedString {
+        var output = AttributedString()
+        var bold = false, piece = ""
+        func flush() {
+            guard !piece.isEmpty else { return }
+            var part = AttributedString(piece)
+            if bold { part.inlinePresentationIntent = .stronglyEmphasized; part.foregroundColor = .accentColor }
+            output += part; piece = ""
+        }
+        for character in snippet.replacingOccurrences(of: "\n", with: " ") {
+            if character == SearchHit.markStart { flush(); bold = true }
+            else if character == SearchHit.markEnd { flush(); bold = false }
+            else { piece.append(character) }
+        }
+        flush()
+        return output
+    }
 
     private func folderRow(_ folder: Folder) -> some View {
         Button { model.currentFolder = folder.id } label: {

@@ -28,6 +28,9 @@ struct EditorWorkspace: View {
     @State private var playing: PlayingVideo?
     private struct PlayingVideo: Identifiable { let id: UUID; let player: AVPlayer }
     @State private var showStickers = false
+    /// Video whose "Reduzir tamanho…" was chosen (asks for the quality).
+    @State private var reducing: UUID?
+    @AppStorage(VideoReduction.importKey) private var videoImport = "original"
     @State private var pageScrollRequest = 0
     @State private var pageSetup: PageSetupView.Focus?
     @State private var showPaper = false
@@ -105,7 +108,8 @@ struct EditorWorkspace: View {
                     Task {
                         do {
                             guard let movie = try await item.loadTransferable(type: PickedMovie.self) else { return }
-                            await model.insertVideo(from: movie.url, pageID: target.pageID, documentID: target.documentID)
+                            await model.insertVideo(from: movie.url, pageID: target.pageID, documentID: target.documentID,
+                                                    reduce: VideoReduction.Quality(rawValue: videoImport))
                             try? FileManager.default.removeItem(at: movie.url)
                         } catch { model.error = "Não foi possível abrir o vídeo: \(error.localizedDescription)" }
                     }
@@ -151,6 +155,22 @@ struct EditorWorkspace: View {
             Button("Bloco próprio ao lado do áudio") { Task { await model.transcribe(id, placement: .card) } }
             Button("Texto na nota, abaixo do áudio") { Task { await model.transcribe(id, placement: .text) } }
         }
+        .confirmationDialog("Reduzir o vídeo?", isPresented: Binding(get: { reducing != nil }, set: { if !$0 { reducing = nil } }),
+                            titleVisibility: .visible, presenting: reducing) { id in
+            ForEach(VideoReduction.Quality.allCases) { quality in
+                Button(quality.title) { Task { await model.reduceVideo(id, quality: quality) } }
+            }
+        } message: { id in
+            let size = document.blocks.first { $0.id == id }?.content.assetHash.map(model.assetBytes) ?? 0
+            Text("Ocupa \(VideoReduction.megabytes(size)). Uma cópia menor substitui o vídeo nesta nota, com alguma perda de qualidade; desfazer traz o original de volta.")
+        }
+        .overlay(alignment: .top) {
+            if model.reducingVideos > 0 {
+                Label("Reduzindo vídeo…", systemImage: "film").font(.footnote.weight(.medium))
+                    .padding(.horizontal, 14).padding(.vertical, 8).background(.regularMaterial, in: Capsule())
+                    .padding(.top, 54).accessibilityIdentifier("reducingVideo")
+            }
+        }
         .onChange(of: document.id) { _, _ in tool = .select; session.hasTextSelection = false }
         // Opening a note puts the caret in its text and brings up the keyboard, ready to type.
         .task(id: document.id) {
@@ -195,7 +215,7 @@ struct EditorWorkspace: View {
         // Capture identifiers, so delayed imports/drawing callbacks never land on another page.
         let targetDocument = document.id
         let page = (try? document.pageDocument(targetPage)) ?? document
-        return CanvasEditor(document: page, tool: tool, session: session,
+        var editor = CanvasEditor(document: page, tool: tool, session: session,
             inkColor: UIColor(inkColor).resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)),
             inkWidth: inkWidth, vectorEraser: vectorEraser,
             drawingData: model.assetData,
@@ -221,6 +241,8 @@ struct EditorWorkspace: View {
                 }
             },
             onReplaceImage: { id, png in model.replaceImage(id, png: png, pageID: targetPage, documentID: targetDocument) })
+        editor.onReduceVideo = { id in reducing = id }
+        return editor
     }
 
     private var formattingBar: some View {
@@ -450,6 +472,13 @@ struct EditorWorkspace: View {
                             afterToolsClose { showStickers = true }
                         }
                     }
+                }
+                toolSection("Vídeos ao inserir") {
+                    // Off by default: the original is kept unless the user prefers to save space.
+                    Picker("Vídeos ao inserir", selection: $videoImport) {
+                        Text("Original").tag("original")
+                        ForEach(VideoReduction.Quality.allCases) { Text("Reduzir — \($0.title)").tag($0.rawValue) }
+                    }.pickerStyle(.menu).font(.caption).accessibilityIdentifier("videoImportReduction")
                 }
                 toolSection("Destacar") {
                     HStack(spacing: 10) {

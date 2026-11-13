@@ -589,14 +589,26 @@ final class AppModel {
 
     /// A video from the gallery or Files goes on the page with its first frame and the shape of
     /// the video, at the first free spot; a tap plays it.
-    func insertVideo(from url: URL, pageID: UUID, documentID: UUID) async {
+    /// `reduce`: the user chose to insert videos as a smaller copy (Ferramentas › Vídeos ao inserir).
+    func insertVideo(from url: URL, pageID: UUID, documentID: UUID, reduce: VideoReduction.Quality? = nil) async {
         guard let current = document, current.id == documentID else { return }
         do {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let type = UTType(filenameExtension: url.pathExtension)
             guard type?.conforms(to: .movie) ?? true else { throw DocumentError.invalid("O arquivo não é um vídeo.") }
-            let asset = try await storeAsset(file: url, mediaType: type?.preferredMIMEType ?? "video/quicktime")
+            var file = url, mediaType = type?.preferredMIMEType ?? "video/quicktime"
+            if let reduce {
+                reducingVideos += 1
+                defer { reducingVideos -= 1 }
+                let bytes = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                // A video that would not get smaller goes in as it is.
+                if let smaller = try await VideoReduction.reduce(AVURLAsset(url: url), originalBytes: bytes, quality: reduce) {
+                    file = smaller; mediaType = "video/mp4"
+                }
+            }
+            defer { if file != url { try? FileManager.default.removeItem(at: file) } }
+            let asset = try await storeAsset(file: file, mediaType: mediaType)
             var aspect = 9.0 / 16.0
             if let track = try await AVURLAsset(url: url).loadTracks(withMediaType: .video).first {
                 let (size, transform) = try await track.load(.naturalSize, .preferredTransform)
@@ -612,6 +624,39 @@ final class AppModel {
         } catch DocumentError.invalid(let reason) { self.error = reason }
         catch { self.error = "Não foi possível inserir o vídeo: \(error.localizedDescription)" }
     }
+
+    /// Videos being reduced now (shown as a progress notice).
+    var reducingVideos = 0
+
+    /// Replaces a video on the page by a smaller copy, if it saves space; one undo step brings the
+    /// original back. The original file stays while the history needs it.
+    func reduceVideo(_ blockID: UUID, quality: VideoReduction.Quality) async {
+        guard let document, !writeFailed, let block = document.blocks.first(where: { $0.id == blockID }),
+              case .video(let reference) = block.content, let media = mediaAsset(reference.hash) else { return }
+        let original = document.assets.first { $0.hash == reference.hash }?.byteCount ?? 0
+        reducingVideos += 1
+        defer { reducingVideos -= 1 }
+        do {
+            guard let smaller = try await VideoReduction.reduce(media, originalBytes: original, quality: quality) else {
+                self.error = "Este vídeo já está compacto: reduzi-lo não economizaria espaço."; return
+            }
+            defer { try? FileManager.default.removeItem(at: smaller) }
+            let asset = try await storeAsset(file: smaller, mediaType: "video/mp4")
+            while isSaving { try await Task.sleep(for: .milliseconds(30)) }
+            guard let latest = self.document, latest.id == document.id, var current = latest.blocks.first(where: { $0.id == blockID }),
+                  case .video(let now) = current.content, now.hash == reference.hash else { return }
+            current.content = .video(AssetReference(hash: asset.hash, caption: now.caption))
+            var commands: [DocumentCommand] = latest.assets.contains { $0.hash == asset.hash } ? [] : [.registerAsset(asset)]
+            commands.append(.replaceBlock(current))
+            if !latest.blocks.contains(where: { $0.id != blockID && $0.content.assetHash == reference.hash }) { commands.append(.unregisterAsset(reference.hash)) }
+            enqueue(commands)
+            images.removeObject(forKey: asset.hash as NSString)
+            self.error = "Vídeo reduzido de \(VideoReduction.megabytes(original)) para \(VideoReduction.megabytes(asset.byteCount)). Desfazer traz o original de volta."
+        } catch { self.error = "Não foi possível reduzir o vídeo: \(error.localizedDescription)" }
+    }
+
+    /// Size of a stored asset, for the reduce dialog.
+    func assetBytes(_ hash: String) -> Int64 { document?.assets.first { $0.hash == hash }?.byteCount ?? 0 }
 
     /// The stored file of an audio or video, read with its media type (assets are saved without extension).
     func mediaAsset(_ hash: String) -> AVURLAsset? {

@@ -46,6 +46,8 @@ public struct CanvasEditor: UIViewControllerRepresentable {
     public var onTranscribe: ((UUID) -> Void)?
     /// A tap on a video block: the host plays it full screen.
     public var onPlayVideo: ((UUID) -> Void)?
+    /// "Reduzir tamanho…" on a video block: the host offers a smaller copy.
+    public var onReduceVideo: ((UUID) -> Void)?
 
     @MainActor public init(document: CanvasDocument, tool: CanvasTool = .select, session: EditorSession? = nil,
                 inkColor: UIColor = .black, inkWidth: CGFloat = 3, vectorEraser: Bool = false,
@@ -2097,6 +2099,9 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             actions.insert(UIAction(title: "Transcrever", image: UIImage(systemName: "text.bubble")) { [weak self] _ in
                 self?.stopAudio(); self?.configuration.onTranscribe?(id)
             }, at: 0)
+        }
+        if case .video = block.content, let reduce = configuration.onReduceVideo {
+            actions.insert(UIAction(title: "Reduzir tamanho…", image: UIImage(systemName: "arrow.down.right.and.arrow.up.left")) { _ in reduce(id) }, at: 0)
         }
         switch block.content {
         case .image, .sticker:

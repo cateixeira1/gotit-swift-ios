@@ -297,7 +297,7 @@ final class AppModel {
             if let best = hits.first?.score {
                 // Within chosen notes the best passages go even when the scores are low.
                 let floor = chosen.isEmpty ? max(Self.meaningFloor - 0.08, best - 0.1) : best - 0.15
-                let candidates = hits.filter { $0.score >= floor && summaries.contains { s in s.id == $0.documentID && !s.isTrashed } }
+                let candidates = hits.filter { hit in hit.score >= floor && summaries.contains { $0.id == hit.documentID && !$0.isTrashed } }
                     .map { AssistantPrompts.Source(documentID: $0.documentID, blockID: $0.blockID, title: title($0.documentID), text: $0.text) }
                 if !candidates.isEmpty { return AssistantPrompts.pick(candidates) }
             }

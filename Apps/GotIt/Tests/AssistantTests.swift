@@ -86,31 +86,58 @@ final class AssistantTests: XCTestCase {
     }
 
     /// The real Gemma 4 E2B through LiteRT-LM (on the CPU), when CI provides the model file:
-    /// answers a Portuguese question from the passage that has the answer, citing it.
-    func testRealGemmaAnswersFromTheRightPassage() async throws {
+    /// answers a Portuguese question from the passage that has the answer, citing it, and keeps
+    /// answering after the first time (a second conversation on the same engine, and a new engine
+    /// over the cache the first one left). Each case is printed, to see which one LiteRT-LM fails.
+    func testRealGemmaAnswersFromTheRightPassageMoreThanOnce() async throws {
         guard let path = ProcessInfo.processInfo.environment["GOTIT_ASSISTANT_MODEL"], FileManager.default.fileExists(atPath: path) else {
             throw XCTSkip("Modelo não fornecido (GOTIT_ASSISTANT_MODEL).")
         }
-        guard let generator = Assistant.liteRT(path: path, allowGPU: { false }) else { throw XCTSkip("LiteRT-LM não existe nesta plataforma.") }
+        guard Assistant.liteRT(path: path) != nil else { throw XCTSkip("LiteRT-LM não existe nesta plataforma.") }
         let sources = [
             AssistantPrompts.Source(documentID: UUID(), blockID: UUID(), title: "Domingo", text: "Bolo de laranja: forno a 180 graus por 40 minutos."),
             AssistantPrompts.Source(documentID: UUID(), blockID: UUID(), title: "Apartamento",
                                     text: "O contrato de locação do apartamento da Rua Augusta vence em 15 de março de 2027. Reajuste pelo IPCA."),
         ]
-        let started = Date()
-        var answer = "", firstPiece: TimeInterval?
-        for try await piece in generator.generate(system: AssistantPrompts.system,
-                                                  prompt: AssistantPrompts.question("Quando vence o contrato do apartamento?", sources: sources),
-                                                  maxTokens: 120) {
-            if firstPiece == nil { firstPiece = Date().timeIntervalSince(started) }
-            answer += piece
+        let question = AssistantPrompts.question("Quando vence o contrato do apartamento?", sources: sources)
+        let summary = AssistantPrompts.summary(title: "Apartamento", text: sources[1].text, truncated: false)
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("litert-cache-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: cache) }
+
+        func ask(_ generator: any TextGenerator, _ prompt: String, _ label: String) async -> String? {
+            let started = Date()
+            var answer = ""
+            do {
+                for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prompt, maxTokens: 120) { answer += piece }
+                print("Gemma 4 E2B [\(label)] OK em \(String(format: "%.1f", Date().timeIntervalSince(started))) s: \(answer)")
+                return answer
+            } catch {
+                print("Gemma 4 E2B [\(label)] ERRO em \(String(format: "%.1f", Date().timeIntervalSince(started))) s: \(error)")
+                return nil
+            }
         }
-        let total = Date().timeIntervalSince(started)
-        let backend = await generator.backend() ?? "?"
-        print("Gemma 4 E2B (\(backend)): first words after \(String(format: "%.1f", firstPiece ?? 0)) s (load included), done in \(String(format: "%.1f", total)) s")
-        print("Gemma 4 E2B answer: \(answer)")
-        await generator.close()
-        XCTAssertTrue(answer.contains("15") && answer.lowercased().contains("março"), answer)
-        XCTAssertTrue(AssistantPrompts.citations(in: answer, count: 2).contains(2), answer)
+
+        // Without retrying, to see what fails.
+        let first = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache, retry: false)!
+        let answer = await ask(first, question, "1ª conversa, cache vazio")
+        XCTAssertTrue(answer?.contains("15") == true && answer?.lowercased().contains("março") == true, answer ?? "erro")
+        XCTAssertTrue(AssistantPrompts.citations(in: answer ?? "", count: 2).contains(2), answer ?? "erro")
+        _ = await ask(first, summary, "2ª conversa, mesmo motor")
+        await first.close()
+        let warm = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache, retry: false)!
+        _ = await ask(warm, question, "motor novo, cache já preenchido")
+        await warm.close()
+        let uncached = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: nil, retry: false)!
+        _ = await ask(uncached, question, "motor novo, sem cache")
+        _ = await ask(uncached, summary, "2ª conversa, motor sem cache")
+        await uncached.close()
+
+        // As the app runs it (retrying once with the model loaded afresh): both must work.
+        let app = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache)!
+        let again = await ask(app, question, "app, pergunta")
+        let then = await ask(app, summary, "app, resumo depois")
+        await app.close()
+        XCTAssertNotNil(again)
+        XCTAssertNotNil(then)
     }
 }

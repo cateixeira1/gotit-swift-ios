@@ -35,14 +35,20 @@ protocol TextGenerator: Sendable {
 actor LiteRTGenerator: TextGenerator {
     private let path: String
     private let allowGPU: @Sendable () -> Bool
+    private let cacheDirectory: URL?
+    private let retry: Bool
     private var engine: Engine?
     private var running: String?
+    /// Times the model was loaded again after a failure (for the diagnostics).
+    private(set) var reloads = 0
 
     /// Set while the GPU is in use; still set at launch means the app died using it.
     static let gpuInUseKey = "assistantGPUInUse"
     static let gpuFailedKey = "assistantGPUFailed"
 
-    init(path: String, allowGPU: @escaping @Sendable () -> Bool) { self.path = path; self.allowGPU = allowGPU }
+    init(path: String, allowGPU: @escaping @Sendable () -> Bool, cacheDirectory: URL?, retry: Bool = true) {
+        self.path = path; self.allowGPU = allowGPU; self.cacheDirectory = cacheDirectory; self.retry = retry
+    }
 
     func backend() -> String? { running }
 
@@ -54,31 +60,44 @@ actor LiteRTGenerator: TextGenerator {
     }
 
     private func run(system: String, prompt: String, maxTokens: Int, into continuation: AsyncThrowingStream<String, Error>.Continuation) async {
-        do {
-            let engine = try await ready()
-            let config = try ConversationConfig(systemMessage: Message(system, role: .system),
-                                            samplerConfig: SamplerConfig(topK: 64, topP: 0.95, temperature: 0.3),
-                                            thinkingConfig: ThinkingConfig(enableThinking: false))
-            let conversation = try await engine.createConversation(with: config)
-            for try await chunk in conversation.sendMessageStream(Message(prompt), maxOutputTokens: maxTokens) {
-                if Task.isCancelled { try? conversation.cancel(); break }
-                continuation.yield(chunk.toString)
+        var attempt = 0
+        while true {
+            var wrote = false
+            do {
+                let engine = try await ready()
+                let config = try ConversationConfig(systemMessage: Message(system, role: .system),
+                                                    samplerConfig: SamplerConfig(topK: 64, topP: 0.95, temperature: 0.3),
+                                                    thinkingConfig: ThinkingConfig(enableThinking: false))
+                let conversation = try await engine.createConversation(with: config)
+                for try await chunk in conversation.sendMessageStream(Message(prompt), maxOutputTokens: maxTokens) {
+                    if Task.isCancelled { try? conversation.cancel(); break }
+                    wrote = true
+                    continuation.yield(chunk.toString)
+                }
+                continuation.finish()
+                return
+            } catch {
+                // A failure before any word: load the model afresh once and try again.
+                guard retry, attempt == 0, !wrote, !Task.isCancelled else { continuation.finish(throwing: error); return }
+                attempt += 1
+                reloads += 1
+                close()
             }
-            continuation.finish()
-        } catch {
-            continuation.finish(throwing: error)
         }
+    }
+
+    private func config(_ backend: Backend) throws -> EngineConfig {
+        try EngineConfig(modelPath: path, backend: backend, maxNumTokens: AssistantModel.contextTokens, cacheDir: cacheDirectory?.path)
     }
 
     private func ready() async throws -> Engine {
         if let engine { return engine }
-        try FileManager.default.createDirectory(at: ModelFile.cacheDirectory, withIntermediateDirectories: true)
+        if let cacheDirectory { try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true) }
         let defaults = UserDefaults.standard
         if defaults.bool(forKey: Self.gpuInUseKey) { defaults.set(true, forKey: Self.gpuFailedKey) }
         if allowGPU() && !defaults.bool(forKey: Self.gpuFailedKey) {
             defaults.set(true, forKey: Self.gpuInUseKey)
-            let gpu = try Engine(engineConfig: EngineConfig(modelPath: path, backend: .gpu, maxNumTokens: AssistantModel.contextTokens,
-                                                        cacheDir: ModelFile.cacheDirectory.path))
+            let gpu = try Engine(engineConfig: config(.gpu))
             do {
                 try await gpu.initialize()
                 engine = gpu; running = "GPU"
@@ -88,8 +107,7 @@ actor LiteRTGenerator: TextGenerator {
                 defaults.set(true, forKey: Self.gpuFailedKey)
             }
         }
-        let cpu = try Engine(engineConfig: EngineConfig(modelPath: path, backend: .cpu(), maxNumTokens: AssistantModel.contextTokens,
-                                                    cacheDir: ModelFile.cacheDirectory.path))
+        let cpu = try Engine(engineConfig: config(.cpu()))
         try await cpu.initialize()
         engine = cpu; running = "CPU"
         return cpu
@@ -164,9 +182,10 @@ final class Assistant {
     }
 
     nonisolated static func liteRT(path: String,
-                                   allowGPU: @escaping @Sendable () -> Bool = { UserDefaults.standard.object(forKey: Assistant.gpuKey) as? Bool ?? true }) -> (any TextGenerator)? {
+                                   allowGPU: @escaping @Sendable () -> Bool = { UserDefaults.standard.object(forKey: Assistant.gpuKey) as? Bool ?? true },
+                                   cacheDirectory: URL? = ModelFile.cacheDirectory, retry: Bool = true) -> (any TextGenerator)? {
         #if canImport(LiteRTLM)
-        LiteRTGenerator(path: path, allowGPU: allowGPU)
+        LiteRTGenerator(path: path, allowGPU: allowGPU, cacheDirectory: cacheDirectory, retry: retry)
         #else
         nil
         #endif

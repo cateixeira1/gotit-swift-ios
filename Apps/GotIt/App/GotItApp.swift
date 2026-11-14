@@ -542,7 +542,7 @@ final class AppModel {
             let loaded = try await store.load(origin)
             returnStack.removeLast()
             document = loaded; selectedPageID = loaded.pages.first?.id
-            UserDefaults.standard.set(id.uuidString, forKey: Self.lastDocumentKey)
+            UserDefaults.standard.set(origin.uuidString, forKey: Self.lastDocumentKey)
         } catch { returnStack.removeLast(); self.error = String(describing: error) }
     }
     var returnTitle: String? {

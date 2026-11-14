@@ -97,6 +97,11 @@ struct NotesSidebar: View {
             if !Task.isCancelled { meaning = related }
         }
         .sheet(isPresented: $showSettings) { AppSettingsView(model: model) }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showSettings = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Ajustes")
+            }
+        }
         .navigationTitle(model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder))
         // A deleted row (already faded) closes its gap smoothly instead of vanishing.
         .animation(.easeOut(duration: 0.2), value: model.visibleSummaries.map(\.id))

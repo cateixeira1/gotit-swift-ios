@@ -21,7 +21,7 @@ struct AppSettingsView: View {
                 Section {
                     Picker("Fonte padrão", selection: $fontName) {
                         ForEach(AppFonts.choices, id: \.title) { choice in
-                            Text(choice.title).font(choice.name.map { .custom($0, size: 17) } ?? .body).tag(choice.name)
+                            Text(choice.title).font(choice.name.map { Font.custom($0, size: 17) } ?? Font.body).tag(choice.name)
                         }
                     }
                     .pickerStyle(.navigationLink)

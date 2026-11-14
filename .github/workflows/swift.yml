@@ -1,0 +1,98 @@
+name: Document Core
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: document-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    container: swift:6.0.3-jammy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite headers
+        run: apt-get update && apt-get install -y libsqlite3-dev
+      - name: Test core
+        run: swift test
+  apple:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version && xcodebuild -version
+      - name: Test core on macOS
+        run: swift test
+      - name: Build for iOS Simulator
+        run: >-
+          xcodebuild -scheme GotItCanvasUI
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/GotItDerivedData"
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Generate demo project
+        run: |
+          brew install xcodegen
+          cd Apps/GotIt
+          xcodegen generate
+      - name: Build demo for iOS Simulator
+        run: >-
+          xcodebuild -project Apps/GotIt/GotItApp.xcodeproj
+          -scheme GotItApp -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/GotItAppDerivedData"
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Build app for Mac Catalyst
+        run: >-
+          xcodebuild -project Apps/GotIt/GotItApp.xcodeproj
+          -scheme GotItApp -destination 'generic/platform=macOS,variant=Mac Catalyst'
+          -derivedDataPath "$RUNNER_TEMP/GotItCatalystDerivedData"
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Download the embedding model for its test
+        # Same pinned file the app downloads; checked like the app checks it.
+        run: |
+          mkdir -p "$RUNNER_TEMP/models"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/embeddinggemma.litertlm" \
+            "https://huggingface.co/litert-community/embeddinggemma-2-text-270m-litert-lm/resolve/9be6e8b90982095dc05c2bd162e4b954ee4dbac7/embeddinggemma-2-text-270m.litertlm"
+          echo "2d079ee2f6f066b1f368e8d7c819f55214eaef1d0513b312321901f30ab286fb  $RUNNER_TEMP/models/embeddinggemma.litertlm" | shasum -a 256 -c
+      - name: Download the assistant model for its test
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/gemma.litertlm" \
+            "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/2d74ac41a33d7da82f39f7d5720a04c68514a103/gemma-4-E2B-it.litertlm"
+          echo "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c  $RUNNER_TEMP/models/gemma.litertlm" | shasum -a 256 -c
+      - name: Test native editor on iPad and iPhone
+        timeout-minutes: 55
+        env:
+          TEST_RUNNER_GOTIT_EMBEDDING_MODEL: ${{ runner.temp }}/models/embeddinggemma.litertlm
+          TEST_RUNNER_GOTIT_ASSISTANT_MODEL: ${{ runner.temp }}/models/gemma.litertlm
+        run: |
+          python3 - <<'PYTHON'
+          import json, subprocess, os
+          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"]))["devices"]
+          available = [d for runtime, items in devices.items() if "iOS" in runtime for d in items if d["isAvailable"]]
+          results = []
+          for family in ["iPad", "iPhone"]:
+              device = next(d for d in available if family in d["name"])
+              result = subprocess.run(["xcodebuild", "-project", "Apps/GotIt/GotItApp.xcodeproj", "-scheme", "GotItApp", "-destination", "platform=iOS Simulator,id=" + device["udid"], "-derivedDataPath", os.environ["RUNNER_TEMP"] + "/GotItAppDerivedData", "-resultBundlePath", os.environ["RUNNER_TEMP"] + "/" + family + ".xcresult", "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", "180", "-maximum-test-execution-time-allowance", "180", "-retry-tests-on-failure", "-test-iterations", "2", "CODE_SIGNING_ALLOWED=NO", "test"], check=False)
+              results.append(result.returncode)
+          if any(results): raise SystemExit(1)
+          PYTHON
+      - name: Export editor screenshots
+        if: always()
+        run: |
+          for family in iPad iPhone; do
+            if [ -d "$RUNNER_TEMP/$family.xcresult" ]; then
+              xcrun xcresulttool export attachments --path "$RUNNER_TEMP/$family.xcresult" --output-path "$RUNNER_TEMP/screenshots/$family" || true
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-editor-screenshots
+          path: ${{ runner.temp }}/screenshots
+          if-no-files-found: ignore

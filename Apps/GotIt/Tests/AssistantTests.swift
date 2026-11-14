@@ -126,7 +126,6 @@ final class AssistantTests: XCTestCase {
             }
         }
 
-        executionTimeAllowance = 600
         // Without retrying: each case must work by itself. (On the CPU all of them do; on a
         // device's GPU the second conversation failed with "No per-layer embeddings found".)
         let first = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache, retry: false)!
@@ -135,6 +134,8 @@ final class AssistantTests: XCTestCase {
         XCTAssertTrue(AssistantPrompts.citations(in: answer ?? "", count: 2).contains(2), answer ?? "erro")
         let second = await ask(first, summary, "2ª conversa, mesmo motor")
         XCTAssertNotNil(second)
+        let third = await ask(first, question, "3ª conversa, mesmo motor")
+        XCTAssertNotNil(third)
         await first.close()
         let warm = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache, retry: false)!
         let again = await ask(warm, question, "motor novo, cache já preenchido")

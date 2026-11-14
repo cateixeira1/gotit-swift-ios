@@ -39,6 +39,11 @@ actor LiteRTGenerator: TextGenerator {
     private let retry: Bool
     private var engine: Engine?
     private var running: String?
+    /// The last conversation, kept until the next request. LiteRT-LM 0.19.1's Swift wrapper lets
+    /// go of a conversation inside its final callback; destroyed there, the next conversation on
+    /// the same engine can hang (fixed upstream after 0.19.1: "Allow waiting for task and session
+    /// completion inside terminal callbacks"). Kept here, it is destroyed on this actor instead.
+    private var previous: Conversation?
     /// Times the model was loaded again after a failure (for the diagnostics).
     private(set) var reloads = 0
 
@@ -64,11 +69,13 @@ actor LiteRTGenerator: TextGenerator {
         while true {
             var wrote = false
             do {
+                previous = nil
                 let engine = try await ready()
                 let config = try ConversationConfig(systemMessage: Message(system, role: .system),
                                                     samplerConfig: SamplerConfig(topK: 64, topP: 0.95, temperature: 0.3),
                                                     thinkingConfig: ThinkingConfig(enableThinking: false))
                 let conversation = try await engine.createConversation(with: config)
+                previous = conversation
                 for try await chunk in conversation.sendMessageStream(Message(prompt), maxOutputTokens: maxTokens) {
                     if Task.isCancelled { try? conversation.cancel(); break }
                     wrote = true
@@ -114,6 +121,7 @@ actor LiteRTGenerator: TextGenerator {
     }
 
     func close() {
+        previous = nil
         engine = nil
         running = nil
         UserDefaults.standard.set(false, forKey: Self.gpuInUseKey)

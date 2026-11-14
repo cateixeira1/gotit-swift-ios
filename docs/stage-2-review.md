@@ -476,3 +476,8 @@ interface em iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift
 - **Lista em grade** de 3 colunas com a prévia da página; o cartão inteiro abre a nota; apagar,
   mover e criar Teia ficam no toque longo.
 - **Alinhamento**: o ícone da barra mostra o alinhamento do parágrafo onde está o cursor.
+- **Travamento da 2ª conversa (CI)**: numa repetição do CI, a 2ª conversa no mesmo motor travou nos
+  dois simuladores. O wrapper Swift do LiteRT-LM 0.19.1 solta a conversa dentro do callback final, e
+  destruí-la ali pode travar a conversa seguinte (corrigido no LiteRT-LM depois da 0.19.1, commit
+  4b63acd, "Allow waiting for task and session completion inside terminal callbacks"). O app agora
+  guarda a última conversa e só a destrói no começo do pedido seguinte, fora do callback.

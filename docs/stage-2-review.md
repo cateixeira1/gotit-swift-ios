@@ -481,3 +481,7 @@ interface em iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift
   destruí-la ali pode travar a conversa seguinte (corrigido no LiteRT-LM depois da 0.19.1, commit
   4b63acd, "Allow waiting for task and session completion inside terminal callbacks"). O app agora
   guarda a última conversa e só a destrói no começo do pedido seguinte, fora do callback.
+
+CI (`3889f30`): 161 testes do núcleo e todos os nativos e de interface aprovados em iPad e iPhone;
+com o Gemma real, três conversas seguidas no mesmo motor e um motor novo funcionaram nos dois
+simuladores (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43552481194).

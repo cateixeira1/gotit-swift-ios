@@ -734,6 +734,9 @@ private func indexAll(_ store: SQLiteStore, model: String = "fake") async throws
     var hits = try await store.semanticSearch(fakeVector("aluguel"), model: "fake")
     #expect(hits.first?.documentID == rent.id && hits.first?.blockID == first.id)
     #expect(try await store.semanticSearch(fakeVector("bolo"), model: "fake").first?.documentID == cake.id)
+    // Limited to chosen notes: only their passages, however far in meaning.
+    #expect(try await store.semanticSearch(fakeVector("bolo"), model: "fake", in: [rent.id]).allSatisfy { $0.documentID == rent.id })
+    #expect(try await store.semanticSearch(fakeVector("bolo"), model: "fake", in: [rent.id]).count == 2)
     // Editing one passage re-reads only that one.
     var changed = second; changed.content = .text(RichText("Receita médica do hospital"))
     edited = try await store.execute([.replaceBlock(changed)], documentID: rent.id, expectedRevision: edited.revision)

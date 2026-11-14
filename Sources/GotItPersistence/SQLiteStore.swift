@@ -400,8 +400,8 @@ public actor SQLiteStore {
     }
 
     /// Passages closest in meaning to `query` (a vector from the same model), best first, at most
-    /// one per block. Notes in the Lixeira are left out.
-    public func semanticSearch(_ query: [Float], model: String, limit: Int = 30) throws -> [SemanticHit] {
+    /// one per block. Notes in the Lixeira are left out; with `documents`, only those notes count.
+    public func semanticSearch(_ query: [Float], model: String, limit: Int = 30, in documents: Set<UUID>? = nil) throws -> [SemanticHit] {
         let target = SemanticChunks.normalized(query)
         var best: [String: SemanticHit] = [:]
         for row in try db.execute("""
@@ -412,6 +412,7 @@ public actor SQLiteStore {
             guard case .text(let documentValue) = row[0], let document = UUID(uuidString: documentValue),
                   case .text(let blockValue) = row[1], let block = UUID(uuidString: blockValue),
                   case .text(let text) = row[2], case .blob(let data) = row[3] else { continue }
+            if let documents, !documents.contains(document) { continue }
             var vector = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
             _ = vector.withUnsafeMutableBytes { data.copyBytes(to: $0) }
             let score = SemanticChunks.similarity(target, vector)

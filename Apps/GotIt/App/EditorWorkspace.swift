@@ -28,7 +28,6 @@ struct EditorWorkspace: View {
     @State private var playing: PlayingVideo?
     private struct PlayingVideo: Identifiable { let id: UUID; let player: AVPlayer }
     @State private var showStickers = false
-    @State private var showAssistant = false
     /// Video whose "Reduzir tamanho…" was chosen (asks for the quality).
     @State private var reducing: UUID?
     @AppStorage(VideoReduction.importKey) private var videoImport = "original"
@@ -213,16 +212,7 @@ struct EditorWorkspace: View {
                           onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
-            .overlay(alignment: .bottomTrailing) {
-                VStack(alignment: .trailing, spacing: 0) {
-                    if model.assistant.isAvailable {
-                        AssistantButton { session.perform(.finish); showAssistant = true }
-                            .padding(.trailing, 22).padding(.bottom, simple ? 18 : 0)
-                    }
-                    if !simple { floatingPen }
-                }
-            }
-            .sheet(isPresented: $showAssistant) { AssistantView(model: model, document: document) }
+            .overlay(alignment: .bottomTrailing) { if !simple { floatingPen } }
     }
 
     /// One tap to draw, one tap to go back to the cursor; no need to open the tools panel.
@@ -284,8 +274,10 @@ struct EditorWorkspace: View {
             HStack(spacing: 16) {
                 HStack(spacing: 16) {
                     Menu("Fonte") {
-                        ForEach(["Sistema", "Helvetica", "Times New Roman", "Menlo"], id: \.self) { name in
-                            Button(name) { session.perform(.font(name)) }
+                        Button("Padrão (\(AppFonts.title(of: AppFonts.defaultName)))") { session.perform(.font("Padrão")) }
+                        Divider()
+                        ForEach(AppFonts.choices, id: \.title) { choice in
+                            Button(choice.title) { session.perform(.font(choice.name ?? "Sistema")) }
                         }
                     }.font(.subheadline)
                     Menu { ForEach([10, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72], id: \.self) { size in
@@ -296,11 +288,13 @@ struct EditorWorkspace: View {
                     formatButton("Itálico", "italic", .italic)
                     formatButton("Sublinhado", "underline", .underline)
                     Menu {
-                        Button("Esquerda") { session.perform(.alignment(.left)) }
-                        Button("Centro") { session.perform(.alignment(.center)) }
-                        Button("Direita") { session.perform(.alignment(.right)) }
-                        Button("Justificado") { session.perform(.alignment(.justified)) }
-                    } label: { Image(systemName: "text.alignleft") }.accessibilityLabel("Alinhamento")
+                        ForEach(Self.alignments, id: \.title) { item in
+                            Button { session.perform(.alignment(item.value)) } label: {
+                                Label(item.title, systemImage: session.textAlignment == item.value ? "checkmark" : item.symbol)
+                            }
+                        }
+                    } label: { Image(systemName: Self.alignmentSymbol(session.textAlignment)) }
+                        .accessibilityLabel("Alinhamento").accessibilityValue(Self.alignments.first { $0.value == session.textAlignment }?.title ?? "Esquerda")
                     Menu {
                         Button("Com marcadores") { session.perform(.bulletList) }
                         Button("Numerada") { session.perform(.numberedList) }
@@ -337,6 +331,12 @@ struct EditorWorkspace: View {
         }.background(.bar)
     }
     private var separator: some View { Divider().frame(height: 20) }
+    static let alignments: [(title: String, value: NSTextAlignment, symbol: String)] = [
+        ("Esquerda", .left, "text.alignleft"), ("Centro", .center, "text.aligncenter"),
+        ("Direita", .right, "text.alignright"), ("Justificado", .justified, "text.justify"),
+    ]
+    /// The toolbar shows the alignment in use where the caret is.
+    static func alignmentSymbol(_ value: NSTextAlignment) -> String { alignments.first { $0.value == value }?.symbol ?? "text.alignleft" }
     private func formatButton(_ title: String, _ symbol: String, _ action: TextEditingAction) -> some View {
         Button { session.perform(action) } label: { Image(systemName: symbol).frame(minWidth: 28, minHeight: 40) }
             .accessibilityLabel(title)

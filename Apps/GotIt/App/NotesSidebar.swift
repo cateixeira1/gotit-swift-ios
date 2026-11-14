@@ -20,8 +20,7 @@ struct NotesSidebar: View {
     @State private var query = ""
     @State private var results: [AppModel.SearchResult] = []
     @State private var meaning: [AppModel.SearchResult] = []
-    @State private var showSemantic = false
-    @State private var showAssistant = false
+    @State private var showSettings = false
     private var searching: Bool { SearchText.query(query) != nil }
 
     var body: some View {
@@ -57,8 +56,10 @@ struct NotesSidebar: View {
                 Button("Nova pasta", systemImage: "folder.badge.plus") { name = ""; naming = .create }
                     .accessibilityIdentifier("newFolder")
                 ForEach(model.subfolders(of: model.currentFolder)) { folder in folderRow(folder) }
-                ForEach(model.visibleSummaries) { summary in documentRow(summary) }
             } header: { Text(model.currentFolder == nil ? "Notas e Teias" : model.folderName(model.currentFolder)) }
+            if !model.visibleSummaries.isEmpty {
+                Section { documentGrid }
+            }
             Section {
                 Button { showTrash = true } label: {
                     HStack {
@@ -67,24 +68,8 @@ struct NotesSidebar: View {
                         if !model.trashedSummaries.isEmpty { Text("\(model.trashedSummaries.count)").foregroundStyle(.secondary) }
                     }
                 }.accessibilityIdentifier("openTrash")
-                if model.semantic.isAvailable {
-                    Button { showSemantic = true } label: {
-                        HStack {
-                            Label("Busca por significado", systemImage: "sparkle.magnifyingglass")
-                            Spacer()
-                            Text(SemanticSearchSettings.shortStatus(model.semantic)).foregroundStyle(.secondary)
-                        }
-                    }.accessibilityIdentifier("semanticSearch")
-                }
-                if model.assistant.isAvailable {
-                    Button { showAssistant = true } label: {
-                        HStack {
-                            Label("Assistente", systemImage: "sparkles")
-                            Spacer()
-                            Text(model.assistant.install == .installed ? "Gemma 4" : "Falta o modelo").foregroundStyle(.secondary)
-                        }
-                    }.accessibilityIdentifier("openAssistant")
-                }
+                Button { showSettings = true } label: { Label("Ajustes", systemImage: "gearshape") }
+                    .accessibilityIdentifier("openSettings")
             } footer: {
                 HStack(spacing: 8) {
                     Image("LaunchLogo").resizable().frame(width: 22, height: 22)
@@ -111,8 +96,7 @@ struct NotesSidebar: View {
             let related = await model.searchByMeaning(query, excluding: Set(found.map(\.documentID)))
             if !Task.isCancelled { meaning = related }
         }
-        .sheet(isPresented: $showSemantic) { SemanticSearchSettings(search: model.semantic) }
-        .sheet(isPresented: $showAssistant) { AssistantView(model: model, document: nil) }
+        .sheet(isPresented: $showSettings) { AppSettingsView(model: model) }
         .navigationTitle(model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder))
         // A deleted row (already faded) closes its gap smoothly instead of vanishing.
         .animation(.easeOut(duration: 0.2), value: model.visibleSummaries.map(\.id))
@@ -198,22 +182,43 @@ struct NotesSidebar: View {
         .accessibilityIdentifier("folder-\(folder.name)")
     }
 
-    private func documentRow(_ summary: DocumentSummary) -> some View {
-        // A List row with two buttons fires both on a single tap (opening a note also created a
-        // Teia). One button per row; the rest is in the context menu. Swipe left once to delete
-        // (haptic past half the row, delete on release).
-        SwipeToDeleteRow(onDelete: { Task { await model.moveToTrash(summary.id) } }) {
-            Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
-                VStack(alignment: .leading) {
-                    if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().frame(height: 70) }
-                    Text(summary.title).font(.headline)
-                    Text(summary.createdAt, style: .date).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
+    /// Notes and Teias three to a row, each a page preview with its title and date; the whole
+    /// tile opens it, a long press offers moving, a Teia and deleting.
+    private var documentGrid: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: 3), spacing: 18) {
+            ForEach(model.visibleSummaries) { summary in documentTile(summary).transition(.opacity) }
         }
-        .listRowInsets(EdgeInsets())
-        .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
+        .padding(.vertical, 6)
+        .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
+        .listRowBackground(Color.clear)
+    }
+
+    private func documentTile(_ summary: DocumentSummary) -> some View {
+        Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
+            VStack(spacing: 6) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10).fill(Color(uiColor: .secondarySystemGroupedBackground))
+                    if let preview = model.noteMetadata[summary.id]?.preview {
+                        Image(uiImage: preview).resizable().scaledToFit().padding(5)
+                    } else {
+                        Image(systemName: summary.kind == .web ? "point.3.connected.trianglepath.dotted" : "note.text")
+                            .font(.system(size: 30)).foregroundStyle(.secondary)
+                    }
+                }
+                .aspectRatio(0.78, contentMode: .fit)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(model.document?.id == summary.id ? Color.accentColor : Color.primary.opacity(0.1),
+                                                                    lineWidth: model.document?.id == summary.id ? 2 : 1))
+                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+                Text(summary.title.isEmpty ? "Sem título" : summary.title)
+                    .font(.footnote.weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
+                Text(summary.createdAt, format: .dateTime.day().month(.abbreviated).year(.twoDigits))
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        // Plain: each tile in the row is its own button (a default button fires the whole row).
+        .buttonStyle(.plain)
         .contextMenu {
             if summary.kind == .note {
                 Button("Criar Teia com esta nota", systemImage: "point.3.connected.trianglepath.dotted") {
@@ -223,6 +228,7 @@ struct NotesSidebar: View {
             moveMenu(excluding: [], current: summary.folderID) { target in Task { await model.moveDocument(summary.id, to: target) } }
             Button("Apagar", systemImage: "trash", role: .destructive) { Task { await model.moveToTrash(summary.id) } }
         }
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("document-\(summary.title)")
     }
 

@@ -67,6 +67,8 @@ public struct StorySelection: Equatable {
 @Observable @MainActor
 public final class EditorSession {
     public var hasTextSelection = false
+    /// Alignment of the paragraph at the caret (or the selection's start), for the toolbar icon.
+    public var textAlignment: NSTextAlignment = .left
     /// The caret belongs in another text box (usually on the next page) that may not exist yet.
     @ObservationIgnored public var pendingFocus: TextFlowFocus? {
         didSet { pendingFocusSince = Date(); if pendingFocus == nil { queuedInput.removeAll() } }

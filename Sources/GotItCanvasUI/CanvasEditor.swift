@@ -653,11 +653,11 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         case .strike: toggle(text, key: .strikethroughStyle)
         case .font(let name):
             let size = (text.typingAttributes[.font] as? UIFont)?.pointSize ?? 18
-            format(text, key: .font, value: name == "Sistema" ? UIFont.systemFont(ofSize: size) : (UIFont(name: name, size: size) ?? UIFont.systemFont(ofSize: size)))
+            format(text, key: .font, value: TextBridge.chosen(name, size: size))
         case .fontSize(let size):
             let font = (text.typingAttributes[.font] as? UIFont) ?? UIFont.systemFont(ofSize: size)
             format(text, key: .font, value: font.withSize(size))
-        case .alignment(let value): paragraph(text) { $0.alignment = value }
+        case .alignment(let value): paragraph(text) { $0.alignment = value }; syncAlignment(text)
         case .highlight(let value):
             if let value { format(text, key: .backgroundColor, value: value) }
             else { text.typingAttributes.removeValue(forKey: .backgroundColor); if text.selectedRange.length > 0 { text.textStorage.removeAttribute(.backgroundColor, range: text.selectedRange); textViewDidChange(text) } }
@@ -671,6 +671,19 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         case .find: text.findInteraction?.presentFindNavigator(showingReplace: true)
         default: break
         }
+    }
+
+    /// Tells the toolbar the alignment where the caret is.
+    private func syncAlignment(_ text: UITextView) {
+        guard let session = configuration.session else { return }
+        let storage = text.textStorage
+        let paragraph = (storage.string as NSString).paragraphRange(for: NSRange(location: min(text.selectedRange.location, storage.length), length: 0))
+        let style = paragraph.location < storage.length && paragraph.length > 0
+            ? storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle
+            : text.typingAttributes[.paragraphStyle] as? NSParagraphStyle
+        let value = style?.alignment ?? .left
+        let shown: NSTextAlignment = value == .natural ? .left : value
+        if session.textAlignment != shown { session.textAlignment = shown }
     }
 
     private func toggle(_ text: UITextView, key: NSAttributedString.Key) {
@@ -1061,7 +1074,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     public func textViewDidBeginEditing(_ textView: UITextView) {
-        activeText = textView; configuration.session?.hasTextSelection = true
+        activeText = textView; configuration.session?.hasTextSelection = true; syncAlignment(textView)
         updateInkInteraction()
         configuration.session?.revealCaret?()
     }
@@ -1160,6 +1173,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
 
     public func textViewDidChangeSelection(_ textView: UITextView) {
         guard textView.isFirstResponder else { return }
+        syncAlignment(textView)
         syncStorySelection(from: textView)
         configuration.session?.revealCaret?()
     }
@@ -1299,7 +1313,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         textViewDidChange(text)
     }
     private func resizeFont(_ text: UITextView, delta: CGFloat) {
-        let current = (text.typingAttributes[.font] as? UIFont) ?? .systemFont(ofSize: 18)
+        let current = (text.typingAttributes[.font] as? UIFont) ?? TextBridge.font(named: nil, size: 18)
         format(text, key: .font, value: current.withSize(max(6, min(144, current.pointSize + delta))))
     }
 

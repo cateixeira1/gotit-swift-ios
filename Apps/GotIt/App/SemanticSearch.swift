@@ -261,13 +261,13 @@ final class SemanticSearch {
     }
 
     /// Passages closest in meaning to `query`, best first; empty when it is off or not ready.
-    func search(_ query: String) async -> [SemanticHit] {
+    func search(_ query: String, in documents: Set<UUID>? = nil) async -> [SemanticHit] {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSearch, active, !text.isEmpty, let store, let embedder = embedder ?? makeEmbedder() else { return [] }
         self.embedder = embedder
         do {
             let vector = try await embedder.embed(SemanticChunks.queryPrompt(text))
-            return try await store.semanticSearch(vector, model: model, limit: 40)
+            return try await store.semanticSearch(vector, model: model, limit: 40, in: documents)
         } catch { return [] }
     }
 }
@@ -275,7 +275,6 @@ final class SemanticSearch {
 /// Turning the search by meaning on or off, the model download, and how far reading has got.
 struct SemanticSearchSettings: View {
     var search: SemanticSearch
-    @Environment(\.dismiss) private var dismiss
     @State private var confirmRemoval = false
 
     static func shortStatus(_ search: SemanticSearch) -> String {
@@ -290,8 +289,8 @@ struct SemanticSearchSettings: View {
         }
     }
 
+    /// A page of Ajustes (pushed from the settings list).
     var body: some View {
-        NavigationStack {
             Form {
                 Section {
                     Text("Encontra notas pelo assunto, não só pelas palavras: buscar “contrato de aluguel” também acha uma nota sobre “locação do apartamento”.")
@@ -322,13 +321,11 @@ struct SemanticSearchSettings: View {
             }
             .navigationTitle("Busca por significado")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("OK") { dismiss() } } }
             .confirmationDialog("Apagar o modelo?", isPresented: $confirmRemoval, titleVisibility: .visible) {
                 Button("Apagar modelo e índice", role: .destructive) { Task { await search.disable(removingModel: true) } }
             } message: {
                 Text("Libera 165 MB. As notas não são afetadas; para voltar a usar, o modelo é baixado de novo.")
             }
-        }
     }
 
     @ViewBuilder private var status: some View {

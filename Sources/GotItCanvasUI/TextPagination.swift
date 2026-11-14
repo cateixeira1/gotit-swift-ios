@@ -234,13 +234,13 @@ public enum StoryEdit {
         guard range.length > 0 else { return }
         func fonts(_ change: (UIFont) -> UIFont) {
             text.enumerateAttribute(.font, in: range) { value, part, _ in
-                text.addAttribute(.font, value: change((value as? UIFont) ?? .systemFont(ofSize: 18)), range: part)
+                text.addAttribute(.font, value: change((value as? UIFont) ?? TextBridge.font(named: nil, size: 18)), range: part)
             }
         }
         func allFonts(_ test: (UIFont) -> Bool) -> Bool {
             var all = true
             text.enumerateAttribute(.font, in: range) { value, _, stop in
-                if !test((value as? UIFont) ?? .systemFont(ofSize: 18)) { all = false; stop.pointee = true }
+                if !test((value as? UIFont) ?? TextBridge.font(named: nil, size: 18)) { all = false; stop.pointee = true }
             }
             return all
         }
@@ -266,7 +266,7 @@ public enum StoryEdit {
         case .highlight(let color):
             if let color { text.addAttribute(.backgroundColor, value: color, range: range) } else { text.removeAttribute(.backgroundColor, range: range) }
         case .fontSize(let size): fonts { $0.withSize(max(6, min(144, size))) }
-        case .font(let name): fonts { font in name == "Sistema" ? .systemFont(ofSize: font.pointSize) : (UIFont(name: name, size: font.pointSize) ?? font) }
+        case .font(let name): fonts { font in TextBridge.chosen(name, size: font.pointSize) }
         default: break
         }
     }

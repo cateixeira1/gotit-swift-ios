@@ -121,49 +121,71 @@ actor LiteRTGenerator: TextGenerator {
 }
 #endif
 
-/// The assistant: the model download, and what it is asked about the open note or the notes.
+/// A message of the conversation with the assistant (kept while the app is open).
+struct AssistantMessage: Identifiable, Equatable {
+    enum Role: Equatable { case user, assistant }
+    let id = UUID()
+    let role: Role
+    var text: String
+    /// What it is doing before the first words ("Procurando nas notas…").
+    var status: String?
+    var failure: String?
+    /// Passages the answer was written from, numbered as in the answer.
+    var sources: [AssistantPrompts.Source] = []
+    var noteWasCut = false
+    /// The note a summary or questions are about (the answer can be inserted there).
+    var documentID: UUID?
+
+    /// Sources the answer cites, in the order cited (all of them when it cites none).
+    var cited: [(number: Int, source: AssistantPrompts.Source)] {
+        let numbers = AssistantPrompts.citations(in: text, count: sources.count)
+        return (numbers.isEmpty ? Array(sources.indices.map { $0 + 1 }) : numbers).map { ($0, sources[$0 - 1]) }
+    }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.text == rhs.text && lhs.status == rhs.status && lhs.failure == rhs.failure && lhs.sources == rhs.sources
+    }
+}
+
+/// The assistant: the model download, and the conversation (summaries and questions of the open
+/// note, questions answered from the notes).
 @Observable @MainActor
 final class Assistant {
     enum Install: Equatable { case absent, downloading(Double), checking, installed, failed(String) }
     enum Action: String, CaseIterable, Identifiable {
-        case summary, questions, ask
+        case summary, questions
         var id: String { rawValue }
         var title: String {
             switch self {
             case .summary: "Resumir esta nota"
             case .questions: "Perguntas para revisar"
-            case .ask: "Perguntar às notas"
             }
         }
-        var symbol: String {
-            switch self { case .summary: "text.badge.star"; case .questions: "questionmark.bubble"; case .ask: "text.magnifyingglass" }
-        }
+        var symbol: String { self == .summary ? "text.badge.star" : "questionmark.bubble" }
     }
 
     private(set) var install: Install = .absent
-    /// The answer being written (or written).
-    private(set) var output = ""
+    private(set) var messages: [AssistantMessage] = []
     private(set) var isWorking = false
-    /// Loading the model, before the first words (a few seconds the first time).
-    private(set) var isLoading = false
-    private(set) var failure: String?
-    /// Passages the last question was answered from, numbered as in the answer.
-    private(set) var sources: [AssistantPrompts.Source] = []
-    private(set) var noteWasCut = false
+    /// Notes chosen with "+" to look in (empty: all notes).
+    var scope: Set<UUID> = []
     private(set) var backend: String?
     let isAvailable: Bool
     nonisolated static let gpuKey = "assistantUseGPU"
+    /// Off by default: the processor gives the same text everywhere; on the GPU LiteRT-LM 0.19.1
+    /// has an open report of Gemma 4 corrupting digits on iOS (issue 2814).
     var useGPU: Bool {
-        get { UserDefaults.standard.object(forKey: Self.gpuKey) as? Bool ?? true }
+        get { _ = gpuVersion; return UserDefaults.standard.object(forKey: Self.gpuKey) as? Bool ?? false }
         set {
             UserDefaults.standard.set(newValue, forKey: Self.gpuKey)
             if newValue { UserDefaults.standard.set(false, forKey: LiteRTGeneratorKeys.gpuFailed) }
-            let current = generator; generator = nil
+            gpuVersion += 1
+            let current = generator; generator = nil; backend = nil
             Task { await current?.close() }
         }
     }
+    private var gpuVersion = 0
     /// The GPU could not be used (failed to load, or the app was closed while using it).
-    var gpuFailed: Bool { UserDefaults.standard.bool(forKey: LiteRTGeneratorKeys.gpuFailed) }
+    var gpuFailed: Bool { _ = gpuVersion; return UserDefaults.standard.bool(forKey: LiteRTGeneratorKeys.gpuFailed) }
 
     private let modelFile: ModelFile
     private let installed: () -> Bool
@@ -182,7 +204,7 @@ final class Assistant {
     }
 
     nonisolated static func liteRT(path: String,
-                                   allowGPU: @escaping @Sendable () -> Bool = { UserDefaults.standard.object(forKey: Assistant.gpuKey) as? Bool ?? true },
+                                   allowGPU: @escaping @Sendable () -> Bool = { UserDefaults.standard.object(forKey: Assistant.gpuKey) as? Bool ?? false },
                                    cacheDirectory: URL? = ModelFile.cacheDirectory, retry: Bool = true) -> (any TextGenerator)? {
         #if canImport(LiteRTLM)
         LiteRTGenerator(path: path, allowGPU: allowGPU, cacheDirectory: cacheDirectory, retry: retry)
@@ -193,6 +215,7 @@ final class Assistant {
 
     var sizeText: String { String(format: "%.1f GB", Double(modelFile.byteCount) / 1_000_000_000).replacingOccurrences(of: ".", with: ",") }
     var canResume: Bool { modelFile.canResume }
+    var last: AssistantMessage? { messages.last }
 
     // MARK: Model
 
@@ -228,6 +251,7 @@ final class Assistant {
         download?.cancel(); download = nil
         await generator?.close(); generator = nil
         modelFile.remove()
+        try? FileManager.default.removeItem(at: ModelFile.cacheDirectory)
         install = .absent
         backend = nil
     }
@@ -240,67 +264,98 @@ final class Assistant {
         Task { await current?.close() }
     }
 
-    // MARK: Asking
+    // MARK: The conversation
 
     /// Summary or review questions of `document`.
     func run(_ action: Action, on document: CanvasDocument) {
+        guard !isWorking else { return }
+        messages.append(AssistantMessage(role: .user, text: action.title))
         let note = AssistantPrompts.noteText(document)
-        guard !note.text.isEmpty else { failure = "Esta nota ainda não tem texto para o assistente ler."; return }
-        noteWasCut = note.truncated
+        guard !note.text.isEmpty else {
+            messages.append(AssistantMessage(role: .assistant, text: "", failure: "Esta nota ainda não tem texto para o assistente ler."))
+            return
+        }
         let prompt = action == .questions
             ? AssistantPrompts.studyQuestions(title: document.title, text: note.text, truncated: note.truncated)
             : AssistantPrompts.summary(title: document.title, text: note.text, truncated: note.truncated)
-        start(prompt: prompt, sources: [])
+        var answer = AssistantMessage(role: .assistant, text: "")
+        answer.noteWasCut = note.truncated
+        answer.documentID = document.id
+        start(answer) { (prompt, []) }
     }
 
-    /// A question answered from passages of the notes (found by the search by meaning).
-    func ask(_ question: String, sources: [AssistantPrompts.Source]) {
-        noteWasCut = false
-        guard !sources.isEmpty else {
-            reset()
-            failure = "Não encontrei trechos das suas notas sobre isso."
+    /// A question answered from passages of the notes, found by `find` (in the chosen notes, or
+    /// in all of them by meaning).
+    func ask(_ question: String, find: @escaping @MainActor () async -> [AssistantPrompts.Source]) {
+        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isWorking, !text.isEmpty else { return }
+        messages.append(AssistantMessage(role: .user, text: text))
+        start(AssistantMessage(role: .assistant, text: "", status: "Procurando nas notas…")) {
+            let sources = await find()
+            return sources.isEmpty ? nil : (AssistantPrompts.question(text, sources: sources), sources)
+        }
+    }
+
+    func cancel() {
+        work?.cancel(); work = nil
+        guard isWorking else { return }
+        isWorking = false
+        update(messages.last?.id) { message in
+            message.status = nil
+            if message.text.isEmpty && message.failure == nil { message.failure = "Interrompido." }
+        }
+    }
+
+    /// Starts a new conversation.
+    func clear() { cancel(); messages = [] }
+
+    private func update(_ id: UUID?, _ change: (inout AssistantMessage) -> Void) {
+        guard let id, let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        change(&messages[index])
+    }
+
+    /// Adds `answer` and writes it from the prompt `prepare` gives (nil: nothing found).
+    private func start(_ answer: AssistantMessage,
+                       prepare: @escaping @MainActor () async -> (prompt: String, sources: [AssistantPrompts.Source])?) {
+        messages.append(answer)
+        let id = answer.id
+        guard install == .installed, let generator = generator ?? makeGenerator() else {
+            update(id) { $0.status = nil; $0.failure = "O modelo do assistente não está no aparelho. Baixe-o em Ajustes › Assistente." }
             return
         }
-        start(prompt: AssistantPrompts.question(question, sources: sources), sources: sources)
-    }
-
-    func cancel() { work?.cancel(); work = nil; isWorking = false; isLoading = false }
-
-    func reset() { cancel(); output = ""; failure = nil; sources = []; noteWasCut = false }
-
-    private func start(prompt: String, sources: [AssistantPrompts.Source]) {
-        reset()
-        guard install == .installed, let generator = generator ?? makeGenerator() else {
-            failure = "O modelo do assistente não está no aparelho."; return
-        }
         self.generator = generator
-        self.sources = sources
         isWorking = true
-        isLoading = true
         work = Task { [weak self] in
-            do {
-                for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prompt, maxTokens: AssistantModel.answerTokens) {
-                    guard let self, !Task.isCancelled else { return }
-                    if self.isLoading { self.isLoading = false; self.backend = await generator.backend() }
-                    self.output += piece
+            guard let prepared = await prepare() else {
+                guard let self, !Task.isCancelled else { return }
+                self.isWorking = false
+                self.update(id) {
+                    $0.status = nil
+                    $0.failure = "Não encontrei trechos das notas sobre isso. Ligue a busca por significado em Ajustes, ou toque em + e escolha as notas onde procurar."
                 }
-                guard let self, !Task.isCancelled else { return }
-                self.isWorking = false; self.isLoading = false
-                self.output = self.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                if self.output.isEmpty { self.failure = "O modelo não escreveu nada. Tente de novo." }
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.update(id) { $0.sources = prepared.sources; $0.status = "Preparando o modelo…" }
+            do {
+                for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prepared.prompt, maxTokens: AssistantModel.answerTokens) {
+                    guard !Task.isCancelled else { return }
+                    if self.messages.last?.status != nil { self.backend = await generator.backend() }
+                    self.update(id) { $0.status = nil; $0.text += piece }
+                }
+                guard !Task.isCancelled else { return }
+                self.isWorking = false
+                self.update(id) {
+                    $0.status = nil
+                    $0.text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if $0.text.isEmpty { $0.failure = "O modelo não escreveu nada. Tente de novo." }
+                }
             } catch {
-                guard let self, !Task.isCancelled else { return }
-                self.isWorking = false; self.isLoading = false
-                self.failure = "O assistente parou: \(error.localizedDescription)"
+                guard !Task.isCancelled else { return }
+                self.isWorking = false
+                self.update(id) { $0.status = nil; $0.failure = "O assistente parou: \(error.localizedDescription)" }
             }
         }
-    }
-
-    /// Sources the answer cites, in the order cited (all of them when it cites none).
-    var citedSources: [(number: Int, source: AssistantPrompts.Source)] {
-        let cited = AssistantPrompts.citations(in: output, count: sources.count)
-        let numbers = cited.isEmpty ? Array(1...max(sources.count, 1)).filter { $0 <= sources.count } : cited
-        return numbers.map { ($0, sources[$0 - 1]) }
     }
 }
 

@@ -456,3 +456,23 @@ modelo real) e os de interface em iPad e iPhone aprovados
 
 CI (`d3e64df`): 161 testes do núcleo, 59 nativos (3 do assistente, um com o Gemma real) e os de
 interface em iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43516437871).
+
+## Ajustes do teste no aparelho (13/11/2026)
+
+- **Erro do assistente a partir da 2ª resposta** ("No per-layer embeddings found in inputs", do
+  executor do LiteRT-LM 0.19.1): no aparelho o assistente rodava na GPU. No CI, no processador,
+  todos os casos funcionaram (2ª conversa no mesmo motor, motor novo com o cache preenchido, motor
+  sem cache), então o defeito é do caminho da GPU. O assistente passa a usar o processador por
+  padrão (a GPU vira opção em Ajustes; o LiteRT-LM também tem aberto o problema 2814, "iOS/Metal:
+  Gemma 4 corrupts digit sequences in output (clean on CPU)"). Se uma conversa falhar antes de
+  escrever qualquer coisa, o modelo é carregado de novo uma vez e a pergunta é repetida.
+- **Assistente como chat**: botão ✦ em todas as telas (acima da caneta quando há uma); a barra
+  "Perguntar às notas" sobe com o teclado; sugestões "Resumir esta nota" e "Perguntas para revisar"
+  quando há uma nota aberta; "+" escolhe as notas onde procurar (só os trechos delas; sem a busca
+  por significado, o começo de cada uma). A conversa fica enquanto o app está aberto.
+- **Ajustes** (lista › Ajustes): ao abrir o app (lista, nova nota, nova nota simples, última nota
+  aberta), fonte padrão (texto sem fonte escolhida segue a fonte padrão), busca por significado e
+  assistente (download, GPU, apagar o modelo).
+- **Lista em grade** de 3 colunas com a prévia da página; o cartão inteiro abre a nota; apagar,
+  mover e criar Teia ficam no toque longo.
+- **Alinhamento**: o ícone da barra mostra o alinhamento do parágrafo onde está o cursor.

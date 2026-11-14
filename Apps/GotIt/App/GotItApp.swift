@@ -79,9 +79,61 @@ final class AppModel {
             semantic.attach(repository)
             try await collectUnusedAssets()
             try await refresh()
-            if activeSummaries.isEmpty { await createNote() }
-            else if let first = activeSummaries.first { await open(first.id) }
+            await openOnLaunch()
         } catch { self.error = String(describing: error) }
+    }
+
+    /// What the app shows when it opens (Ajustes › Ao abrir o app).
+    enum LaunchTarget: String, CaseIterable, Identifiable {
+        case list, newNote, newSimpleNote, lastNote
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .list: "Lista de notas"
+            case .newNote: "Nova nota"
+            case .newSimpleNote: "Nova nota simples"
+            case .lastNote: "Última nota aberta"
+            }
+        }
+    }
+    static let launchKey = "launchTarget", lastDocumentKey = "lastDocument"
+    var launchTarget: LaunchTarget {
+        get { _ = launchTargetVersion; return UserDefaults.standard.string(forKey: Self.launchKey).flatMap(LaunchTarget.init) ?? .lastNote }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Self.launchKey); launchTargetVersion += 1 }
+    }
+    private var launchTargetVersion = 0
+    /// Changes when the list should be brought to the front (the app opened on it).
+    var showListRequest = 0
+
+    /// The default font changed: the open note is shown again with it.
+    func defaultFontChanged() async {
+        guard let id = document?.id, !isSaving else { return }
+        let page = selectedPageID
+        document = nil
+        await open(id)
+        if let page, document?.pages.contains(where: { $0.id == page }) == true { selectedPageID = page }
+    }
+
+    private func openOnLaunch() async {
+        #if DEBUG
+        // UI tests expect the most recent note open.
+        let target: LaunchTarget = ProcessInfo.processInfo.arguments.contains("--ui-testing") ? .lastNote : launchTarget
+        #else
+        let target = launchTarget
+        #endif
+        switch target {
+        case .list:
+            showListRequest += 1
+        case .newNote:
+            await createNote()
+        case .newSimpleNote:
+            await createSimpleNote()
+        case .lastNote:
+            if activeSummaries.isEmpty { await createNote(); return }
+            let last = UserDefaults.standard.string(forKey: Self.lastDocumentKey).flatMap(UUID.init(uuidString:))
+            let id = activeSummaries.first { $0.id == last }?.id ?? activeSummaries[0].id
+            await open(id)
+        }
     }
 
     /// Re-applies edits that were on screen but not yet saved when the app last stopped. Edits that
@@ -150,6 +202,7 @@ final class AppModel {
             let loaded = try await store.load(id)
             if let origin, origin != id { returnStack.append(origin) } else if origin == nil { returnStack.removeAll() }
             document = loaded; selectedPageID = loaded.pages.first?.id
+            UserDefaults.standard.set(id.uuidString, forKey: Self.lastDocumentKey)
         }
         catch DocumentError.missingDocument { self.error = "Esta nota foi apagada para sempre." }
         catch { self.error = String(describing: error) }
@@ -233,15 +286,33 @@ final class AppModel {
     /// more real notes.
     static let meaningFloor: Float = 0.66, meaningSpread: Float = 0.06
 
-    /// Passages of the notes to answer `question` from: found by meaning (the assistant reads
-    /// them), best first. A wider net than the list's "Por significado": the model is told to say
-    /// when they do not answer.
-    func assistantSources(for question: String) async -> [AssistantPrompts.Source] {
-        let hits = await semantic.search(question)
-        guard let best = hits.first?.score else { return [] }
-        let candidates = hits.filter { $0.score >= max(Self.meaningFloor - 0.08, best - 0.1) }.compactMap { hit -> AssistantPrompts.Source? in
-            guard let summary = summaries.first(where: { $0.id == hit.documentID && !$0.isTrashed }) else { return nil }
-            return .init(documentID: hit.documentID, blockID: hit.blockID, title: summary.title, text: hit.text)
+    /// Passages of the notes to answer `question` from, best first. Found by meaning (a wider net
+    /// than the list's "Por significado": the model is told to say when they do not answer); with
+    /// `scope`, only in those notes, and when the search by meaning is off, their first passages.
+    func assistantSources(for question: String, in scope: Set<UUID> = []) async -> [AssistantPrompts.Source] {
+        let chosen = scope.filter { id in activeSummaries.contains { $0.id == id } }
+        let title: (UUID) -> String = { id in self.summaries.first { $0.id == id }?.title ?? "" }
+        if semantic.canSearch {
+            let hits = await semantic.search(question, in: chosen.isEmpty ? nil : chosen)
+            if let best = hits.first?.score {
+                // Within chosen notes the best passages go even when the scores are low.
+                let floor = chosen.isEmpty ? max(Self.meaningFloor - 0.08, best - 0.1) : best - 0.15
+                let candidates = hits.filter { $0.score >= floor && summaries.contains { s in s.id == $0.documentID && !s.isTrashed } }
+                    .map { AssistantPrompts.Source(documentID: $0.documentID, blockID: $0.blockID, title: title($0.documentID), text: $0.text) }
+                if !candidates.isEmpty { return AssistantPrompts.pick(candidates) }
+            }
+        }
+        guard !chosen.isEmpty, let store else { return [] }
+        // Not read for the search by meaning (off, or not yet): the beginning of each chosen note.
+        var candidates: [AssistantPrompts.Source] = []
+        let share = AssistantPrompts.sourcesLimit / max(chosen.count, 1)
+        for id in activeSummaries.map(\.id) where chosen.contains(id) {
+            guard let note = try? await store.load(id) else { continue }
+            var used = 0
+            for chunk in SemanticChunks.chunks(note) where used < share {
+                candidates.append(.init(documentID: id, blockID: chunk.blockID, title: note.title, text: chunk.text))
+                used += chunk.text.count
+            }
         }
         return AssistantPrompts.pick(candidates)
     }
@@ -471,6 +542,7 @@ final class AppModel {
             let loaded = try await store.load(origin)
             returnStack.removeLast()
             document = loaded; selectedPageID = loaded.pages.first?.id
+            UserDefaults.standard.set(id.uuidString, forKey: Self.lastDocumentKey)
         } catch { returnStack.removeLast(); self.error = String(describing: error) }
     }
     var returnTitle: String? {
@@ -1036,6 +1108,7 @@ final class AppModel {
     func registerFonts() {
         let bundled = ["ttf", "otf"].flatMap { Bundle.main.urls(forResourcesWithExtension: $0, subdirectory: nil) ?? [] }
         HandwritingFonts.register(bundled)
+        defer { AppFonts.reload() }
         guard let folder = fontsFolder, let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
         let imported = HandwritingFonts.register(files)
         handwritingFonts = HandwritingFonts.bundled.map(\.postScript) + imported.filter { !HandwritingFonts.bundled.map(\.postScript).contains($0) }
@@ -1329,9 +1402,17 @@ struct AppScreen: View {
     @State private var sharing: ShareFile?
     @State private var showTrash = false
     @State private var showBacklinks = false
+    @State private var showAssistant = false
+    /// The floating pen is at the bottom right of an open note (not of a simple note), and the
+    /// detail column is what is on screen.
+    private var penShown: Bool {
+        guard let document = model.document, !document.canvas.isSimpleNote else { return false }
+        return preferredColumn == .detail || visibility != .detailOnly
+    }
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility, preferredCompactColumn: $preferredColumn) {
             NotesSidebar(model: model, preferredColumn: $preferredColumn, showTrash: $showTrash)
+                .navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 520)
         } detail: {
             if let document = model.document {
                 VStack(spacing: 0) {
@@ -1385,6 +1466,19 @@ struct AppScreen: View {
             } else { ContentUnavailableView("Got It!", systemImage: "note.text", description: Text("Crie ou selecione uma nota.")) }
         }
         .sheet(isPresented: $showTrash) { TrashView(model: model) }
+        // The assistant, from every screen: above the pen when a note with the pen is open.
+        .overlay(alignment: .bottomTrailing) {
+            if model.assistant.isAvailable {
+                AssistantButton { showAssistant = true }
+                    .padding(.trailing, 22)
+                    .padding(.bottom, penShown ? 92 : 22)
+            }
+        }
+        .sheet(isPresented: $showAssistant) { AssistantChat(model: model) }
+        .onChange(of: model.showListRequest) { _, _ in
+            preferredColumn = .sidebar
+            visibility = .all
+        }
         .alert("Aviso", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }

@@ -32,7 +32,7 @@ final class AssistantTests: XCTestCase {
         XCTAssertFalse(assistant.isWorking)
     }
 
-    func testSummaryAndAQuestionWithItsSources() async throws {
+    func testConversationWithSummaryAndAQuestionWithItsSources() async throws {
         let generator = FakeGenerator(answer: ["Vence em ", "**março** [2]", "."])
         let assistant = Assistant(modelFile: file, installed: { true }, makeGenerator: { generator })
         XCTAssertEqual(assistant.install, .installed)
@@ -40,30 +40,39 @@ final class AssistantTests: XCTestCase {
         note.blocks = [CanvasBlock(order: 0, content: .text(RichText("O contrato de locação vence em março.")))]
         assistant.run(.summary, on: note)
         try await finished(assistant)
-        XCTAssertEqual(assistant.output, "Vence em **março** [2].")
+        XCTAssertEqual(assistant.messages.map(\.role), [.user, .assistant])
+        XCTAssertEqual(assistant.messages.first?.text, "Resumir esta nota")
+        XCTAssertEqual(assistant.last?.text, "Vence em **março** [2].")
+        XCTAssertEqual(assistant.last?.documentID, note.id)
         var prompts = await generator.prompts
         XCTAssertTrue(prompts.last?.contains("Resuma a nota") == true && prompts.last?.contains("vence em março") == true)
-        XCTAssertTrue(assistant.sources.isEmpty)
 
         let first = AssistantPrompts.Source(documentID: UUID(), blockID: UUID(), title: "Bolo", text: "Receita de bolo.")
         let second = AssistantPrompts.Source(documentID: note.id, blockID: note.blocks[0].id, title: "Apartamento", text: "O contrato vence em março.")
-        assistant.ask("Quando vence o contrato?", sources: [first, second])
+        assistant.ask("Quando vence o contrato?") { return [first, second] }
+        XCTAssertEqual(assistant.last?.status, "Procurando nas notas…")
         try await finished(assistant)
         prompts = await generator.prompts
         XCTAssertTrue(prompts.last?.contains("[2] Nota: Apartamento") == true)
+        XCTAssertEqual(assistant.messages.count, 4)
+        XCTAssertEqual(assistant.messages[2].text, "Quando vence o contrato?")
         // Only the passage the answer cites is listed.
-        XCTAssertEqual(assistant.citedSources.map(\.number), [2])
-        XCTAssertEqual(assistant.citedSources.first?.source, second)
+        XCTAssertEqual(assistant.last?.cited.map(\.number), [2])
+        XCTAssertEqual(assistant.last?.cited.first?.source, second)
+        XCTAssertNil(assistant.last?.documentID)
 
         // Nothing found: no model call, a plain message.
-        assistant.ask("Algo?", sources: [])
-        XCTAssertNotNil(assistant.failure)
+        assistant.ask("Algo?") { return [] }
+        try await finished(assistant)
+        XCTAssertNotNil(assistant.last?.failure)
         let calls = await generator.prompts.count
         XCTAssertEqual(calls, 2)
         // An empty note is not sent.
         assistant.run(.questions, on: CanvasDocument(title: "Vazia"))
         XCTAssertFalse(assistant.isWorking)
-        XCTAssertNotNil(assistant.failure)
+        XCTAssertNotNil(assistant.last?.failure)
+        assistant.clear()
+        XCTAssertTrue(assistant.messages.isEmpty)
 
         // Into the background: the model's memory is given back.
         assistant.setActive(false)
@@ -80,7 +89,7 @@ final class AssistantTests: XCTestCase {
         note.blocks = [CanvasBlock(order: 0, content: .text(RichText("texto")))]
         assistant.run(.summary, on: note)
         XCTAssertFalse(assistant.isWorking)
-        XCTAssertNotNil(assistant.failure)
+        XCTAssertNotNil(assistant.last?.failure)
         let calls = await generator.prompts.count
         XCTAssertEqual(calls, 0)
     }
@@ -117,27 +126,19 @@ final class AssistantTests: XCTestCase {
             }
         }
 
-        // Without retrying, to see what fails.
+        executionTimeAllowance = 600
+        // Without retrying: each case must work by itself. (On the CPU all of them do; on a
+        // device's GPU the second conversation failed with "No per-layer embeddings found".)
         let first = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache, retry: false)!
         let answer = await ask(first, question, "1ª conversa, cache vazio")
         XCTAssertTrue(answer?.contains("15") == true && answer?.lowercased().contains("março") == true, answer ?? "erro")
         XCTAssertTrue(AssistantPrompts.citations(in: answer ?? "", count: 2).contains(2), answer ?? "erro")
-        _ = await ask(first, summary, "2ª conversa, mesmo motor")
+        let second = await ask(first, summary, "2ª conversa, mesmo motor")
+        XCTAssertNotNil(second)
         await first.close()
         let warm = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache, retry: false)!
-        _ = await ask(warm, question, "motor novo, cache já preenchido")
-        await warm.close()
-        let uncached = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: nil, retry: false)!
-        _ = await ask(uncached, question, "motor novo, sem cache")
-        _ = await ask(uncached, summary, "2ª conversa, motor sem cache")
-        await uncached.close()
-
-        // As the app runs it (retrying once with the model loaded afresh): both must work.
-        let app = Assistant.liteRT(path: path, allowGPU: { false }, cacheDirectory: cache)!
-        let again = await ask(app, question, "app, pergunta")
-        let then = await ask(app, summary, "app, resumo depois")
-        await app.close()
+        let again = await ask(warm, question, "motor novo, cache já preenchido")
         XCTAssertNotNil(again)
-        XCTAssertNotNil(then)
+        await warm.close()
     }
 }

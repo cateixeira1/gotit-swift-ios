@@ -14,13 +14,27 @@ enum TextBridge {
     /// name: CoreText substitutes another font (its log names Times New Roman), so text saved in
     /// the system font came back with other widths and line breaks. Text in the system font
     /// therefore stores no font name, and such names in older documents mean the system font.
+    /// Text with no font of its own is in the app's default font (AppFonts).
     static func font(named name: String?, size: CGFloat) -> UIFont {
-        guard let name, !name.hasPrefix("."), let font = UIFont(name: name, size: size) else { return .systemFont(ofSize: size) }
+        if name == AppFonts.systemName { return .systemFont(ofSize: size) }
+        guard let name = name ?? AppFonts.defaultName, !name.hasPrefix("."), let font = UIFont(name: name, size: size) else { return .systemFont(ofSize: size) }
         return font
     }
+    /// The name kept for `font`: none when it is the default font (so it follows the setting),
+    /// "System" for the system font chosen on purpose while the default is another font.
     static func storedName(of font: UIFont?) -> String? {
-        guard let name = font?.fontName, !name.hasPrefix(".") else { return nil }
-        return name
+        guard let font else { return nil }
+        if AppFonts.isDefault(font) { return nil }
+        if font.fontName.hasPrefix(".") { return AppFonts.systemName }
+        return font.fontName
+    }
+    /// A font picked in the toolbar: "Padrão" (the default), "Sistema" or a PostScript name.
+    static func chosen(_ name: String, size: CGFloat) -> UIFont {
+        switch name {
+        case "Padrão": return font(named: nil, size: size)
+        case "Sistema": return .systemFont(ofSize: size)
+        default: return UIFont(name: name, size: size) ?? .systemFont(ofSize: size)
+        }
     }
 
     static func attributed(_ rich: RichText, base: BlockStyle) -> NSAttributedString {

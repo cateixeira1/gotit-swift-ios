@@ -187,6 +187,24 @@ func rejectsInvalidDimensions(_ width: Double) {
     #expect(SemanticChunks.normalized([0, 0]) == [0, 0])
 }
 
+@Test func summaryIsAboutAFifthOfTheNote() {
+    #expect(AssistantPrompts.wordCount("Comprar pão, leite e 2 ovos.") == 6)
+    let short = AssistantPrompts.SummaryPlan(noteWords: 30)
+    #expect(!short.worthSummarizing)
+    let medium = AssistantPrompts.SummaryPlan(noteWords: 200)
+    #expect(medium.worthSummarizing && medium.maxWords == 40 && medium.topics == 2)
+    let long = AssistantPrompts.SummaryPlan(noteWords: 3_000)
+    #expect(long.maxWords == 120 && long.topics == 6 && long.maxTokens <= 700)
+    #expect(AssistantPrompts.SummaryPlan(noteWords: 60).topics == 1)
+    let prompt = AssistantPrompts.summary(title: "Reunião", text: String(repeating: "palavra ", count: 200), truncated: false)
+    #expect(prompt.contains("no máximo 2 tópicos") && prompt.contains("no máximo 40") && prompt.contains("a nota tem 200"))
+
+    // Topics past the plan are cut; the to-do list stays whole; an introduction goes.
+    let answer = "Aqui está o resumo:\n* Um\n* Dois\n  continua\n* Três\n\nPendências:\n- Pagar até 10/12\n- Ligar"
+    #expect(AssistantPrompts.trimmedSummary(answer, plan: medium) == "* Um\n* Dois\n  continua\n\nPendências:\n- Pagar até 10/12\n- Ligar")
+    #expect(AssistantPrompts.trimmedSummary("Uma frase só.", plan: medium) == "Uma frase só.")
+}
+
 @Test func assistantPromptsCutLongNotesAndNumberTheSources() {
     var note = CanvasDocument(title: "Reunião")
     note.blocks = [CanvasBlock(order: 0, content: .text(RichText("Primeiro ponto."))),

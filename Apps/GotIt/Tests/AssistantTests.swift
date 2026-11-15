@@ -37,7 +37,16 @@ final class AssistantTests: XCTestCase {
         let assistant = Assistant(modelFile: file, installed: { true }, makeGenerator: { generator })
         XCTAssertEqual(assistant.install, .installed)
         var note = CanvasDocument(title: "Apartamento")
+        // A short note is not summarized (no model call).
         note.blocks = [CanvasBlock(order: 0, content: .text(RichText("O contrato de locação vence em março.")))]
+        assistant.run(.summary, on: note)
+        XCTAssertEqual(assistant.last?.failure?.contains("curta"), true)
+        XCTAssertFalse(assistant.isWorking)
+        let noCall = await generator.prompts
+        XCTAssertTrue(noCall.isEmpty)
+        assistant.clear()
+        let longer = "O contrato de locação vence em março. " + String(repeating: "O proprietário pediu que a vistoria seja feita antes da entrega das chaves, com fotos de todos os cômodos. ", count: 3)
+        note.blocks = [CanvasBlock(order: 0, content: .text(RichText(longer)))]
         assistant.run(.summary, on: note)
         try await finished(assistant)
         XCTAssertEqual(assistant.messages.map(\.role), [.user, .assistant])
@@ -45,7 +54,7 @@ final class AssistantTests: XCTestCase {
         XCTAssertEqual(assistant.last?.text, "Vence em **março** [2].")
         XCTAssertEqual(assistant.last?.documentID, note.id)
         var prompts = await generator.prompts
-        XCTAssertTrue(prompts.last?.contains("Resuma a nota") == true && prompts.last?.contains("vence em março") == true)
+        XCTAssertTrue(prompts.last?.contains("RESUMO") == true && prompts.last?.contains("vence em março") == true)
 
         let first = AssistantPrompts.Source(documentID: UUID(), blockID: UUID(), title: "Bolo", text: "Receita de bolo.")
         let second = AssistantPrompts.Source(documentID: note.id, blockID: note.blocks[0].id, title: "Apartamento", text: "O contrato vence em março.")

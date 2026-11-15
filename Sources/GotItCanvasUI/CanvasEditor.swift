@@ -348,7 +348,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                     textView.typingAttributes = ruling.map { TextBridge.ruledTyping(typing, lines: $0) } ?? typing
                 } else if let ruling, textView.isFirstResponder {
                     let typing = TextBridge.ruledTyping(textView.typingAttributes, lines: ruling)
-                    if (typing[.paragraphStyle] as? NSParagraphStyle) != (textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle) { textView.typingAttributes = typing }
+                    if (typing[.paragraphStyle] as? NSParagraphStyle) != (textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle)
+                        || (typing[.gotItRuledShift] as? NSNumber) != (textView.typingAttributes[.gotItRuledShift] as? NSNumber) { textView.typingAttributes = typing }
                 }
                 let rendered = TextBridge.shown(richText, block: block.id, in: configuration.document)
                 let stale = textView.isFirstResponder && (sentRevision[block.id].map { configuration.document.revision <= $0 } ?? false)
@@ -671,6 +672,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         case .find: text.findInteraction?.presentFindNavigator(showingReplace: true)
         default: break
         }
+        syncFormat(text)
     }
 
     /// Tells the toolbar the alignment where the caret is.
@@ -684,6 +686,24 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         let value = style?.alignment ?? .left
         let shown: NSTextAlignment = value == .natural ? .left : value
         if session.textAlignment != shown { session.textAlignment = shown }
+        syncFormat(text)
+    }
+
+    /// Tells the toolbars the font, size and styles where the caret is (what typing will use) or
+    /// at the selection's start.
+    private func syncFormat(_ text: UITextView) {
+        let storage = text.textStorage
+        var attributes = text.selectedRange.length > 0 && text.selectedRange.location < storage.length
+            ? storage.attributes(at: text.selectedRange.location, effectiveRange: nil) : text.typingAttributes
+        if attributes[.paragraphStyle] == nil || text.selectedRange.length == 0 {
+            // Lists belong to the paragraph, which typing attributes may not carry yet.
+            let paragraph = (storage.string as NSString).paragraphRange(for: NSRange(location: min(text.selectedRange.location, storage.length), length: 0))
+            if paragraph.length > 0, paragraph.location < storage.length,
+               let style = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) { attributes[.paragraphStyle] = style }
+        }
+        let state = TextFormatState(attributes)
+        if configuration.session?.textFormat != state { configuration.session?.textFormat = state }
+        (text.inputAccessoryView as? KeyboardBar)?.show(state)
     }
 
     private func toggle(_ text: UITextView, key: NSAttributedString.Key) {
@@ -1017,29 +1037,30 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         // A bar that scrolls sideways, with "Concluir" fixed on the right: a UIToolbar cannot
         // scroll, and on iOS 26 its glass capsules ran past the iPhone's width.
         let bar = KeyboardBar()
-        bar.add("bold", "Negrito") { [weak self, weak text] in
+        bar.add("bold", "Negrito", toggle: \.bold) { [weak self, weak text] in
             guard let self, let text, !self.storyFormat(.bold) else { return }
-            text.toggleBoldface(nil); self.textViewDidChange(text)
+            text.toggleBoldface(nil); self.textViewDidChange(text); self.syncFormat(text)
         }
-        bar.add("italic", "Itálico") { [weak self, weak text] in
+        bar.add("italic", "Itálico", toggle: \.italic) { [weak self, weak text] in
             guard let self, let text, !self.storyFormat(.italic) else { return }
-            text.toggleItalics(nil); self.textViewDidChange(text)
+            text.toggleItalics(nil); self.textViewDidChange(text); self.syncFormat(text)
         }
-        bar.add("underline", "Sublinhado") { [weak self, weak text] in
+        bar.add("underline", "Sublinhado", toggle: \.underline) { [weak self, weak text] in
             guard let self, let text, !self.storyFormat(.underline) else { return }
-            self.format(text, key: .underlineStyle, value: NSUnderlineStyle.single.rawValue)
+            self.toggle(text, key: .underlineStyle)
         }
-        bar.add("strikethrough", "Tachado") { [weak self, weak text] in
-            if let text { self?.format(text, key: .strikethroughStyle, value: NSUnderlineStyle.single.rawValue) }
+        bar.add("strikethrough", "Tachado", toggle: \.strike) { [weak self, weak text] in
+            if let text { self?.toggle(text, key: .strikethroughStyle) }
         }
         bar.add("textformat.size.larger", "Aumentar fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: 2) } }
         bar.add("textformat.size.smaller", "Diminuir fonte") { [weak self, weak text] in if let text { self?.resizeFont(text, delta: -2) } }
         bar.add("highlighter", "Marca-texto") { [weak self, weak text] in if let text { self?.format(text, key: .backgroundColor, value: UIColor.systemYellow) } }
-        bar.add("list.bullet", "Lista com marcadores") { [weak self, weak text] in
-            if let text { self?.paragraph(text) { $0.textLists = [NSTextList(markerFormat: .disc, options: 0)] } }
+        // A second tap on the list in use ends the list.
+        bar.add("list.bullet", "Lista com marcadores", toggle: \.bulletList) { [weak self, weak text] in
+            if let text { self?.paragraph(text) { $0.textLists = $0.textLists.first.map { $0.markerFormat != .decimal } == true ? [] : [NSTextList(markerFormat: .disc, options: 0)] } }
         }
-        bar.add("list.number", "Lista numerada") { [weak self, weak text] in
-            if let text { self?.paragraph(text) { $0.textLists = [NSTextList(markerFormat: .decimal, options: 0)] } }
+        bar.add("list.number", "Lista numerada", toggle: \.numberedList) { [weak self, weak text] in
+            if let text { self?.paragraph(text) { $0.textLists = $0.textLists.first?.markerFormat == .decimal ? [] : [NSTextList(markerFormat: .decimal, options: 0)] } }
         }
         bar.add(menu: textMenu(text), symbol: "ellipsis.circle", label: "Mais")
         bar.done = { [weak text] in text?.resignFirstResponder() }
@@ -1143,7 +1164,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
             let selection = textView.selectedRange
             if TextBridge.rule(textView.textStorage, lines: lines) { textView.selectedRange = selection }
             let typing = TextBridge.ruledTyping(textView.typingAttributes, lines: lines)
-            if (typing[.paragraphStyle] as? NSParagraphStyle) != (textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle) { textView.typingAttributes = typing }
+            if (typing[.paragraphStyle] as? NSParagraphStyle) != (textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle)
+                || (typing[.gotItRuledShift] as? NSNumber) != (textView.typingAttributes[.gotItRuledShift] as? NSNumber) { textView.typingAttributes = typing }
         }
         let rich = TextBridge.richText(textView.attributedText)
         block.content = .text(rich)
@@ -1308,6 +1330,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
     }
 
     private func format(_ text: UITextView, key: NSAttributedString.Key, value: Any) {
+        defer { syncFormat(text) }
         if text.selectedRange.length == 0 { text.typingAttributes[key] = value; return }
         text.textStorage.addAttribute(key, value: value, range: text.selectedRange)
         textViewDidChange(text)
@@ -1398,6 +1421,7 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         update(style)
         text.typingAttributes[.paragraphStyle] = style
         if range.length > 0 { text.textStorage.addAttribute(.paragraphStyle, value: style, range: range); textViewDidChange(text) }
+        syncFormat(text)
     }
 
     private func insertLink(_ text: UITextView) {
@@ -2388,8 +2412,25 @@ private extension TextWrapMode {
         return button
     }
 
-    func add(_ symbol: String, _ label: String, action: @escaping () -> Void) {
-        button(symbol, label).addAction(UIAction { _ in action() }, for: .touchUpInside)
+    func add(_ symbol: String, _ label: String, toggle: KeyPath<TextFormatState, Bool>? = nil, action: @escaping () -> Void) {
+        let button = button(symbol, label)
+        button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+        if let toggle { toggles.append((button, toggle)) }
+    }
+
+    private var toggles: [(button: UIButton, key: KeyPath<TextFormatState, Bool>)] = []
+
+    /// Buttons of what is on (bold, a list…) look pressed: a filled background in the accent color.
+    func show(_ state: TextFormatState) {
+        for (button, key) in toggles { press(button, state[keyPath: key]) }
+    }
+
+    /// Not `isSelected`: a system button draws its own selected look, which fought this one.
+    func press(_ button: UIButton, _ on: Bool) {
+        button.layer.cornerRadius = 10; button.layer.cornerCurve = .continuous
+        button.backgroundColor = on ? row.tintColor : .clear
+        button.tintColor = on ? .white : nil
+        button.accessibilityTraits = on ? button.accessibilityTraits.union(.selected) : button.accessibilityTraits.subtracting(.selected)
     }
 
     func add(menu: UIMenu, symbol: String, label: String) {

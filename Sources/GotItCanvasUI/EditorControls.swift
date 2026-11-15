@@ -51,6 +51,42 @@ public enum TextEditingAction {
     case insertText, insertTable, fitPage, zoom(CGFloat), finish
 }
 
+/// Formatting where the caret is (or at the selection's start), so the toolbars can show what is
+/// on: a checkmark on the font size and font in use, a pressed look on bold, italic and the rest.
+public struct TextFormatState: Equatable, Sendable {
+    public var fontSize: CGFloat = 18
+    /// PostScript name of the font in use (system fonts start with ".").
+    public var fontName: String = ""
+    public var fontFamily: String = ""
+    /// The text follows the default font (Ajustes › Fonte padrão).
+    public var usesDefaultFont = true
+    public var bold = false, italic = false, underline = false, strike = false
+    public var bulletList = false, numberedList = false
+    public init() {}
+
+    @MainActor public init(_ attributes: [NSAttributedString.Key: Any]) {
+        let font = attributes[.font] as? UIFont
+        fontSize = font?.pointSize ?? 18
+        fontName = font?.fontName ?? ""
+        fontFamily = font?.familyName ?? ""
+        usesDefaultFont = font.map { AppFonts.isDefault($0) } ?? true
+        let traits = font?.fontDescriptor.symbolicTraits ?? []
+        bold = traits.contains(.traitBold); italic = traits.contains(.traitItalic)
+        underline = ((attributes[.underlineStyle] as? NSNumber)?.intValue ?? 0) != 0
+        strike = ((attributes[.strikethroughStyle] as? NSNumber)?.intValue ?? 0) != 0
+        let list = (attributes[.paragraphStyle] as? NSParagraphStyle)?.textLists.first?.markerFormat
+        bulletList = list != nil && list != .decimal
+        numberedList = list == .decimal
+    }
+
+    /// Whether the font chosen in a menu as `name` (PostScript; nil: the system font) is in use.
+    @MainActor public func uses(font name: String?) -> Bool {
+        guard !usesDefaultFont else { return false }
+        guard let name else { return fontName.hasPrefix(".") }
+        return UIFont(name: name, size: 12)?.familyName == fontFamily
+    }
+}
+
 /// A key typed while the caret was moving to another page, replayed once it arrives.
 enum QueuedKey: Equatable { case insert(String), deleteBackward }
 
@@ -69,6 +105,8 @@ public final class EditorSession {
     public var hasTextSelection = false
     /// Alignment of the paragraph at the caret (or the selection's start), for the toolbar icon.
     public var textAlignment: NSTextAlignment = .left
+    /// Font, size and styles where the caret is, for the toolbar.
+    public var textFormat = TextFormatState()
     /// The caret belongs in another text box (usually on the next page) that may not exist yet.
     @ObservationIgnored public var pendingFocus: TextFlowFocus? {
         didSet { pendingFocusSince = Date(); if pendingFocus == nil { queuedInput.removeAll() } }

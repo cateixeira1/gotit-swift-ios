@@ -50,16 +50,75 @@ public enum AssistantPrompts {
         return name.isEmpty ? "Nota sem título" : "Nota: \(name)"
     }
 
+    /// Words of `text` (runs of letters or digits).
+    public static func wordCount(_ text: String) -> Int {
+        text.split { !$0.isLetter && !$0.isNumber }.count
+    }
+
+    /// How long a summary may be: about a fifth of the note (20 to 120 words), in 1 to 6 topics.
+    /// The model is asked for that, given only the tokens it needs, and what runs over is cut.
+    public struct SummaryPlan: Equatable, Sendable {
+        public var noteWords: Int
+        public var maxWords: Int
+        public var topics: Int
+        /// Output tokens: Portuguese takes about 2 tokens a word, plus room for the to-do list.
+        public var maxTokens: Int { min(700, maxWords * 2 + 160) }
+        /// Notes this short are not summarized: the summary would be as long as the note.
+        public static let minimumWords = 40
+        public var worthSummarizing: Bool { noteWords >= Self.minimumWords }
+        public init(noteWords: Int) {
+            self.noteWords = noteWords
+            maxWords = min(120, max(20, noteWords / 5))
+            topics = min(6, max(1, maxWords / 18))
+        }
+    }
+
     public static func summary(title: String, text: String, truncated: Bool) -> String {
-        """
-        Resuma a nota abaixo em até 6 tópicos curtos, com o essencial (decisões, datas, nomes, \
-        pendências). Depois dos tópicos, se houver tarefas ou prazos, liste-os em "Pendências:".
-        \(truncated ? "A nota foi cortada por ser longa; resuma só o trecho fornecido.\n" : "")
-        \(heading(title))
-        ---
-        \(text)
-        ---
-        """
+        let plan = SummaryPlan(noteWords: wordCount(text))
+        let shape = plan.topics == 1
+            ? "em UMA frase curta"
+            : "em no máximo \(plan.topics) tópicos (cada um com até 12 palavras)"
+        return """
+            Faça um RESUMO da nota abaixo \(shape). O resumo inteiro deve ter no máximo \(plan.maxWords) \
+            palavras; a nota tem \(plan.noteWords). Resumir é condensar: junte as ideias, fique só com o \
+            essencial (decisões, datas, nomes, valores) e deixe de fora exemplos, explicações e \
+            detalhes. Não reescreva a nota trecho por trecho, não copie frases inteiras dela e não \
+            acrescente nada que não esteja nela. Não escreva introdução nem conclusão.
+            Depois do resumo, só se a nota tiver tarefas ou prazos, escreva "Pendências:" e liste \
+            cada uma em poucas palavras (com o prazo, se houver). Se não houver, não escreva essa parte.
+            \(truncated ? "A nota foi cortada por ser longa; resuma só o trecho fornecido.\n" : "")
+            \(heading(title))
+            ---
+            \(text)
+            ---
+            """
+    }
+
+    /// The model's summary held to `plan`: at most `plan.topics` topics before "Pendências:"
+    /// (the to-do list is kept whole), and an introduction line before the topics dropped.
+    public static func trimmedSummary(_ answer: String, plan: SummaryPlan) -> String {
+        let lines = answer.components(separatedBy: "\n")
+        let todo = lines.firstIndex { $0.lowercased().replacingOccurrences(of: "*", with: "").trimmingCharacters(in: .whitespaces).hasPrefix("pendências") }
+        let head = Array(lines[..<(todo ?? lines.count)]), tail = todo.map { Array(lines[$0...]) } ?? []
+        func isTopic(_ line: String) -> Bool {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if ["* ", "- ", "• "].contains(where: trimmed.hasPrefix) { return true }
+            let digits = trimmed.prefix { $0.isNumber }
+            return !digits.isEmpty && (trimmed.dropFirst(digits.count).hasPrefix(". ") || trimmed.dropFirst(digits.count).hasPrefix(") "))
+        }
+        guard head.contains(where: isTopic) else { return answer.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var kept: [String] = [], topics = 0
+        for line in head {
+            if isTopic(line) {
+                topics += 1
+                if topics <= max(plan.topics, 1) { kept.append(line) }
+            } else if topics > 0 && !line.trimmingCharacters(in: .whitespaces).isEmpty && topics <= plan.topics {
+                kept.append(line)   // A topic that runs over two lines.
+            }
+        }
+        let summary = kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let list = tail.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return list.isEmpty ? summary : summary + "\n\n" + list
     }
 
     public static func studyQuestions(title: String, text: String, truncated: Bool) -> String {

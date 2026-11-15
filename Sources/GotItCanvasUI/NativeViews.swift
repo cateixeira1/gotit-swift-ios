@@ -6,6 +6,9 @@ import GotItCanvas
 extension NSAttributedString.Key {
     /// Carries BlockStyle.namedStyle through UITextView edits; typing continues the style.
     static let gotItNamedStyle = NSAttributedString.Key("GotItNamedStyle")
+    /// On ruled paper: how far the run was moved down (points) so its baseline sits where the
+    /// system font's does. Part of `.baselineOffset`, never saved (it depends only on the font).
+    static let gotItRuledShift = NSAttributedString.Key("GotItRuledShift")
 }
 
 @MainActor
@@ -92,7 +95,42 @@ enum TextBridge {
             if !matches { text.addAttribute(.paragraphStyle, value: wanted, range: paragraph); changed = true }
             location = NSMaxRange(paragraph)
         }
+        // Every font sits on the rule like San Francisco: fonts with long descenders (Kalam,
+        // Indie Flower, Avenir…) would otherwise float above the line.
+        text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, range, _ in
+            guard let update = shifted(attributes) else { return }
+            for (key, value) in update {
+                if let value { text.addAttribute(key, value: value, range: range) } else { text.removeAttribute(key, range: range) }
+            }
+            changed = true
+        }
         return changed
+    }
+
+    /// Points `font` is moved down on a fixed-height line so its baseline lands where the system
+    /// font's does (TextKit keeps the font's descender below the baseline, so a longer descender
+    /// lifts the letters off the rule).
+    static func ruledShift(_ font: UIFont) -> CGFloat {
+        let extra = abs(font.descender) - abs(UIFont.systemFont(ofSize: font.pointSize).descender)
+        return (extra * 4).rounded() / 4
+    }
+
+    /// The baseline attributes `attributes` need on ruled paper, or nil when they are right.
+    private static func shifted(_ attributes: [NSAttributedString.Key: Any]) -> [NSAttributedString.Key: Any?]? {
+        let font = attributes[.font] as? UIFont ?? .systemFont(ofSize: 18)
+        let wanted = ruledShift(font)
+        let current = (attributes[.gotItRuledShift] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0
+        guard wanted != current else { return nil }
+        // The offset of its own (superscript, subscript) is kept.
+        let own = ((attributes[.baselineOffset] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 0) + current
+        let offset = own - wanted
+        return [.baselineOffset: offset == 0 ? nil : NSNumber(value: Double(offset)),
+                .gotItRuledShift: wanted == 0 ? nil : NSNumber(value: Double(wanted))]
+    }
+
+    /// The run's own baseline offset, without the shift of ruled paper.
+    static func ownBaselineOffset(_ attributes: [NSAttributedString.Key: Any]) -> Double {
+        ((attributes[.baselineOffset] as? NSNumber)?.doubleValue ?? 0) + ((attributes[.gotItRuledShift] as? NSNumber)?.doubleValue ?? 0)
     }
 
     /// `style` with the fixed line height of type of `fontSize` on the paper's lines.
@@ -113,6 +151,7 @@ enum TextBridge {
         var typing = attributes
         let size = (attributes[.font] as? UIFont)?.pointSize ?? 18
         typing[.paragraphStyle] = ruled(attributes[.paragraphStyle] as? NSParagraphStyle ?? .default, fontSize: size, lines: lines)
+        if let update = shifted(typing) { for (key, value) in update { typing[key] = value } }
         return typing
     }
 
@@ -132,7 +171,7 @@ enum TextBridge {
             let paragraph = attributes[.paragraphStyle] as? NSParagraphStyle
             let alignment: TextAlignment
             switch paragraph?.alignment { case .center: alignment = .center; case .right: alignment = .trailing; case .justified: alignment = .justified; default: alignment = .leading }
-            let offset = (attributes[.baselineOffset] as? NSNumber)?.doubleValue ?? 0
+            let offset = ownBaselineOffset(attributes)
             let link = (attributes[.link] as? URL)?.absoluteString ?? (attributes[.link] as? String)
             let list: TextListKind = paragraph?.textLists.first.map { $0.markerFormat == .decimal ? .numbered : .bullet } ?? .none
             let format = ParagraphFormat(lineSpacing: Double(paragraph?.lineSpacing ?? 0), paragraphSpacing: Double(paragraph?.paragraphSpacing ?? 0),

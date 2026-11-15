@@ -274,19 +274,27 @@ struct EditorWorkspace: View {
             HStack(spacing: 16) {
                 HStack(spacing: 16) {
                     Menu("Fonte") {
-                        Button("Padrão (\(AppFonts.title(of: AppFonts.defaultName)))") { session.perform(.font("Padrão")) }
+                        Button { session.perform(.font("Padrão")) } label: {
+                            checked("Padrão (\(AppFonts.title(of: AppFonts.defaultName)))", format.usesDefaultFont)
+                        }
                         Divider()
                         ForEach(AppFonts.choices, id: \.title) { choice in
-                            Button(choice.title) { session.perform(.font(choice.name ?? "Sistema")) }
+                            Button { session.perform(.font(choice.name ?? "Sistema")) } label: { checked(choice.title, format.uses(font: choice.name)) }
                         }
                     }.font(.subheadline)
-                    Menu { ForEach([10, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72], id: \.self) { size in
-                        Button("\(size) pt") { session.perform(.fontSize(CGFloat(size))) }
-                    } } label: { Image(systemName: "textformat.size") }.accessibilityLabel("Tamanho da fonte")
+                    // The size in use is ticked, and shown beside the icon (also sizes not in the list).
+                    Menu { ForEach(Self.fontSizes, id: \.self) { size in
+                        Button { session.perform(.fontSize(CGFloat(size))) } label: { checked("\(size) pt", Int(format.fontSize.rounded()) == size) }
+                    } } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "textformat.size")
+                            Text("\(Int(format.fontSize.rounded()))").font(.caption.monospacedDigit().weight(.semibold))
+                        }
+                    }.accessibilityLabel("Tamanho da fonte").accessibilityValue("\(Int(format.fontSize.rounded())) pontos")
                     separator
-                    formatButton("Negrito", "bold", .bold)
-                    formatButton("Itálico", "italic", .italic)
-                    formatButton("Sublinhado", "underline", .underline)
+                    formatButton("Negrito", "bold", .bold, on: format.bold)
+                    formatButton("Itálico", "italic", .italic, on: format.italic)
+                    formatButton("Sublinhado", "underline", .underline, on: format.underline)
                     Menu {
                         ForEach(Self.alignments, id: \.title) { item in
                             Button { session.perform(.alignment(item.value)) } label: {
@@ -296,12 +304,13 @@ struct EditorWorkspace: View {
                     } label: { Image(systemName: Self.alignmentSymbol(session.textAlignment)) }
                         .accessibilityLabel("Alinhamento").accessibilityValue(Self.alignments.first { $0.value == session.textAlignment }?.title ?? "Esquerda")
                     Menu {
-                        Button("Com marcadores") { session.perform(.bulletList) }
-                        Button("Numerada") { session.perform(.numberedList) }
+                        Button { session.perform(.bulletList) } label: { checked("Com marcadores", format.bulletList) }
+                        Button { session.perform(.numberedList) } label: { checked("Numerada", format.numberedList) }
                         Button("Remover lista") { session.perform(.removeList) }
-                    } label: { Image(systemName: "list.bullet") }.accessibilityLabel("Listas")
+                    } label: { pressed(Image(systemName: format.numberedList ? "list.number" : "list.bullet"), format.bulletList || format.numberedList) }
+                        .accessibilityLabel("Listas").accessibilityAddTraits(format.bulletList || format.numberedList ? .isSelected : [])
                     Menu {
-                        Button("Tachado") { session.perform(.strike) }
+                        Button { session.perform(.strike) } label: { checked("Tachado", format.strike) }
                         Button("Aumentar recuo") { session.perform(.indent(18)) }
                         Button("Diminuir recuo") { session.perform(.indent(-18)) }
                         // On ruled paper the lines set the spacing.
@@ -337,9 +346,25 @@ struct EditorWorkspace: View {
     ]
     /// The toolbar shows the alignment in use where the caret is.
     static func alignmentSymbol(_ value: NSTextAlignment) -> String { alignments.first { $0.value == value }?.symbol ?? "text.alignleft" }
-    private func formatButton(_ title: String, _ symbol: String, _ action: TextEditingAction) -> some View {
-        Button { session.perform(action) } label: { Image(systemName: symbol).frame(minWidth: 28, minHeight: 40) }
-            .accessibilityLabel(title)
+    static let fontSizes = [10, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72]
+    private var format: TextFormatState { session.textFormat }
+    /// A menu item with a checkmark when it is the one in use.
+    private func checked(_ title: String, _ on: Bool) -> some View {
+        Group { if on { Label(title, systemImage: "checkmark") } else { Text(title) } }
+    }
+    /// What is on looks like a pressed button: filled accent background, white icon.
+    /// Off, the icon keeps the button's own color (and its dimmed look when disabled).
+    @ViewBuilder private func pressed(_ icon: Image, _ on: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        if on {
+            icon.frame(minWidth: 32, minHeight: 32).foregroundStyle(.white).background(Color.accentColor, in: shape)
+        } else {
+            icon.frame(minWidth: 32, minHeight: 32)
+        }
+    }
+    private func formatButton(_ title: String, _ symbol: String, _ action: TextEditingAction, on: Bool) -> some View {
+        Button { session.perform(action) } label: { pressed(Image(systemName: symbol), on).frame(minHeight: 40) }
+            .accessibilityLabel(title).accessibilityAddTraits(on ? .isSelected : [])
     }
 
     /// Page thumbnails: a column beside the canvas on iPad, a grid (several per row) in the sheet.
@@ -562,8 +587,10 @@ struct EditorWorkspace: View {
                 if sheet { Text(title).font(.system(size: 10, weight: .medium)).lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.8) }
             }
             .frame(maxWidth: .infinity, minHeight: sheet ? 66 : 50)
-            .foregroundStyle(selected ? Color.accentColor : Color.primary)
-            .background(selected ? Color.accentColor.opacity(0.14) : Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+            // The tool in use looks pressed: filled with the accent color, white icon.
+            .foregroundStyle(selected ? Color.white : Color.primary)
+            .background(selected ? Color.accentColor : Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+            .shadow(color: selected ? Color.accentColor.opacity(0.35) : .clear, radius: 3, y: 1)
         }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func highlight(_ title: String, _ color: UIColor) -> some View {
@@ -589,7 +616,9 @@ struct EditorWorkspace: View {
         HStack {
             Button { showPages = true } label: { Label("Páginas", systemImage: "rectangle.stack") }.accessibilityIdentifier("showPages")
             Spacer()
-            Button { session.perform(.finish); tool = tool.isDrawing ? .select : .pen } label: { Image(systemName: tool.symbol).font(.title3) }.accessibilityLabel(tool.isDrawing ? "Voltar à seleção" : "Desenhar")
+            Button { session.perform(.finish); tool = tool.isDrawing ? .select : .pen } label: {
+                pressed(Image(systemName: tool.symbol), tool.isDrawing).font(.title3).frame(minWidth: 44, minHeight: 38)
+            }.accessibilityLabel(tool.isDrawing ? "Voltar à seleção" : "Desenhar").accessibilityAddTraits(tool.isDrawing ? .isSelected : [])
             Spacer()
             Button { showTools = true } label: { Label("Ferramentas", systemImage: "slider.horizontal.3") }.accessibilityIdentifier("showTools")
         }.font(.subheadline).padding(.horizontal, 16).frame(height: 50).background(.bar)

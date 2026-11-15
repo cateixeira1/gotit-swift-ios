@@ -75,6 +75,29 @@ final class NotebookAndFoldTests: XCTestCase {
         XCTAssertFalse(TextBridge.rule(text, lines: lines), "already on the lines: nothing to change")
     }
 
+    /// Every font sits on the rule like San Francisco: a long descender (Kalam) is moved down by
+    /// the difference, the system font is not moved, and the shift is never saved as a superscript.
+    func testFontsSitOnTheRuleLikeTheSystemFont() throws {
+        let lines = RuledLines(origin: PaperStyle.notebookTop, spacing: PaperStyle.notebookLine)
+        let kalam = try XCTUnwrap(UIFont(name: "Kalam-Regular", size: 18))
+        let text = NSMutableAttributedString(string: "Mão", attributes: [.font: kalam])
+        text.append(NSAttributedString(string: " feita", attributes: [.font: UIFont.systemFont(ofSize: 18)]))
+        XCTAssertTrue(TextBridge.rule(text, lines: lines))
+        let shift = TextBridge.ruledShift(kalam)
+        XCTAssertGreaterThan(shift, 3, "Kalam's descender is about twice San Francisco's")
+        XCTAssertEqual((text.attribute(.baselineOffset, at: 0, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0, -Double(shift), accuracy: 0.01)
+        XCTAssertNil(text.attribute(.baselineOffset, at: 4, effectiveRange: nil), "the system font stays where it is")
+        XCTAssertFalse(TextBridge.rule(text, lines: lines), "already on the lines: nothing to change")
+        XCTAssertTrue(TextBridge.richText(text).runs.allSatisfy { $0.style.baseline == .normal })
+
+        // Every bundled font ends up with San Francisco's distance between baseline and rule.
+        let system = abs(UIFont.systemFont(ofSize: 18).descender)
+        for name in ["Kalam-Regular", "IndieFlower-Regular", "Caveat-Regular", "PatrickHand-Regular", "Georgia", "AvenirNext-Regular"] {
+            guard let font = UIFont(name: name, size: 18) else { continue }
+            XCTAssertEqual(abs(font.descender) - TextBridge.ruledShift(font), system, accuracy: 0.13, name)
+        }
+    }
+
     /// A simple note: no drawing (even with the pen chosen) and nothing to insert on the page;
     /// a tap on the page continues the text.
     func testSimpleNoteHoldsTextOnly() throws {

@@ -283,13 +283,23 @@ final class Assistant {
             messages.append(AssistantMessage(role: .assistant, text: "", failure: "Esta nota ainda não tem texto para o assistente ler."))
             return
         }
-        let prompt = action == .questions
-            ? AssistantPrompts.studyQuestions(title: document.title, text: note.text, truncated: note.truncated)
-            : AssistantPrompts.summary(title: document.title, text: note.text, truncated: note.truncated)
         var answer = AssistantMessage(role: .assistant, text: "")
         answer.noteWasCut = note.truncated
         answer.documentID = document.id
-        start(answer) { (prompt, []) }
+        guard action == .summary else {
+            let prompt = AssistantPrompts.studyQuestions(title: document.title, text: note.text, truncated: note.truncated)
+            start(answer) { (prompt, []) }
+            return
+        }
+        // A summary is shorter than its note: a short note is not summarized at all.
+        let plan = AssistantPrompts.SummaryPlan(noteWords: AssistantPrompts.wordCount(note.text))
+        guard plan.worthSummarizing else {
+            answer.failure = "Esta nota é curta (\(plan.noteWords) palavras): um resumo ficaria do tamanho dela."
+            messages.append(answer)
+            return
+        }
+        let prompt = AssistantPrompts.summary(title: document.title, text: note.text, truncated: note.truncated)
+        start(answer, maxTokens: plan.maxTokens, finish: { AssistantPrompts.trimmedSummary($0, plan: plan) }) { (prompt, []) }
     }
 
     /// A question answered from passages of the notes, found by `find` (in the chosen notes, or
@@ -323,7 +333,8 @@ final class Assistant {
     }
 
     /// Adds `answer` and writes it from the prompt `prepare` gives (nil: nothing found).
-    private func start(_ answer: AssistantMessage,
+    private func start(_ answer: AssistantMessage, maxTokens: Int = AssistantModel.answerTokens,
+                       finish: (@MainActor (String) -> String)? = nil,
                        prepare: @escaping @MainActor () async -> (prompt: String, sources: [AssistantPrompts.Source])?) {
         messages.append(answer)
         let id = answer.id
@@ -346,7 +357,7 @@ final class Assistant {
             guard let self, !Task.isCancelled else { return }
             self.update(id) { $0.sources = prepared.sources; $0.status = "Preparando o modelo…" }
             do {
-                for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prepared.prompt, maxTokens: AssistantModel.answerTokens) {
+                for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prepared.prompt, maxTokens: maxTokens) {
                     guard !Task.isCancelled else { return }
                     if self.messages.last?.status != nil { self.backend = await generator.backend() }
                     self.update(id) { $0.status = nil; $0.text += piece }
@@ -356,6 +367,7 @@ final class Assistant {
                 self.update(id) {
                     $0.status = nil
                     $0.text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let finish, !$0.text.isEmpty { $0.text = finish($0.text) }
                     if $0.text.isEmpty { $0.failure = "O modelo não escreveu nada. Tente de novo." }
                 }
             } catch {

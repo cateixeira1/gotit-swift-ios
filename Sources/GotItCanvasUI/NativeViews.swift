@@ -32,12 +32,15 @@ enum TextBridge {
         return font.fontName
     }
     /// A font picked in the toolbar: "Padrão" (the default), "Sistema" or a PostScript name.
-    static func chosen(_ name: String, size: CGFloat) -> UIFont {
+    /// The size changes with the font so the text looks as large as before (Caveat is set larger).
+    static func chosen(_ name: String, size: CGFloat, replacing previous: UIFont? = nil) -> UIFont {
+        let font: UIFont
         switch name {
-        case "Padrão": return font(named: nil, size: size)
-        case "Sistema": return .systemFont(ofSize: size)
-        default: return UIFont(name: name, size: size) ?? .systemFont(ofSize: size)
+        case "Padrão": font = self.font(named: nil, size: size)
+        case "Sistema": font = .systemFont(ofSize: size)
+        default: font = UIFont(name: name, size: size) ?? .systemFont(ofSize: size)
         }
+        return font.withSize(AppFonts.matchingSize(size, of: previous, in: font))
     }
 
     static func attributed(_ rich: RichText, base: BlockStyle) -> NSAttributedString {

@@ -10,12 +10,14 @@ import Speech
 /// about a minute; longer recordings may come back incomplete there.
 enum AudioTranscription {
     enum Failure: LocalizedError {
-        case notAllowed, unsupportedLanguage, unavailable
+        case notAllowed, unsupportedLanguage, unavailable, needsLanguageDownload(String)
         var errorDescription: String? {
             switch self {
             case .notAllowed: "O Got It! não tem permissão para reconhecer fala. Ative em Ajustes › Got It!."
             case .unsupportedLanguage: "Este idioma não pode ser transcrito no aparelho."
             case .unavailable: "A transcrição no aparelho não está disponível agora."
+            case .needsLanguageDownload(let language):
+                "Na primeira transcrição em \(language) o sistema baixa o modelo de voz do idioma (uma vez só). Conecte-se à internet e tente de novo; depois disso a transcrição funciona sem internet."
             }
         }
     }
@@ -70,7 +72,12 @@ enum AudioTranscription {
         guard let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else { throw Failure.unsupportedLanguage }
         let transcriber = SpeechTranscriber(locale: supported, preset: .transcription)
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-            try await request.downloadAndInstall()
+            // Only the first time a language is used; offline this is the one step that fails.
+            do { try await request.downloadAndInstall() }
+            catch {
+                let name = languages.first { $0.id == locale.identifier }?.name ?? locale.identifier
+                throw Failure.needsLanguageDownload(name)
+            }
         }
         let file = try AVAudioFile(forReading: url)
         guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else { throw Failure.unavailable }

@@ -37,6 +37,23 @@ public enum AppFonts {
 
     public static func title(of name: String?) -> String { choices.first { $0.name == name }?.title ?? name ?? "Sistema" }
 
+    /// How much larger `font` is set to look as tall as San Francisco at the same size (capital
+    /// height); 1 when they differ by less than 8%. Caveat's capitals are about 13% shorter, so
+    /// 18 pt of San Francisco becomes 21 pt of Caveat.
+    public static func visualScale(_ font: UIFont) -> CGFloat {
+        let own = font.withSize(100).capHeight
+        guard own > 0 else { return 1 }
+        let ratio = UIFont.systemFont(ofSize: 100).capHeight / own
+        return abs(ratio - 1) < 0.08 ? 1 : ratio
+    }
+
+    /// The size for `font` that looks like `size` of `previous` (whole points).
+    public static func matchingSize(_ size: CGFloat, of previous: UIFont?, in font: UIFont) -> CGFloat {
+        let visual = size / (previous.map(visualScale) ?? 1)
+        let wanted = visual * visualScale(font)
+        return abs(wanted - size) < 0.5 ? size : max(6, min(144, wanted.rounded()))
+    }
+
     /// Whether `font` is the default font (any weight or style of its family).
     static func isDefault(_ font: UIFont) -> Bool {
         guard let defaultFamily else { return font.fontName.hasPrefix(".") }

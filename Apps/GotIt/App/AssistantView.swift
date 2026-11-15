@@ -84,7 +84,12 @@ struct AssistantChat: View {
         if let status = message.status {
             HStack(spacing: 8) { ProgressView(); Text(status).foregroundStyle(.secondary) }
         }
-        if !message.text.isEmpty {
+        if let proposal = message.proposal, !proposal.isEmpty {
+            ProposalCard(proposal: proposal, applied: message.applied, canApply: message.documentID == model.document?.id) { title, folder, tasks in
+                guard let target = message.documentID else { return }
+                Task { if await model.apply(proposal, title: title, folder: folder, tasks: tasks, to: target) { assistant.markApplied(message.id) } }
+            }
+        } else if !message.text.isEmpty && !message.proposes {
             Text(Self.rendered(message.text)).textSelection(.enabled).accessibilityIdentifier("assistantAnswer")
         }
         if let failure = message.failure {
@@ -113,7 +118,7 @@ struct AssistantChat: View {
                 }
             }
         }
-        if done {
+        if done && !message.proposes {
             HStack(spacing: 18) {
                 Button {
                     UIPasteboard.general.string = AssistantPrompts.plainText(withSources(message))
@@ -152,7 +157,7 @@ struct AssistantChat: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(Assistant.Action.allCases) { action in
-                            Button { assistant.run(action, on: note) } label: {
+                            Button { assistant.run(action, on: note, folders: model.folders.map(\.name), folder: model.openNoteFolderName) } label: {
                                 Label(action.title, systemImage: action.symbol).font(.subheadline)
                                     .padding(.horizontal, 14).padding(.vertical, 8)
                                     .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
@@ -313,5 +318,62 @@ struct AssistantButton: View {
         }
         .accessibilityLabel("Assistente")
         .accessibilityIdentifier("assistantButton")
+    }
+}
+
+/// The assistant's proposals for a note: each one can be left out before "Aplicar".
+struct ProposalCard: View {
+    let proposal: NoteProposals.Proposal
+    let applied: Bool
+    let canApply: Bool
+    let apply: (_ title: Bool, _ folder: Bool, _ tasks: [String]) -> Void
+    @State private var useTitle = true
+    @State private var useFolder = true
+    @State private var chosenTasks: Set<String>?
+
+    private var tasks: Set<String> { chosenTasks ?? Set(proposal.tasks) }
+    private var nothingChosen: Bool {
+        !(useTitle && proposal.title != nil) && !(useFolder && proposal.folder != nil) && tasks.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Propostas").font(.subheadline.weight(.semibold))
+            if let title = proposal.title { choice("Título: \(title)", isOn: $useTitle) }
+            if let folder = proposal.folder { choice("Mover para a pasta \(folder)", isOn: $useFolder) }
+            if !proposal.tasks.isEmpty {
+                Text("Pendências (inseridas na nota)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(proposal.tasks, id: \.self) { task in
+                    choice(task, isOn: Binding(get: { tasks.contains(task) }, set: { on in
+                        var set = tasks; if on { set.insert(task) } else { set.remove(task) }; chosenTasks = set
+                    }))
+                }
+            }
+            if applied {
+                Label("Aplicado. Título e pendências se desfazem como qualquer edição.", systemImage: "checkmark.circle")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if canApply {
+                Button {
+                    apply(useTitle, useFolder, proposal.tasks.filter(tasks.contains))
+                } label: { Label("Aplicar", systemImage: "checkmark") }
+                    .buttonStyle(.borderedProminent).disabled(nothingChosen)
+                    .accessibilityIdentifier("applyProposal")
+            } else {
+                Text("Abra a nota para aplicar.").font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(applied)
+    }
+
+    private func choice(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button { isOn.wrappedValue.toggle() } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: isOn.wrappedValue ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(isOn.wrappedValue ? Color.accentColor : .secondary)
+                Text(title).foregroundStyle(.primary).multilineTextAlignment(.leading)
+            }.contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn.wrappedValue ? .isSelected : [])
     }
 }

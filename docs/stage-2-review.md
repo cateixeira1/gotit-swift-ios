@@ -485,3 +485,33 @@ interface em iPad e iPhone aprovados (https://github.com/cateixeira1/gotit-swift
 CI (`3889f30`): 161 testes do núcleo e todos os nativos e de interface aprovados em iPad e iPhone;
 com o Gemma real, três conversas seguidas no mesmo motor e um motor novo funcionaram nos dois
 simuladores (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/43552481194).
+
+## Ajustes de 14/11/2026 e fechamento da etapa 5
+
+- **Resumo** do tamanho certo: cerca de 1/5 da nota (20–120 palavras, 1–6 tópicos), com pedido
+  explícito para condensar e não reescrever trecho por trecho; os tokens de resposta acompanham o
+  limite e o que passa dele é cortado (a lista "Pendências" fica inteira). Notas com menos de 40
+  palavras não são resumidas.
+- **Barra de formatação e do teclado**: o que está ligado (negrito, itálico, sublinhado, tachado,
+  listas, ferramenta) aparece como botão pressionado; os menus de tamanho e de fonte marcam o item
+  em uso, e o tamanho aparece ao lado do ícone.
+- **Fontes na pauta**: cada fonte desce o quanto o seu descendente passa do da San Francisco, para a
+  linha de base cair no mesmo ponto (medido com fontTools: descendentes Caveat 300, Patrick Hand 312,
+  Indie Flower 488, Kalam 531, SF ≈ 241 milésimos). O deslocamento não é salvo.
+- **Caveat maior**: ao trocar de fonte, o tamanho é convertido pela altura das maiúsculas quando
+  elas diferem mais de 8% da San Francisco (só a Caveat, 610 contra ≈ 705): 18 pt viram 21 pt, e
+  voltam a 18 pt ao trocar de volta. A escrita convertida em Caveat usa o mesmo ajuste.
+- **Propostas validadas** ("Organizar esta nota"): o Gemma propõe título, pasta e pendências num
+  formato fixo de linhas; `NoteProposals.parse` só aceita um título de até 10 palavras diferente do
+  atual, uma pasta que existe (e não é a atual) e até 8 tarefas que tenham palavra ou número da
+  própria nota, sem repetidas. A pessoa marca o que quer e toca em Aplicar: título e pendências viram
+  edições comuns (desfazem como qualquer outra) e a pasta, uma mudança de pasta.
+- **Medição no aparelho**: Ajustes › Desempenho mede também o assistente (mesma pergunta duas
+  vezes: com o carregamento do modelo e com ele já carregado; 1ª palavra, total, tokens/s
+  aproximados, CPU ou GPU).
+- **Sem internet**: só os downloads dos modelos (EmbeddingGemma, Gemma) usam a rede. A transcrição
+  do iOS 26 baixa o modelo de voz do idioma na primeira vez; sem internet o app agora diz isso
+  em vez de uma falha genérica.
+
+Falta na etapa 5, e só pode ser feito no aparelho: as medições de Ajustes › Desempenho num
+iPhone 16 ou mais recente, e o teste das propostas com notas reais.

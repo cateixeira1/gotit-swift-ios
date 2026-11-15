@@ -90,6 +90,26 @@ final class AssistantTests: XCTestCase {
         XCTAssertEqual(closed, 1)
     }
 
+    /// "Organizar esta nota": the raw answer is not shown; what is kept is checked against the
+    /// note and the folders (a made-up folder and task are dropped).
+    func testOrganizeProposesOnlyWhatTheNoteSupports() async throws {
+        let generator = FakeGenerator(answer: ["TÍTULO: Infiltração no apartamento\n", "PASTA: Viagens\n",
+                                               "TAREFAS:\n- Ligar para a seguradora até sexta\n- Comprar passagens para Roma"])
+        let assistant = Assistant(modelFile: file, installed: { true }, makeGenerator: { generator })
+        var note = CanvasDocument(title: "Nota 4")
+        note.blocks = [CanvasBlock(order: 0, content: .text(RichText("Infiltração no teto. Ligar para a seguradora até sexta.")))]
+        assistant.run(.organize, on: note, folders: ["Imóveis"], folder: nil)
+        XCTAssertEqual(assistant.last?.proposes, true)
+        try await finished(assistant)
+        let proposal = try XCTUnwrap(assistant.last?.proposal)
+        XCTAssertEqual(proposal.title, "Infiltração no apartamento")
+        XCTAssertNil(proposal.folder, "Viagens is not a folder")
+        XCTAssertEqual(proposal.tasks, ["Ligar para a seguradora até sexta"])
+        XCTAssertNil(assistant.last?.failure)
+        let prompts = await generator.prompts
+        XCTAssertTrue(prompts.last?.contains("- Imóveis") == true)
+    }
+
     func testWithoutTheModelNothingIsAsked() async throws {
         let generator = FakeGenerator(answer: ["x"])
         let assistant = Assistant(modelFile: file, installed: { false }, makeGenerator: { generator })

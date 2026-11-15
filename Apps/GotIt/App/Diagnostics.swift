@@ -19,7 +19,7 @@ import os
         let value: String
     }
 
-    static func run(progress: @escaping (String) -> Void) async -> [Line] {
+    static func run(assistant: Assistant? = nil, progress: @escaping (String) -> Void) async -> [Line] {
         var lines: [Line] = [Line(title: "Aparelho", value: deviceDescription())]
         let startPeak = peakMemoryMB()
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("gotit-medicao-\(UUID().uuidString)")
@@ -48,6 +48,10 @@ import os
             lines.append(Line(title: "Reconhecer uma forma (por traço)", value: summary(shapes())))
         } catch {
             lines.append(Line(title: "Medição interrompida", value: String(describing: error)))
+        }
+        if let assistant {
+            progress("Assistente (o modelo é carregado; pode levar um minuto)…")
+            lines += await assistant.benchmark().map { Line(title: $0.title, value: $0.value) }
         }
         lines.append(Line(title: "Memória", value: memoryDescription(startPeak: startPeak)))
         lines.append(Line(title: "Referência", value: "Um quadro de tela dura 16,7 ms a 60 Hz e 8,3 ms a 120 Hz."))
@@ -212,6 +216,8 @@ import os
 }
 
 struct DiagnosticsView: View {
+    /// Measured too when its model is on the device.
+    var assistant: Assistant? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var lines: [DevicePerformance.Line] = []
     @State private var status = ""
@@ -222,7 +228,7 @@ struct DiagnosticsView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Mede neste aparelho o tempo de cada tecla em textos longos, de gravar cada edição, de salvar desenhos e de reconhecer formas, além da memória usada. Usa dados de teste temporários: suas notas não são alteradas. Leva alguns segundos.")
+                    Text("Mede neste aparelho o tempo de cada tecla em textos longos, de gravar cada edição, de salvar desenhos e de reconhecer formas, a velocidade do assistente (se o modelo estiver baixado), além da memória usada. Usa dados de teste temporários: suas notas não são alteradas. Leva alguns segundos (com o assistente, cerca de um minuto).")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 if running {
@@ -259,7 +265,7 @@ struct DiagnosticsView: View {
     private func measure() {
         running = true
         Task {
-            let result = await DevicePerformance.run { status = $0 }
+            let result = await DevicePerformance.run(assistant: assistant) { status = $0 }
             lines = result; running = false
         }
     }

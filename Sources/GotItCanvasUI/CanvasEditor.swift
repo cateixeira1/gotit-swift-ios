@@ -653,8 +653,18 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
         case .underline: toggle(text, key: .underlineStyle)
         case .strike: toggle(text, key: .strikethroughStyle)
         case .font(let name):
-            let size = (text.typingAttributes[.font] as? UIFont)?.pointSize ?? 18
-            format(text, key: .font, value: TextBridge.chosen(name, size: size))
+            let current = text.selectedRange.length > 0 && text.selectedRange.location < text.textStorage.length
+                ? text.textStorage.attribute(.font, at: text.selectedRange.location, effectiveRange: nil) as? UIFont
+                : text.typingAttributes[.font] as? UIFont
+            guard text.selectedRange.length > 0 else {
+                format(text, key: .font, value: TextBridge.chosen(name, size: current?.pointSize ?? 18, replacing: current)); break
+            }
+            // Each run keeps its own size, adjusted to the new font.
+            text.textStorage.enumerateAttribute(.font, in: text.selectedRange) { value, range, _ in
+                let old = value as? UIFont
+                text.textStorage.addAttribute(.font, value: TextBridge.chosen(name, size: old?.pointSize ?? 18, replacing: old), range: range)
+            }
+            textViewDidChange(text)
         case .fontSize(let size):
             let font = (text.typingAttributes[.font] as? UIFont) ?? UIFont.systemFont(ofSize: size)
             format(text, key: .font, value: font.withSize(size))
@@ -1870,7 +1880,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 let groupKeys = picture.strokes.map(Self.key)
                 guard groupKeys.allSatisfy(alive.contains) else { continue }
                 if let answer = reading.answer {
-                    let size = min(96, max(12, (picture.bounds.height * 0.8).rounded()))
+                    let scale = UIFont(name: font, size: 18).map(AppFonts.visualScale) ?? 1
+                    let size = min(96, max(12, (picture.bounds.height * 0.8 * scale).rounded()))
                     let width = max(40, CGFloat(answer.count) * size * 0.55 + 16)
                     let beside = picture.bounds.maxX + 10 + width <= pageWidth - 8
                     let frame = beside ? CGRect(x: picture.bounds.maxX + 10, y: picture.bounds.minY - size * 0.1, width: width, height: max(picture.bounds.height, size * 1.4))
@@ -1883,7 +1894,8 @@ public final class CanvasViewController: UIViewController, UIScrollViewDelegate,
                 }
                 guard let text = reading.text, text.confidence >= 0.35, text.text.contains(where: { $0.isLetter || $0.isNumber }) else { continue }
                 let lineHeight = picture.bounds.height / CGFloat(max(1, text.lines))
-                let size = min(96, max(10, (lineHeight * 0.78).rounded()))
+                // As tall as the writing: Caveat is set larger than San Francisco would be.
+                let size = min(96, max(10, (lineHeight * 0.78 * (UIFont(name: font, size: 18).map(AppFonts.visualScale) ?? 1)).rounded()))
                 let block = CanvasBlock(order: order, layout: .init(mode: .absolute, frame: .init(
                         x: picture.bounds.minX, y: picture.bounds.minY - size * 0.15,
                         width: max(picture.bounds.width * 1.15, 60), height: max(picture.bounds.height, size * 1.4))),

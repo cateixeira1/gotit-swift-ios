@@ -237,3 +237,39 @@ func rejectsInvalidDimensions(_ width: Double) {
     let markdown = "## Resumo\n* **Prazo:** 10/12\n  - item\n- outro\n\nTexto __final__."
     #expect(AssistantPrompts.plainText(markdown) == "Resumo\n• Prazo: 10/12\n  • item\n• outro\n\nTexto final.")
 }
+
+@Test func noteProposalsKeepOnlyWhatTheNoteAndTheFoldersSupport() {
+    let note = """
+        Reunião com o síndico sobre a infiltração. Ligar para a seguradora até sexta.
+        Enviar as fotos do teto ao advogado. Orçamento do pintor: R$ 1.800.
+        """
+    let answer = """
+        **TÍTULO:** "Infiltração no apartamento"
+        PASTA: imóveis
+        TAREFAS:
+        - Ligar para a seguradora até sexta
+        - Enviar fotos do teto ao advogado
+        * Ligar para a seguradora até sexta
+        - Comprar passagens para Roma
+        - Pagar 1.800 ao pintor
+        """
+    let proposal = NoteProposals.parse(answer, note: note, currentTitle: "Nota 3", currentFolder: nil, folders: ["Imóveis", "Trabalho"])
+    #expect(proposal.title == "Infiltração no apartamento")
+    #expect(proposal.folder == "Imóveis", "the folder's own spelling")
+    #expect(proposal.tasks == ["Ligar para a seguradora até sexta", "Enviar fotos do teto ao advogado", "Pagar 1.800 ao pintor"])
+    #expect(proposal.dropped.contains { $0.contains("Roma") }, "made up: nothing in the note says it")
+
+    let none = NoteProposals.parse("TÍTULO: Nota 3\nPASTA: Viagens\nTAREFAS: NENHUMA", note: note, currentTitle: "Nota 3",
+                                   currentFolder: nil, folders: ["Imóveis"])
+    #expect(none.isEmpty && none.dropped.count == 2, "same title; a folder that does not exist")
+    let already = NoteProposals.parse("PASTA: Imóveis", note: note, currentTitle: "", currentFolder: "imoveis", folders: ["Imóveis"])
+    #expect(already.folder == nil)
+    let long = NoteProposals.parse("TÍTULO: " + String(repeating: "palavra ", count: 12), note: note, currentTitle: "", currentFolder: nil, folders: [])
+    #expect(long.title == nil)
+
+    let many = (1...12).map { "- Ligar para a seguradora \($0)" }.joined(separator: "\n")
+    #expect(NoteProposals.parse("TAREFAS:\n" + many, note: note, currentTitle: "", currentFolder: nil, folders: []).tasks.count == NoteProposals.maxTasks)
+    #expect(NoteProposals.taskText(["a", "b"]) == "Pendências:\n• a\n• b")
+    let prompt = NoteProposals.prompt(title: "", text: note, truncated: false, folders: ["Imóveis"])
+    #expect(prompt.contains("- Imóveis") && prompt.contains("(sem título)") && prompt.contains("TAREFAS:"))
+}

@@ -138,6 +138,11 @@ struct AssistantMessage: Identifiable, Equatable {
     /// What it is doing before the first words ("Procurando nas notas…").
     var status: String?
     var failure: String?
+    /// "Organizar esta nota": what was proposed after checking (nil for other answers).
+    var proposal: NoteProposals.Proposal?
+    /// Waiting for the proposal (its raw text is not shown).
+    var proposes = false
+    var applied = false
     /// Passages the answer was written from, numbered as in the answer.
     var sources: [AssistantPrompts.Source] = []
     var noteWasCut = false
@@ -151,6 +156,7 @@ struct AssistantMessage: Identifiable, Equatable {
     }
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.id == rhs.id && lhs.text == rhs.text && lhs.status == rhs.status && lhs.failure == rhs.failure && lhs.sources == rhs.sources
+            && lhs.proposal == rhs.proposal && lhs.applied == rhs.applied
     }
 }
 
@@ -160,15 +166,22 @@ struct AssistantMessage: Identifiable, Equatable {
 final class Assistant {
     enum Install: Equatable { case absent, downloading(Double), checking, installed, failed(String) }
     enum Action: String, CaseIterable, Identifiable {
-        case summary, questions
+        case summary, organize, questions
         var id: String { rawValue }
         var title: String {
             switch self {
             case .summary: "Resumir esta nota"
+            case .organize: "Organizar esta nota"
             case .questions: "Perguntas para revisar"
             }
         }
-        var symbol: String { self == .summary ? "text.badge.star" : "questionmark.bubble" }
+        var symbol: String {
+            switch self {
+            case .summary: "text.badge.star"
+            case .organize: "wand.and.stars"
+            case .questions: "questionmark.bubble"
+            }
+        }
     }
 
     private(set) var install: Install = .absent
@@ -274,8 +287,9 @@ final class Assistant {
 
     // MARK: The conversation
 
-    /// Summary or review questions of `document`.
-    func run(_ action: Action, on document: CanvasDocument) {
+    /// Summary, proposals or review questions of `document`. `folders` are the folder names the
+    /// proposals may choose from; `folder`, the one the note is in.
+    func run(_ action: Action, on document: CanvasDocument, folders: [String] = [], folder: String? = nil) {
         guard !isWorking else { return }
         messages.append(AssistantMessage(role: .user, text: action.title))
         let note = AssistantPrompts.noteText(document)
@@ -286,9 +300,20 @@ final class Assistant {
         var answer = AssistantMessage(role: .assistant, text: "")
         answer.noteWasCut = note.truncated
         answer.documentID = document.id
-        guard action == .summary else {
+        if action == .questions {
             let prompt = AssistantPrompts.studyQuestions(title: document.title, text: note.text, truncated: note.truncated)
             start(answer) { (prompt, []) }
+            return
+        }
+        if action == .organize {
+            let prompt = NoteProposals.prompt(title: document.title, text: note.text, truncated: note.truncated, folders: folders)
+            answer.proposes = true; answer.status = "Lendo a nota…"
+            let title = document.title, text = note.text
+            start(answer, maxTokens: 260, finish: { message in
+                let proposal = NoteProposals.parse(message.text, note: text, currentTitle: title, currentFolder: folder, folders: folders)
+                message.proposal = proposal
+                if proposal.isEmpty { message.failure = "Não encontrei nada para propor nesta nota (título, pasta ou tarefas)." }
+            }) { (prompt, []) }
             return
         }
         // A summary is shorter than its note: a short note is not summarized at all.
@@ -299,7 +324,7 @@ final class Assistant {
             return
         }
         let prompt = AssistantPrompts.summary(title: document.title, text: note.text, truncated: note.truncated)
-        start(answer, maxTokens: plan.maxTokens, finish: { AssistantPrompts.trimmedSummary($0, plan: plan) }) { (prompt, []) }
+        start(answer, maxTokens: plan.maxTokens, finish: { $0.text = AssistantPrompts.trimmedSummary($0.text, plan: plan) }) { (prompt, []) }
     }
 
     /// A question answered from passages of the notes, found by `find` (in the chosen notes, or
@@ -324,6 +349,48 @@ final class Assistant {
         }
     }
 
+    func markApplied(_ id: UUID) { update(id) { $0.applied = true } }
+
+    /// The model measured on this device (Ajustes › Desempenho): the same short question twice,
+    /// the first time loading the model. Stream pieces are about one token each.
+    func benchmark() async -> [(title: String, value: String)] {
+        guard install == .installed else { return [("Assistente", "modelo não baixado (Ajustes › Assistente)")] }
+        guard !isWorking, let generator = generator ?? makeGenerator() else { return [("Assistente", "não disponível agora")] }
+        self.generator = generator
+        isWorking = true
+        defer { isWorking = false }
+        let prompt = AssistantPrompts.question("Quando vence o contrato do apartamento?", sources: [
+            .init(documentID: UUID(), blockID: UUID(), title: "Domingo", text: "Bolo de laranja: forno a 180 graus por 40 minutos."),
+            .init(documentID: UUID(), blockID: UUID(), title: "Apartamento",
+                  text: "O contrato de locação do apartamento da Rua Augusta vence em 15 de março de 2027. Reajuste pelo IPCA."),
+        ])
+        func seconds(_ duration: Duration) -> Double {
+            Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+        }
+        func text(_ value: Double) -> String { String(format: "%.1f", value).replacingOccurrences(of: ".", with: ",") }
+        var rows: [(title: String, value: String)] = []
+        for round in 1...2 {
+            let clock = ContinuousClock(), start = clock.now
+            var first: Duration?, pieces = 0, answer = ""
+            do {
+                for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prompt, maxTokens: 120) {
+                    if first == nil { first = clock.now - start }
+                    pieces += 1; answer += piece
+                }
+            } catch {
+                rows.append(("Assistente · resposta \(round)", "falhou: \(error.localizedDescription)")); break
+            }
+            let total = seconds(clock.now - start), firstWord = first.map(seconds) ?? total
+            let rate = Double(max(pieces - 1, 0)) / max(total - firstWord, 0.001)
+            rows.append((round == 1 ? "Assistente · 1ª resposta (carrega o modelo)" : "Assistente · 2ª resposta (modelo carregado)",
+                         "1ª palavra em \(text(firstWord)) s · total \(text(total)) s · \(text(rate)) tokens/s (aprox.) · \(pieces) tokens"))
+            if round == 2 { rows.append(("Assistente · resposta", answer.trimmingCharacters(in: .whitespacesAndNewlines))) }
+        }
+        backend = await generator.backend()
+        rows.append(("Assistente · onde roda", backend ?? "?"))
+        return rows
+    }
+
     /// Starts a new conversation.
     func clear() { cancel(); messages = [] }
 
@@ -334,7 +401,7 @@ final class Assistant {
 
     /// Adds `answer` and writes it from the prompt `prepare` gives (nil: nothing found).
     private func start(_ answer: AssistantMessage, maxTokens: Int = AssistantModel.answerTokens,
-                       finish: (@MainActor (String) -> String)? = nil,
+                       finish: (@MainActor (inout AssistantMessage) -> Void)? = nil,
                        prepare: @escaping @MainActor () async -> (prompt: String, sources: [AssistantPrompts.Source])?) {
         messages.append(answer)
         let id = answer.id
@@ -359,16 +426,16 @@ final class Assistant {
             do {
                 for try await piece in generator.generate(system: AssistantPrompts.system, prompt: prepared.prompt, maxTokens: maxTokens) {
                     guard !Task.isCancelled else { return }
-                    if self.messages.last?.status != nil { self.backend = await generator.backend() }
-                    self.update(id) { $0.status = nil; $0.text += piece }
+                    if self.messages.last?.text.isEmpty == true { self.backend = await generator.backend() }
+                    self.update(id) { $0.status = $0.proposes ? "Preparando as propostas…" : nil; $0.text += piece }
                 }
                 guard !Task.isCancelled else { return }
                 self.isWorking = false
                 self.update(id) {
                     $0.status = nil
                     $0.text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let finish, !$0.text.isEmpty { $0.text = finish($0.text) }
                     if $0.text.isEmpty { $0.failure = "O modelo não escreveu nada. Tente de novo." }
+                    else if let finish { finish(&$0) }
                 }
             } catch {
                 guard !Task.isCancelled else { return }

@@ -354,6 +354,29 @@ final class AppModel {
         return true
     }
 
+    /// Applies the chosen parts of a proposal to the open note `documentID`: the title and the
+    /// to-dos as ordinary edits (undone like any other), the folder as a move. Every part was
+    /// checked when the answer arrived; the folder is looked up again (it may have gone since).
+    @discardableResult
+    func apply(_ proposal: NoteProposals.Proposal, title: Bool, folder: Bool, tasks: [String], to documentID: UUID) async -> Bool {
+        guard let current = document, current.id == documentID else {
+            error = "Abra a nota de novo para aplicar as propostas."; return false
+        }
+        if title, let name = proposal.title { enqueue([.rename(name)]) }
+        if !tasks.isEmpty, !(await insertAssistantText(NoteProposals.taskText(tasks))) { return false }
+        if folder, let name = proposal.folder {
+            guard let target = folders.first(where: { $0.name == name }) else { error = "A pasta \(name) não existe mais."; return false }
+            await moveDocument(documentID, to: target.id)
+        }
+        return true
+    }
+
+    /// The folder the open note is in, by name (nil at the top level).
+    var openNoteFolderName: String? {
+        guard let id = document?.id, let folder = summaries.first(where: { $0.id == id })?.folderID else { return nil }
+        return self.folder(folder)?.name
+    }
+
     /// Where to take the caret once a note opened from the search results is on screen.
     private var reveal: (blockID: UUID, query: String)?
     /// Changes when a found place should be shown (the editor then calls `takeRevealFocus`).
@@ -1455,7 +1478,7 @@ struct AppScreen: View {
                     }
                 }
                 .sheet(isPresented: $showPage) { PageOptions(settings: document.canvas) { model.applyPageLayout($0) } }
-                .sheet(isPresented: $showDiagnostics) { DiagnosticsView() }
+                .sheet(isPresented: $showDiagnostics) { DiagnosticsView(assistant: model.assistant.install == .installed ? model.assistant : nil) }
                 .sheet(isPresented: $showBacklinks) { BacklinksView(model: model, documentID: document.id) }
                 .sheet(item: $sharing) { file in ActivitySheet(url: file.url) }
                 .alert("Equação de uma incógnita", isPresented: $showEquation) {

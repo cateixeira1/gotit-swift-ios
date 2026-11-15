@@ -266,7 +266,7 @@ public enum StoryEdit {
         case .highlight(let color):
             if let color { text.addAttribute(.backgroundColor, value: color, range: range) } else { text.removeAttribute(.backgroundColor, range: range) }
         case .fontSize(let size): fonts { $0.withSize(max(6, min(144, size))) }
-        case .font(let name): fonts { font in TextBridge.chosen(name, size: font.pointSize) }
+        case .font(let name): fonts { font in TextBridge.chosen(name, size: font.pointSize, replacing: font) }
         default: break
         }
     }

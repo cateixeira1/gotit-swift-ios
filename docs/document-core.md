@@ -75,6 +75,8 @@ Uma falha de migração não apaga os dados.
 Foreign keys ficam ligadas em cada conexão. WAL e `synchronous=FULL` são
 configurados para as gravações; o timeout de lock é de 5 segundos.
 Essas opções não substituem backups, proteção dos arquivos ou testes no aparelho.
+A proteção dos arquivos fica com o aplicativo (`DataProtection`, `completeUnlessOpen` na pasta
+das notas); a conexão mantém as instruções preparadas e as finaliza ao fechar.
 Nunca copie apenas o arquivo `.sqlite` de um banco aberto em WAL para backup;
 uma futura API deverá usar o mecanismo de backup do SQLite ou equivalente.
 

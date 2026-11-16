@@ -515,3 +515,70 @@ simuladores (https://github.com/cateixeira1/gotit-swift-ios/actions/runs/4355248
 
 Falta na etapa 5, e só pode ser feito no aparelho: as medições de Ajustes › Desempenho num
 iPhone 16 ou mais recente, e o teste das propostas com notas reais.
+
+## Auditoria de segurança e desempenho (15/11/2026)
+
+Revisão do repositório inteiro a pedido do usuário. Não foram encontrados segredos no código, SQL
+montado com texto do usuário (tudo usa parâmetros; a busca só aceita letras e números), rede fora
+dos dois downloads de modelo (HTTPS, revisão fixa, tamanho e SHA-256 conferidos) nem transcrição
+fora do aparelho (`requiresOnDeviceRecognition`). O que mudou:
+
+### Segurança
+
+- **Arquivos protegidos com o aparelho bloqueado** (`DataProtection`): o banco, a fila de
+  recuperação, os assets e as cópias em Caches (miniaturas e derivados) passam de "até o primeiro
+  desbloqueio" (padrão do iOS: legíveis do primeiro desbloqueio até reiniciar) para
+  `completeUnlessOpen`: só abrem com o aparelho desbloqueado; o que já está aberto continua
+  utilizável (uma gravação que termina logo depois de a tela bloquear). Pastas passam a proteção aos
+  arquivos novos; arquivos movidos para dentro (áudio, vídeo) e os que já existiam recebem a
+  proteção à parte (os antigos, uma vez, fora da thread principal). Sem efeito no simulador e no
+  Mac: **só dá para conferir no aparelho**.
+- **Links**: só endereços `http(s)`, `mailto` e links entre notas são mostrados e guardados como
+  link (`NoteLinks.isAllowed`). O diálogo "Inserir link" já filtrava; texto colado com formatação
+  podia trazer qualquer esquema (`file:`, `tel:`, de outro app).
+- **Temporários**: gravações, cópias de áudio/vídeo, exportação de traços e a pasta da medição
+  eram apagados ao fim de cada operação, mas ficavam em `tmp` se o app fosse encerrado no meio. Ao
+  abrir, o que é do app e é anterior a esta execução é removido (`TemporaryFiles`); arquivos do
+  iOS, como um download de modelo interrompido, não são tocados.
+- **CI**: ações fixadas por commit em vez de tag, token não deixado no checkout, limite de tempo
+  nos jobs.
+
+Avaliado e mantido: `synchronous=FULL` (decisão registrada em `document-core.md`); `secure_delete`
+do SQLite não foi ligado (custaria escrita a cada edição; "apagar para sempre" continua removendo
+linhas e, depois, os arquivos órfãos).
+
+### Desempenho (medido no Linux, build de release, biblioteca de 600 notas e 12 000 blocos)
+
+- **Índice de busca por número de linha.** Cada tecla apagava a entrada do bloco com
+  `DELETE … WHERE document_id = ? AND block_id = ?`; como essas colunas não são indexadas no FTS5,
+  o SQLite lia o índice inteiro (a biblioteca toda) a cada tecla: ~12 ms com 20 000 blocos, contra
+  0,03 ms por `rowid`. Agora cada entrada tem um número fixo derivado da nota e do bloco
+  (`SearchText.rowID`, FNV-1a de 63 bits) e é substituída ou removida por ele. Sem mudança de
+  esquema: `SearchText.indexVersion` passou a 3 e o índice é refeito uma vez na primeira busca
+  (uma versão anterior do app, se instalada depois, também o refaz).
+- **Deltas do histórico sem decodificação por tentativa.** O valor JSON de cada bloco alterado
+  (e, no desfazer/refazer, da nota inteira) era lido por `JSONValue.init(from:)`, que tenta um tipo
+  depois do outro e lança um erro a cada tentativa errada. `JSONText` lê o texto JSON diretamente,
+  com o mesmo resultado (teste compara os dois em documentos e valores de borda); se não conseguir
+  ler algo, o decodificador antigo continua sendo usado.
+- **Assets retidos sem reconstruir cada estado.** A coleta de arquivos órfãos (a cada 5 min, depois
+  de uma edição) reconstruía todos os estados alcançáveis pelo histórico de todas as notas. Agora só
+  a lista de assets de cada nota é seguida pelo histórico, e edições que não mexem nela são puladas;
+  uma nota cujo histórico não puder ser seguido assim é reconstruída como antes. Mesmo resultado
+  (teste compara os dois caminhos): **77,6 s → 0,14 s** na biblioteca de teste. Durante esse tempo
+  as gravações ficavam na fila.
+- **Gravação de uma tecla** (grupos de 30 teclas, com `fsync`): mediana **13,3 → 3,9 ms**, p95
+  20,9 → 6,3 ms, somando o índice, os deltas, instruções SQL compiladas uma vez
+  (`SQLiteConnection` guarda as instruções preparadas) e a comparação de blocos removidos por
+  conjunto em vez de busca linear.
+- **Busca por significado**: os vetores são comparados onde o SQLite os guarda (`scan`), ficando
+  só número de linha e pontuação por trecho; o texto é lido apenas dos melhores. Antes, cada busca
+  copiava o texto e o vetor de todos os trechos da biblioteca.
+- Pastas de Caches criadas uma vez (eram recriadas a cada imagem mostrada).
+
+Não alterado: layout e diff do documento na thread principal a cada tecla (os ~11 ms já
+registrados acima) e `refresh()` da lista depois de cada gravação; ambos pedem medição no aparelho
+antes de mexer.
+
+Verificação: 170 testes do núcleo em Swift 6.0.3/Linux (7 novos). App e interface dependem do CI
+em macOS; a proteção de arquivos, do aparelho.

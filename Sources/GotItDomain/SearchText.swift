@@ -6,7 +6,8 @@ import Foundation
 public enum SearchText {
     /// Raised when what is indexed changes, so stored indexes are built again.
     /// 2: links between notes are indexed with the text.
-    public static let indexVersion = 2
+    /// 3: each entry has its own row number (`rowID`), so an edit replaces or removes it directly.
+    public static let indexVersion = 3
 
     public enum Kind: String, Codable, Sendable { case title, text, table, caption }
 
@@ -42,14 +43,48 @@ public enum SearchText {
 
     /// What to change in an index going from `old` to `new`: the entries to remove (by block; nil
     /// is the title) and the entries to write. Unchanged blocks are left alone, so an edit only
-    /// touches the blocks it changed.
+    /// touches the blocks it changed; a block equal to what it was is not even read for its text.
     public static func changes(from old: CanvasDocument?, to new: CanvasDocument) -> (removed: [UUID?], written: [Entry]) {
-        let before = Dictionary((old.map(entries) ?? []).map { ($0.blockID, $0) }, uniquingKeysWith: { first, _ in first })
-        let after = Dictionary(entries(new).map { ($0.blockID, $0) }, uniquingKeysWith: { first, _ in first })
+        guard let old else { return ([], entries(new)) }
         var removed: [UUID?] = [], written: [Entry] = []
-        for (key, entry) in before where after[key] != entry { removed.append(key) }
-        for (key, entry) in after where before[key] != entry { written.append(entry) }
+        func compare(_ key: UUID?, _ before: Entry?, _ after: Entry?) {
+            guard before != after else { return }
+            if before != nil { removed.append(key) }
+            if let after { written.append(after) }
+        }
+        func title(_ document: CanvasDocument) -> Entry? {
+            let title = document.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return title.isEmpty ? nil : Entry(blockID: nil, kind: .title, text: title)
+        }
+        if old.title != new.title { compare(nil, title(old), title(new)) }
+        var before = Dictionary(old.blocks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var seen: Set<UUID> = []
+        for block in new.blocks where seen.insert(block.id).inserted {
+            let previous = before.removeValue(forKey: block.id)
+            if let previous, previous.content == block.content { continue }
+            compare(block.id, previous.flatMap(entry(for:)), entry(for: block))
+        }
+        for (id, block) in before { compare(id, entry(for: block), nil) }
         return (removed, written)
+    }
+
+    /// The row an entry takes in the index: always the same for a note and block (nil: the
+    /// title), so the row is replaced or removed by its number. Looking an entry up by its note
+    /// and block instead reads every row of the index, the whole library, on each edit.
+    /// 63 bits of FNV-1a over the two identifiers; never zero.
+    public static func rowID(document: UUID, block: UUID?) -> Int64 {
+        var value: UInt64 = 0xcbf2_9ce4_8422_2325
+        func mix(_ id: UUID) {
+            withUnsafeBytes(of: id.uuid) { bytes in
+                for byte in bytes { value = (value ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+            }
+        }
+        mix(document)
+        // A marker byte keeps the title's row apart from any block's.
+        value = (value ^ (block == nil ? 0x54 : 0x42)) &* 0x0000_0100_0000_01b3
+        if let block { mix(block) }
+        let row = Int64(value & UInt64(Int64.max))
+        return row == 0 ? 1 : row
     }
 
     /// The words typed, as an FTS5 query: every word must appear, each as the start of a word

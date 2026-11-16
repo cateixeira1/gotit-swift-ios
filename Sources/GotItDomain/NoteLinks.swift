@@ -14,6 +14,16 @@ public enum NoteLinks {
         return UUID(uuidString: String(link.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")))
     }
 
+    /// Whether a link kept in a text may be shown and stored as a link: a web or e-mail address,
+    /// or a link to a note. Text pasted from elsewhere can carry any address (`file:`, `tel:`,
+    /// another app's scheme); those stay plain text, so nothing in a note opens them.
+    public static func isAllowed(_ link: String?) -> Bool {
+        guard let link = link?.trimmingCharacters(in: .whitespacesAndNewlines), !link.isEmpty else { return false }
+        if target(of: link) != nil { return true }
+        let lowered = link.lowercased()
+        return ["https://", "http://", "mailto:"].contains { lowered.hasPrefix($0) && lowered.count > $0.count }
+    }
+
     /// Every other note this one points to: links in its text and table cells, and Teia cards.
     public static func targets(in document: CanvasDocument) -> Set<UUID> {
         var found: Set<UUID> = []

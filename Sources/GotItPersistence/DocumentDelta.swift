@@ -29,6 +29,197 @@ indirect enum JSONValue: Codable, Equatable {
     }
 }
 
+extension JSONValue {
+    /// The JSON of an `Encodable` value. Used for every block an edit changes and, on undo and
+    /// redo, for the whole note.
+    static func of<T: Encodable>(_ value: T) throws -> JSONValue {
+        let data = try JSONEncoder().encode(value)
+        // `init(from:)` finds what each value is by trying one type after another, and every
+        // wrong guess is a thrown error: several per value, thousands for a note. That was most
+        // of the cost of recording an edit. Reading the text directly gives the same value; if
+        // it ever cannot read something, the decoder still does.
+        if let parsed = try? JSONText.parse(data) { return parsed }
+        return try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+}
+
+/// A reader of JSON text (RFC 8259) into `JSONValue`, with the same result as decoding it:
+/// a number written without fraction or exponent that fits 64 bits is an integer, any other a
+/// double; `true`/`false` are booleans; text is unescaped (`\uXXXX` pairs included).
+enum JSONText {
+    struct Malformed: Error {}
+
+    static func parse(_ data: Data) throws -> JSONValue {
+        try data.withUnsafeBytes { raw in
+            var reader = Reader(bytes: raw.bindMemory(to: UInt8.self))
+            let value = try reader.value(depth: 0)
+            reader.skipSpace()
+            guard reader.index == reader.bytes.count else { throw Malformed() }
+            return value
+        }
+    }
+
+    private struct Reader {
+        let bytes: UnsafeBufferPointer<UInt8>
+        var index = 0
+
+        mutating func skipSpace() {
+            while index < bytes.count, bytes[index] == 0x20 || bytes[index] == 0x0A || bytes[index] == 0x0D || bytes[index] == 0x09 { index += 1 }
+        }
+
+        private mutating func expect(_ word: StaticString) throws {
+            let count = word.utf8CodeUnitCount
+            guard index + count <= bytes.count else { throw Malformed() }
+            for offset in 0..<count where bytes[index + offset] != word.utf8Start[offset] { throw Malformed() }
+            index += count
+        }
+
+        mutating func value(depth: Int) throws -> JSONValue {
+            // Notes are a few levels deep; a limit keeps a damaged text from exhausting the stack.
+            guard depth < 256 else { throw Malformed() }
+            skipSpace()
+            guard index < bytes.count else { throw Malformed() }
+            switch bytes[index] {
+            case UInt8(ascii: "{"):
+                index += 1
+                var object: [String: JSONValue] = [:]
+                skipSpace()
+                if index < bytes.count, bytes[index] == UInt8(ascii: "}") { index += 1; return .object(object) }
+                while true {
+                    skipSpace()
+                    let key = try string()
+                    skipSpace()
+                    guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else { throw Malformed() }
+                    index += 1
+                    object[key] = try value(depth: depth + 1)
+                    skipSpace()
+                    guard index < bytes.count else { throw Malformed() }
+                    if bytes[index] == UInt8(ascii: ",") { index += 1; continue }
+                    guard bytes[index] == UInt8(ascii: "}") else { throw Malformed() }
+                    index += 1
+                    return .object(object)
+                }
+            case UInt8(ascii: "["):
+                index += 1
+                var array: [JSONValue] = []
+                skipSpace()
+                if index < bytes.count, bytes[index] == UInt8(ascii: "]") { index += 1; return .array(array) }
+                while true {
+                    array.append(try value(depth: depth + 1))
+                    skipSpace()
+                    guard index < bytes.count else { throw Malformed() }
+                    if bytes[index] == UInt8(ascii: ",") { index += 1; continue }
+                    guard bytes[index] == UInt8(ascii: "]") else { throw Malformed() }
+                    index += 1
+                    return .array(array)
+                }
+            case UInt8(ascii: "\""): return .string(try string())
+            case UInt8(ascii: "t"): try expect("true"); return .bool(true)
+            case UInt8(ascii: "f"): try expect("false"); return .bool(false)
+            case UInt8(ascii: "n"): try expect("null"); return .null
+            default: return try number()
+            }
+        }
+
+        private mutating func number() throws -> JSONValue {
+            let start = index
+            var whole = true
+            if index < bytes.count, bytes[index] == UInt8(ascii: "-") { index += 1 }
+            let digits = index
+            while index < bytes.count, bytes[index] >= UInt8(ascii: "0"), bytes[index] <= UInt8(ascii: "9") { index += 1 }
+            guard index > digits else { throw Malformed() }
+            // No leading zeros ("01"): not JSON.
+            if index - digits > 1, bytes[digits] == UInt8(ascii: "0") { throw Malformed() }
+            if index < bytes.count, bytes[index] == UInt8(ascii: ".") {
+                whole = false; index += 1
+                let fraction = index
+                while index < bytes.count, bytes[index] >= UInt8(ascii: "0"), bytes[index] <= UInt8(ascii: "9") { index += 1 }
+                guard index > fraction else { throw Malformed() }
+            }
+            if index < bytes.count, bytes[index] == UInt8(ascii: "e") || bytes[index] == UInt8(ascii: "E") {
+                whole = false; index += 1
+                if index < bytes.count, bytes[index] == UInt8(ascii: "+") || bytes[index] == UInt8(ascii: "-") { index += 1 }
+                let exponent = index
+                while index < bytes.count, bytes[index] >= UInt8(ascii: "0"), bytes[index] <= UInt8(ascii: "9") { index += 1 }
+                guard index > exponent else { throw Malformed() }
+            }
+            let text = String(decoding: UnsafeBufferPointer(rebasing: bytes[start..<index]), as: UTF8.self)
+            if whole, let integer = Int64(text) { return .integer(integer) }
+            guard let double = Double(text), double.isFinite else { throw Malformed() }
+            return .number(double)
+        }
+
+        private mutating func hex4() throws -> UInt32 {
+            guard index + 4 <= bytes.count else { throw Malformed() }
+            var unit: UInt32 = 0
+            for _ in 0..<4 {
+                let byte = bytes[index]; index += 1
+                switch byte {
+                case UInt8(ascii: "0")...UInt8(ascii: "9"): unit = unit << 4 | UInt32(byte - UInt8(ascii: "0"))
+                case UInt8(ascii: "a")...UInt8(ascii: "f"): unit = unit << 4 | UInt32(byte - UInt8(ascii: "a") + 10)
+                case UInt8(ascii: "A")...UInt8(ascii: "F"): unit = unit << 4 | UInt32(byte - UInt8(ascii: "A") + 10)
+                default: throw Malformed()
+                }
+            }
+            return unit
+        }
+
+        private mutating func string() throws -> String {
+            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else { throw Malformed() }
+            index += 1
+            var start = index
+            var pieces: [UInt8]?
+            while true {
+                guard index < bytes.count else { throw Malformed() }
+                let byte = bytes[index]
+                if byte == UInt8(ascii: "\"") {
+                    defer { index += 1 }
+                    let last = UnsafeBufferPointer(rebasing: bytes[start..<index])
+                    // Nearly every text has no escape: it is read where it is, in one piece.
+                    guard var pieces else { return try text(last) }
+                    pieces.append(contentsOf: last)
+                    return try pieces.withUnsafeBufferPointer { try text($0) }
+                }
+                guard byte >= 0x20 else { throw Malformed() }        // control characters are always escaped
+                guard byte == UInt8(ascii: "\\") else { index += 1; continue }
+                if pieces == nil { pieces = [] }
+                pieces?.append(contentsOf: bytes[start..<index])
+                index += 1
+                guard index < bytes.count else { throw Malformed() }
+                let escaped = bytes[index]; index += 1
+                switch escaped {
+                case UInt8(ascii: "\""), UInt8(ascii: "\\"), UInt8(ascii: "/"): pieces?.append(escaped)
+                case UInt8(ascii: "b"): pieces?.append(0x08)
+                case UInt8(ascii: "f"): pieces?.append(0x0C)
+                case UInt8(ascii: "n"): pieces?.append(0x0A)
+                case UInt8(ascii: "r"): pieces?.append(0x0D)
+                case UInt8(ascii: "t"): pieces?.append(0x09)
+                case UInt8(ascii: "u"):
+                    var scalar = try hex4()
+                    if (0xD800...0xDBFF).contains(scalar) {
+                        // The first half of a pair: the second must follow, also escaped.
+                        guard index + 2 <= bytes.count, bytes[index] == UInt8(ascii: "\\"), bytes[index + 1] == UInt8(ascii: "u") else { throw Malformed() }
+                        index += 2
+                        let low = try hex4()
+                        guard (0xDC00...0xDFFF).contains(low) else { throw Malformed() }
+                        scalar = 0x10000 + ((scalar - 0xD800) << 10) + (low - 0xDC00)
+                    }
+                    guard let unicode = Unicode.Scalar(scalar) else { throw Malformed() }
+                    pieces?.append(contentsOf: Array(String(Character(unicode)).utf8))
+                default: throw Malformed()
+                }
+                start = index
+            }
+        }
+
+        /// Text from UTF-8 that must be valid as it is (nothing replaced).
+        private func text(_ utf8: UnsafeBufferPointer<UInt8>) throws -> String {
+            guard let text = String(validating: utf8, as: UTF8.self) else { throw Malformed() }
+            return text
+        }
+    }
+}
+
 struct DocumentDelta: Codable {
     enum Component: Codable { case key(String), index(Int) }
     enum Operation: Codable {
@@ -40,9 +231,7 @@ struct DocumentDelta: Codable {
     var edits: [Edit]
 
     static func between(_ before: CanvasDocument, _ after: CanvasDocument) throws -> Self {
-        func value<T: Encodable>(_ value: T) throws -> JSONValue {
-            try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
-        }
+        func value<T: Encodable>(_ value: T) throws -> JSONValue { try JSONValue.of(value) }
         // Compare typed values first. Encoding the whole note just to find a one-letter
         // difference would move the original performance problem into the delta builder.
         func header(_ doc: CanvasDocument) -> CanvasDocument {
@@ -103,10 +292,46 @@ struct DocumentDelta: Codable {
     }
 
     func applying(to document: CanvasDocument) throws -> CanvasDocument {
-        var value = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(document))
+        var value = try JSONValue.of(document)
         for edit in edits { value = try Self.apply(edit.operation, path: edit.path[...], to: value) ?? .null }
         return try JSONDecoder().decode(CanvasDocument.self, from: JSONEncoder().encode(value))
     }
+    /// The note's `assets` (as JSON) after this delta, given them before it, without building
+    /// the note: edits elsewhere in the note are skipped. Nil when the delta has an edit of the
+    /// note as a whole, or leaves no list of assets — it must then be applied to the whole note.
+    func applying(toAssets assets: JSONValue) throws -> JSONValue? {
+        var root = JSONValue.object(["assets": assets])
+        for edit in edits {
+            guard let first = edit.path.first else { return nil }
+            guard case .key("assets") = first else { continue }
+            guard let changed = try Self.apply(edit.operation, path: edit.path[...], to: root) else { return nil }
+            root = changed
+        }
+        guard case .object(let object) = root, let result = object["assets"], case .array = result else { return nil }
+        return result
+    }
+
+    /// The hashes of a list of assets as JSON (each asset's and its derivatives'). Nil when the
+    /// value is not such a list.
+    static func assetHashes(in assets: JSONValue) -> Set<String>? {
+        guard case .array(let items) = assets else { return nil }
+        var hashes: Set<String> = []
+        for item in items {
+            guard case .object(let asset) = item, case .string(let hash)? = asset["hash"] else { return nil }
+            hashes.insert(hash)
+            switch asset["derivatives"] {
+            case .array(let derivatives)?:
+                for derivative in derivatives {
+                    guard case .object(let fields) = derivative, case .string(let hash)? = fields["hash"] else { return nil }
+                    hashes.insert(hash)
+                }
+            case nil: break
+            default: return nil
+            }
+        }
+        return hashes
+    }
+
     private static func apply(_ operation: Operation, path: ArraySlice<Component>, to value: JSONValue) throws -> JSONValue? {
         if let first = path.first {
             switch (first, value) {

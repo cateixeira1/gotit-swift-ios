@@ -14,10 +14,37 @@ enum SQLValue {
     var data: Data? { if case .blob(let value) = self { value } else { nil } }
 }
 
+/// One row of a statement being stepped (see `SQLiteConnection.scan`): columns are read where
+/// SQLite keeps them, without a copy of the whole row. Valid only inside the call that gives it.
+struct SQLiteRow {
+    fileprivate let statement: OpaquePointer
+
+    func int(_ column: Int32) -> Int64 { sqlite3_column_int64(statement, column) }
+
+    func text(_ column: Int32) -> String? {
+        guard sqlite3_column_type(statement, column) == SQLITE_TEXT, let pointer = sqlite3_column_text(statement, column) else { return nil }
+        let count = Int(sqlite3_column_bytes(statement, column))
+        return String(decoding: UnsafeBufferPointer(start: pointer, count: count), as: UTF8.self)
+    }
+
+    /// The bytes of a BLOB column (empty when it is not one), usable only inside `body`.
+    func withBlob<T>(_ column: Int32, _ body: (UnsafeRawBufferPointer) throws -> T) rethrows -> T {
+        guard sqlite3_column_type(statement, column) == SQLITE_BLOB, let pointer = sqlite3_column_blob(statement, column) else {
+            return try body(UnsafeRawBufferPointer(start: nil, count: 0))
+        }
+        return try body(UnsafeRawBufferPointer(start: pointer, count: Int(sqlite3_column_bytes(statement, column))))
+    }
+}
+
 /// Ownership never escapes SQLiteStore. After initialization, all access is actor-isolated.
-/// SQLite FULLMUTEX also protects the native handle. Statements are finalized within each call.
+/// SQLite FULLMUTEX also protects the native handle. A statement is reset before each call returns.
 final class SQLiteConnection: @unchecked Sendable {
     private var handle: OpaquePointer?
+    /// Statements already compiled, by their SQL. The store runs the same few dozen statements for
+    /// every edit; compiling each one again every time was most of the work of the short ones.
+    /// SQLite compiles a kept statement again by itself when the schema changes.
+    private var statements: [String: OpaquePointer] = [:]
+    private static let statementLimit = 128
 
     init(path: String) throws {
         var pointer: OpaquePointer?
@@ -32,19 +59,30 @@ final class SQLiteConnection: @unchecked Sendable {
         do {
             try execute("PRAGMA foreign_keys = ON")
         } catch {
+            finalizeStatements()
             sqlite3_close_v2(pointer)
             handle = nil
             throw error
         }
     }
 
-    deinit { if let handle { sqlite3_close_v2(handle) } }
+    deinit {
+        finalizeStatements()
+        if let handle { sqlite3_close_v2(handle) }
+    }
 
     func close() throws {
         guard let handle else { return }
+        // A connection with statements still alive refuses to close.
+        finalizeStatements()
         let code = sqlite3_close(handle)
         guard code == SQLITE_OK else { throw failure(code) }
         self.handle = nil
+    }
+
+    private func finalizeStatements() {
+        for statement in statements.values { sqlite3_finalize(statement) }
+        statements.removeAll()
     }
 
     func script(_ sql: String) throws {
@@ -53,13 +91,19 @@ final class SQLiteConnection: @unchecked Sendable {
         guard code == SQLITE_OK else { throw failure(code) }
     }
 
-    @discardableResult
-    func execute(_ sql: String, _ parameters: [SQLValue] = []) throws -> [[SQLValue]] {
+    /// The compiled statement for `sql`, kept for the next call.
+    private func prepared(_ sql: String) throws -> OpaquePointer {
         guard let handle else { throw PersistenceError.closed }
+        if let kept = statements[sql] { return kept }
         var statement: OpaquePointer?
         let prepare = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
         guard prepare == SQLITE_OK, let statement else { throw failure(prepare) }
-        defer { sqlite3_finalize(statement) }
+        if statements.count >= Self.statementLimit { finalizeStatements() }
+        statements[sql] = statement
+        return statement
+    }
+
+    private func bind(_ parameters: [SQLValue], to statement: OpaquePointer) throws {
         guard sqlite3_bind_parameter_count(statement) == parameters.count else {
             throw PersistenceError.corruptData("SQL binding count mismatch")
         }
@@ -80,6 +124,15 @@ final class SQLiteConnection: @unchecked Sendable {
             }
             guard code == SQLITE_OK else { throw failure(code) }
         }
+    }
+
+    @discardableResult
+    func execute(_ sql: String, _ parameters: [SQLValue] = []) throws -> [[SQLValue]] {
+        let statement = try prepared(sql)
+        // Reset on every way out: a statement left mid-way would keep its read lock, and its
+        // bound values (a note's text) would stay in memory until the next call.
+        defer { sqlite3_reset(statement); sqlite3_clear_bindings(statement) }
+        try bind(parameters, to: statement)
         var rows: [[SQLValue]] = []
         while true {
             let code = sqlite3_step(statement)
@@ -103,6 +156,25 @@ final class SQLiteConnection: @unchecked Sendable {
                 }
             }
             rows.append(row)
+        }
+    }
+
+    /// Steps through the rows of a query without keeping them: `row` reads what it needs from
+    /// each one. For queries over many rows (every stored vector), where an array of copied rows
+    /// would be most of the cost. The statement is this call's own, so `row` may run other
+    /// statements on the connection.
+    func scan(_ sql: String, _ parameters: [SQLValue] = [], row: (SQLiteRow) throws -> Void) throws {
+        guard let handle else { throw PersistenceError.closed }
+        var statement: OpaquePointer?
+        let prepare = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepare == SQLITE_OK, let statement else { throw failure(prepare) }
+        defer { sqlite3_finalize(statement) }
+        try bind(parameters, to: statement)
+        while true {
+            let code = sqlite3_step(statement)
+            if code == SQLITE_DONE { return }
+            guard code == SQLITE_ROW else { throw failure(code) }
+            try row(SQLiteRow(statement: statement))
         }
     }
 

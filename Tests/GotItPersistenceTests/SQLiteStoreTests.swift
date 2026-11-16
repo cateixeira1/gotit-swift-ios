@@ -765,3 +765,167 @@ private func indexAll(_ store: SQLiteStore, model: String = "fake") async throws
     #expect(try db.execute("PRAGMA foreign_key_check").isEmpty)
     try db.close()
 }
+
+@Test func searchIndexRowsAreNumberedByNoteAndBlockAndReplacedInPlace() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    var store = try SQLiteStore(url: fixture.url)
+    _ = try await store.search("x")          // builds the (empty) index, so edits keep it up to date
+    let note = try await store.create(CanvasDocument(title: "Contrato"))
+    var story = CanvasBlock(order: 0, content: .text(RichText("locação do apartamento")))
+    var edited = try await store.execute([.insertBlock(story)], documentID: note.id, expectedRevision: 0)
+    func rows() throws -> [Int64] {
+        let db = try SQLiteConnection(path: fixture.url.path); defer { try? db.close() }
+        return try db.execute("SELECT rowid FROM search_text ORDER BY rowid").compactMap { $0.first?.int }
+    }
+    let title = SearchText.rowID(document: note.id, block: nil), text = SearchText.rowID(document: note.id, block: story.id)
+    #expect(try rows() == [title, text].sorted())
+    // Typing rewrites the same row; a text left empty and a title left blank give theirs up.
+    for word in ["um", "dois", "três"] {
+        story.content = .text(RichText("locação \(word)"))
+        edited = try await store.execute([.replaceBlock(story)], documentID: note.id, expectedRevision: edited.revision)
+    }
+    #expect(try rows() == [title, text].sorted())
+    #expect(try await store.search("tres").map(\.blockID) == [story.id])
+    #expect(try await store.search("dois").isEmpty)
+    story.content = .text(RichText("  "))
+    edited = try await store.execute([.replaceBlock(story), .rename(" ")], documentID: note.id, expectedRevision: edited.revision)
+    #expect(try rows().isEmpty)
+    edited = try await store.undo(documentID: note.id, expectedRevision: edited.revision)
+    #expect(try rows() == [title, text].sorted())
+    try await store.close()
+
+    // An index written by the version before (rows numbered as they came) is built again.
+    let db = try SQLiteConnection(path: fixture.url.path)
+    try db.execute("DELETE FROM search_text")
+    try db.execute("INSERT INTO search_text(document_id, block_id, kind, text) VALUES (?, ?, 'text', 'sobra antiga')", [.text(note.id.uuidString), .text(story.id.uuidString)])
+    try db.execute("INSERT OR REPLACE INTO search_state(key, value) VALUES ('version', 2)")
+    try db.close()
+    store = try SQLiteStore(url: fixture.url)
+    #expect(try await store.search("sobra").isEmpty)
+    #expect(try await store.search("tres").map(\.blockID) == [story.id])
+    #expect(try rows() == [title, text].sorted())
+    try await store.close()
+}
+
+@Test func assetsFollowedThroughHistoryMatchReplayingEveryState() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url, historyLimit: 20)
+    func hash(_ letter: Character) -> String { String(repeating: String(letter), count: 64) }
+    func same() async throws -> Set<String> {
+        let followed = try await store.retainedAssetHashes(), replayed = try await store.retainedAssetHashesByReplay()
+        #expect(followed == replayed)
+        return followed
+    }
+    var note = try await store.create(.init(title: "Mídia"))
+    var text = CanvasBlock(order: 0, content: .text(RichText("")))
+    note = try await store.execute([.insertBlock(text)], documentID: note.id, expectedRevision: note.revision)
+    #expect(try await same().isEmpty)
+    // A picture with a derivative, then typing (edits that never touch the assets).
+    var picture = CanvasBlock(order: 1, layout: .init(mode: .absolute), content: .image(.init(hash: hash("a"))))
+    let asset = Asset(hash: hash("a"), mediaType: "image/png", byteCount: 10,
+                      derivatives: [.init(role: "thumbnail", hash: hash("e"), mediaType: "image/jpeg", byteCount: 2)])
+    note = try await store.execute([.registerAsset(asset), .insertBlock(picture)], documentID: note.id, expectedRevision: note.revision)
+    for word in ["um", "um dois", "um dois três"] {
+        text.content = .text(RichText(word))
+        note = try await store.execute([.replaceBlock(text)], documentID: note.id, expectedRevision: note.revision, historyGroup: "typing")
+    }
+    #expect(try await same() == [hash("a"), hash("e")])
+    // Replaced in the same position (the list keeps its length: the change is a splice of the hash).
+    picture.content = .image(.init(hash: hash("b")))
+    note = try await store.execute([.registerAsset(.init(hash: hash("b"), mediaType: "image/png", byteCount: 11)), .replaceBlock(picture), .unregisterAsset(hash("a"))],
+                                   documentID: note.id, expectedRevision: note.revision)
+    #expect(note.assets.map(\.hash) == [hash("b")])
+    #expect(try await same() == [hash("a"), hash("b"), hash("e")])
+    // A second one, removed again; then undone twice and a new branch.
+    let video = CanvasBlock(order: 2, layout: .init(mode: .absolute), content: .video(.init(hash: hash("c"))))
+    note = try await store.execute([.registerAsset(.init(hash: hash("c"), mediaType: "video/mp4", byteCount: 12)), .insertBlock(video)], documentID: note.id, expectedRevision: note.revision)
+    note = try await store.execute([.removeSubtree(video.id), .unregisterAsset(hash("c"))], documentID: note.id, expectedRevision: note.revision)
+    #expect(try await same() == [hash("a"), hash("b"), hash("c"), hash("e")])
+    note = try await store.undo(documentID: note.id, expectedRevision: note.revision)
+    note = try await store.undo(documentID: note.id, expectedRevision: note.revision)
+    #expect(try await same() == [hash("a"), hash("b"), hash("c"), hash("e")])
+    note = try await store.execute([.rename("Outro ramo")], documentID: note.id, expectedRevision: note.revision)
+    #expect(try await same() == [hash("a"), hash("b"), hash("e")])
+    // A second note is counted too, and one deleted for good is not.
+    let other = try await store.create(.init(title: "Outra"))
+    let sound = CanvasBlock(order: 0, layout: .init(mode: .absolute), content: .audio(.init(hash: hash("d"))))
+    let filled = try await store.execute([.registerAsset(.init(hash: hash("d"), mediaType: "audio/mp4", byteCount: 13)), .insertBlock(sound)], documentID: other.id, expectedRevision: 0)
+    #expect(try await same() == [hash("a"), hash("b"), hash("d"), hash("e")])
+    try await store.deleteDocument(other.id, expectedRevision: filled.revision)
+    #expect(try await same() == [hash("a"), hash("b"), hash("e")])
+    try await store.close()
+}
+
+@Test func keptStatementsGiveFreshRowsAndSurviveSchemaChangesAndClosing() throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let db = try SQLiteConnection(path: fixture.url.path)
+    try db.script("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, bytes BLOB);")
+    for (id, name) in [(1, "um"), (2, "dois"), (3, "três")] {
+        try db.execute("INSERT INTO items VALUES (?, ?, ?)", [.integer(Int64(id)), .text(name), .blob(Data([UInt8(id), 0, 0, 0]))])
+    }
+    // The same statement, run again with other values, starts over each time.
+    for (id, name) in [(2, "dois"), (3, "três"), (2, "dois"), (9, nil)] as [(Int, String?)] {
+        let rows = try db.execute("SELECT name FROM items WHERE id = ?", [.integer(Int64(id))])
+        if let name { if case .text(let found)? = rows.first?.first { #expect(found == name) } else { Issue.record("no row for \(id)") } }
+        else { #expect(rows.isEmpty) }
+    }
+    #expect(throws: PersistenceError.self) { try db.execute("SELECT name FROM items WHERE id = ?", []) }
+    // A failed statement is kept usable; a change of schema compiles it again by itself.
+    #expect(throws: PersistenceError.self) { try db.execute("INSERT INTO items VALUES (?, ?, ?)", [.integer(1), .text("de novo"), .null]) }
+    try db.execute("INSERT INTO items VALUES (?, ?, ?)", [.integer(4), .text("quatro"), .null])
+    try db.script("ALTER TABLE items ADD COLUMN extra TEXT;")
+    #expect(try db.execute("SELECT name FROM items WHERE id = ?", [.integer(4)]).count == 1)
+    // Rows read in place, with other statements run meanwhile.
+    var seen: [String] = [], total = 0
+    try db.scan("SELECT id, name, bytes FROM items WHERE id <= ? ORDER BY id", [.integer(3)]) { row in
+        seen.append(row.text(1) ?? "")
+        total += row.withBlob(2) { Int($0.first ?? 0) }
+        let count = try db.execute("SELECT COUNT(*) FROM items").first?.first?.int
+        #expect(count == 4 && row.int(0) == Int64(seen.count))
+    }
+    #expect(seen == ["um", "dois", "três"] && total == 6)
+    #expect(try db.execute("SELECT bytes FROM items WHERE id = 4").first.map { row in row[0].data == nil } == true)
+    try db.close()
+    #expect(throws: PersistenceError.self) { try db.execute("SELECT 1") }
+}
+
+@Test func jsonTextIsReadAsTheDecoderReadsIt() throws {
+    struct Sample: Codable {
+        var text: [String], integers: [Int64], doubles: [Double], flags: [Bool], nothing: String?, nested: [String: [String: [Int]]], empty: [String: String], list: [[Double]]
+    }
+    let sample = Sample(
+        text: ["", "simples", "aspas \" barra \\ e / inclinada", "linha\nnova\ttab\r\u{8}\u{c}", "nulo \0 e controle \u{1}\u{1f}\u{7f}", "Olá 👨‍👩‍👧‍👦 e\u{301} 漢字 🇧🇷",
+               "\u{2028}\u{2029}\u{feff}", "عربى עברית", String(repeating: "longo ", count: 400) + "\n" + String(repeating: "\"x\"\n", count: 300)],
+        integers: [0, 1, -1, 42, Int64.max, Int64.min, 9_007_199_254_740_993],
+        doubles: [0, -0.0, 0.1, 0.30000000000000004, -12.5, 595.2756, 1e-7, 1.5e300, 123_456_789.125, 1_000_000_000_000_000, .greatestFiniteMagnitude, .leastNonzeroMagnitude, 18, 44.0],
+        flags: [true, false], nothing: nil, nested: ["a": ["b": [1, 2, 3], "c": []], "d": [:]], empty: [:], list: [[], [1.5], [2, 3]])
+    let encoders: [JSONEncoder] = [JSONEncoder(), JSONEncoder(), JSONEncoder()]
+    encoders[1].outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoders[2].outputFormatting = [.withoutEscapingSlashes]
+    var documents: [CanvasDocument] = [multimediaDocument(), CanvasDocument(title: "vazia")]
+    var styled = CanvasDocument(title: "Estilos \"e\" páginas", defaultStyle: .init(fontSize: 18))
+    styled.canvas.margins = .word
+    styled.blocks = [CanvasBlock(order: 0, layout: .init(mode: .absolute, frame: .init(x: 85.03937, y: 70.866142, width: 425.19685, height: 44)),
+                                 content: .text(RichText(runs: [TextRun("um\n", style: .init(bold: true, link: "https://exemplo.com/a?b=c&d=e")), TextRun("dois", style: .init(italic: true))])))]
+    documents.append(styled)
+    for encoder in encoders {
+        var texts = [try encoder.encode(sample)]
+        for document in documents { texts.append(try encoder.encode(document)); texts.append(try encoder.encode(document.blocks)) }
+        for data in texts {
+            let read = try JSONText.parse(data), decoded = try JSONDecoder().decode(JSONValue.self, from: data)
+            #expect(read == decoded)
+        }
+    }
+    #expect(try JSONValue.of(sample) == JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(sample)))
+    // Escapes an encoder may or may not use.
+    #expect(try JSONText.parse(Data(#"["\u00e9\ud83d\ude00\/\u0000", -0, 1E2, 2.50, {"a" : null} ]"#.utf8))
+            == .array([.string("é😀/\0"), .integer(0), .number(100), .number(2.5), .object(["a": .null])]))
+    // What is not JSON is refused (the decoder is then the one that reads, or refuses, it).
+    for bad in ["", " ", "{", "[1,]", #"{"a":}"#, #"{"a" 1}"#, #"{a:1}"#, "01", "1.", "-", "1e", ".5", #""abc"#, #""\x""#, "nul", "tru", #""\ud800""#, #""\ud800\u0041""#,
+                #""\udc00""#, "\"a\u{1}b\"", "1 2", "[1] x", #"{"a":1,}"#, "[", "\"\\u12\""] {
+        #expect(throws: JSONText.Malformed.self, "\(bad)") { try JSONText.parse(Data(bad.utf8)) }
+    }
+    #expect(throws: JSONText.Malformed.self) { try JSONText.parse(Data([0x22, 0xC3, 0x28, 0x22])) }          // "Ã(" cut short: not UTF-8
+    #expect(throws: JSONText.Malformed.self) { try JSONText.parse(Data([0x22, 0xF0, 0x9F, 0x98, 0x22])) }    // an emoji missing its last byte
+    #expect(throws: JSONText.Malformed.self) { try JSONText.parse(Data(String(repeating: "[", count: 300).utf8)) }
+}

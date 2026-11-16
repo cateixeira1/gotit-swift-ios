@@ -90,6 +90,17 @@ public enum SemanticChunks {
         return sum
     }
 
+    /// The same, with `b` as the bytes of a stored vector (32-bit floats, as `Data(buffer:)` of
+    /// the array wrote them): compared where they are, without making an array of each one.
+    public static func similarity(_ a: [Float], stored b: UnsafeRawBufferPointer) -> Float {
+        var sum: Float = 0
+        let size = MemoryLayout<Float>.size
+        for index in 0..<min(a.count, b.count / size) {
+            sum += a[index] * b.loadUnaligned(fromByteOffset: index * size, as: Float.self)
+        }
+        return sum
+    }
+
     /// Scaled to length 1 (the engine normally does this; vectors read back are checked again).
     public static func normalized(_ vector: [Float]) -> [Float] {
         let length = vector.reduce(0) { $0 + $1 * $1 }.squareRoot()

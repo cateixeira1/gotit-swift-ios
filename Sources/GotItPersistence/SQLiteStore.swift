@@ -76,6 +76,9 @@ public actor SQLiteStore {
     private var cachedDocument: CanvasDocument?
     /// Whether the search index matches the notes (checked once, built if needed).
     private var searchReady = false
+    /// One decoder and one encoder for the whole store (every row read or written uses them).
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
 
     /// Use an app-owned Application Support URL. Parent directory must already exist.
     /// History keeps at most `historyLimit` groups and about `historyByteLimit` bytes of deltas per document.
@@ -183,30 +186,80 @@ public actor SQLiteStore {
     }
 
     /// Run while the asset writer is idle. Both sides of retained undo/redo are roots.
+    ///
+    /// Only each note's list of assets is followed through its history: an edit that does not
+    /// touch the list (typing, moving, formatting — nearly all of them) is skipped. Building every
+    /// earlier and later state of every note whole, as `retainedAssetHashesByReplay` does, encoded
+    /// and decoded each note twice per history entry, every few minutes. A note whose history
+    /// cannot be followed this way is replayed whole, so the answer is the same.
     public func retainedAssetHashes() throws -> Set<String> {
         try db.transaction(write: false) {
             var hashes: Set<String> = []
-            func retain(_ d: CanvasDocument) {
-                for asset in d.assets { hashes.insert(asset.hash); hashes.formUnion(asset.derivatives.map(\.hash)) }
-            }
-            for summary in try listDocuments() {
-                let current = try readDocument(summary.id)
-                retain(current)
-                let cursor = try HistoryStore.cursor(db, id: summary.id)
-                let rows = try db.execute("SELECT sequence, before_snapshot, after_snapshot FROM history WHERE document_id = ? ORDER BY sequence", [.text(summary.id.uuidString)])
-                var state = current
-                for row in rows.reversed() where (row[0].int ?? 0) <= cursor {
-                    guard let data = row[1].data else { throw PersistenceError.corruptData("Missing inverse delta") }
-                    state = try JSONDecoder().decode(DocumentDelta.self, from: data).applying(to: state); retain(state)
-                }
-                state = current
-                for row in rows where (row[0].int ?? 0) > cursor {
-                    guard let data = row[2].data else { throw PersistenceError.corruptData("Missing forward delta") }
-                    state = try JSONDecoder().decode(DocumentDelta.self, from: data).applying(to: state); retain(state)
-                }
+            for row in try db.execute("SELECT id FROM documents ORDER BY id") {
+                guard case .text(let value) = row[0], let id = UUID(uuidString: value) else { throw PersistenceError.corruptData("Invalid document ID") }
+                if let followed = try? assetHashesFollowingHistory(id) { hashes.formUnion(followed) }
+                else { hashes.formUnion(try assetHashesReplayingHistory(id)) }
             }
             return hashes
         }
+    }
+
+    /// The same answer by building every state the history can reach. Kept as the fallback for
+    /// `retainedAssetHashes` and as the reference its tests compare it with.
+    func retainedAssetHashesByReplay() throws -> Set<String> {
+        try db.transaction(write: false) {
+            var hashes: Set<String> = []
+            for row in try db.execute("SELECT id FROM documents ORDER BY id") {
+                guard case .text(let value) = row[0], let id = UUID(uuidString: value) else { throw PersistenceError.corruptData("Invalid document ID") }
+                hashes.formUnion(try assetHashesReplayingHistory(id))
+            }
+            return hashes
+        }
+    }
+
+    private func assetHashesFollowingHistory(_ id: UUID) throws -> Set<String> {
+        let key = SQLValue.text(id.uuidString)
+        let assets = try readAssets(key)
+        var hashes: Set<String> = []
+        for asset in assets { hashes.insert(asset.hash); hashes.formUnion(asset.derivatives.map(\.hash)) }
+        let rows = try db.execute("SELECT sequence, before_snapshot, after_snapshot FROM history WHERE document_id = ? ORDER BY sequence", [key])
+        guard !rows.isEmpty else { return hashes }
+        let cursor = try HistoryStore.cursor(db, id: id)
+        let current = try JSONValue.of(assets)
+        func follow(_ data: Data?, from state: JSONValue) throws -> JSONValue {
+            guard let data else { throw PersistenceError.corruptData("Missing delta") }
+            guard let next = try decoder.decode(DocumentDelta.self, from: data).applying(toAssets: state),
+                  let found = DocumentDelta.assetHashes(in: next) else { throw PersistenceError.corruptData("Delta cannot be followed by its assets") }
+            hashes.formUnion(found)
+            return next
+        }
+        var state = current
+        for row in rows.reversed() where (row[0].int ?? 0) <= cursor { state = try follow(row[1].data, from: state) }
+        state = current
+        for row in rows where (row[0].int ?? 0) > cursor { state = try follow(row[2].data, from: state) }
+        return hashes
+    }
+
+    private func assetHashesReplayingHistory(_ id: UUID) throws -> Set<String> {
+        var hashes: Set<String> = []
+        func retain(_ d: CanvasDocument) {
+            for asset in d.assets { hashes.insert(asset.hash); hashes.formUnion(asset.derivatives.map(\.hash)) }
+        }
+        let current = try readDocument(id)
+        retain(current)
+        let cursor = try HistoryStore.cursor(db, id: id)
+        let rows = try db.execute("SELECT sequence, before_snapshot, after_snapshot FROM history WHERE document_id = ? ORDER BY sequence", [.text(id.uuidString)])
+        var state = current
+        for row in rows.reversed() where (row[0].int ?? 0) <= cursor {
+            guard let data = row[1].data else { throw PersistenceError.corruptData("Missing inverse delta") }
+            state = try decoder.decode(DocumentDelta.self, from: data).applying(to: state); retain(state)
+        }
+        state = current
+        for row in rows where (row[0].int ?? 0) > cursor {
+            guard let data = row[2].data else { throw PersistenceError.corruptData("Missing forward delta") }
+            state = try decoder.decode(DocumentDelta.self, from: data).applying(to: state); retain(state)
+        }
+        return hashes
     }
 
     /// Explicit permanent deletion, including its history. Ordinary block deletion is undoable.
@@ -297,10 +350,12 @@ public actor SQLiteStore {
             guard built == Int64(SearchText.indexVersion) else { return }
         }
         let change = SearchText.changes(from: old, to: new)
-        let key = SQLValue.text(new.id.uuidString)
-        for block in change.removed {
-            if let block { try db.execute("DELETE FROM search_text WHERE document_id = ? AND block_id = ?", [key, .text(block.uuidString)]) }
-            else { try db.execute("DELETE FROM search_text WHERE document_id = ? AND block_id IS NULL", [key]) }
+        // Each entry is found by its own row number. Asking the index for "the row of this note
+        // and block" instead makes it read every row it has: with 20 000 blocks in the library
+        // that was about 12 ms per keystroke, against 0.03 ms by row number.
+        let rewritten = Set(change.written.map(\.blockID))
+        for block in change.removed where !rewritten.contains(block) {
+            try db.execute("DELETE FROM search_text WHERE rowid = ?", [.integer(SearchText.rowID(document: new.id, block: block))])
         }
         try write(change.written, documentID: new.id)
         let before = old.map(NoteLinks.targets) ?? [], after = NoteLinks.targets(in: new)
@@ -328,8 +383,10 @@ public actor SQLiteStore {
 
     private func write(_ entries: [SearchText.Entry], documentID: UUID) throws {
         for entry in entries {
-            try db.execute("INSERT INTO search_text(document_id, block_id, kind, text) VALUES (?, ?, ?, ?)",
-                           [.text(documentID.uuidString), entry.blockID.map { SQLValue.text($0.uuidString) } ?? .null, .text(entry.kind.rawValue), .text(entry.text)])
+            // REPLACE: the entry's row number is its identity, so writing it again takes the old one's place.
+            try db.execute("INSERT OR REPLACE INTO search_text(rowid, document_id, block_id, kind, text) VALUES (?, ?, ?, ?, ?)",
+                           [.integer(SearchText.rowID(document: documentID, block: entry.blockID)), .text(documentID.uuidString),
+                            entry.blockID.map { SQLValue.text($0.uuidString) } ?? .null, .text(entry.kind.rawValue), .text(entry.text)])
         }
     }
 
@@ -403,23 +460,30 @@ public actor SQLiteStore {
     /// one per block. Notes in the Lixeira are left out; with `documents`, only those notes count.
     public func semanticSearch(_ query: [Float], model: String, limit: Int = 30, in documents: Set<UUID>? = nil) throws -> [SemanticHit] {
         let target = SemanticChunks.normalized(query)
-        var best: [String: SemanticHit] = [:]
-        for row in try db.execute("""
-            SELECT semantic_chunks.document_id, block_id, text, vector FROM semantic_chunks
+        let only = documents.map { Set($0.map(\.uuidString)) }
+        // First every vector is scored where SQLite keeps it (nothing but a row number and a
+        // score is kept per passage); then the text is read for the best ones only. Reading each
+        // passage's text and a copy of its vector for every search grew with the whole library.
+        var scored: [(row: Int64, score: Float)] = []
+        try db.scan("""
+            SELECT semantic_chunks.rowid, vector, semantic_chunks.document_id FROM semantic_chunks
             JOIN semantic_documents ON semantic_documents.document_id = semantic_chunks.document_id
             WHERE semantic_documents.model = ? AND semantic_chunks.document_id NOT IN (SELECT document_id FROM trash)
-            """, [.text(model)]) {
-            guard case .text(let documentValue) = row[0], let document = UUID(uuidString: documentValue),
-                  case .text(let blockValue) = row[1], let block = UUID(uuidString: blockValue),
-                  case .text(let text) = row[2], case .blob(let data) = row[3] else { continue }
-            if let documents, !documents.contains(document) { continue }
-            var vector = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
-            _ = vector.withUnsafeMutableBytes { data.copyBytes(to: $0) }
-            let score = SemanticChunks.similarity(target, vector)
-            let key = documentValue + blockValue
-            if (best[key]?.score ?? -2) < score { best[key] = SemanticHit(documentID: document, blockID: block, text: text, score: score) }
+            """, [.text(model)]) { row in
+            if let only, !(row.text(2).map(only.contains) ?? false) { return }
+            scored.append((row.int(0), row.withBlob(1) { SemanticChunks.similarity(target, stored: $0) }))
         }
-        return best.values.sorted { $0.score > $1.score }.prefix(max(1, limit)).map { $0 }
+        scored.sort { $0.score == $1.score ? $0.row < $1.row : $0.score > $1.score }
+        var hits: [SemanticHit] = [], seen: Set<String> = []
+        for candidate in scored where hits.count < max(1, limit) {
+            guard let row = try db.execute("SELECT document_id, block_id, text FROM semantic_chunks WHERE rowid = ?", [.integer(candidate.row)]).first,
+                  case .text(let documentValue) = row[0], let document = UUID(uuidString: documentValue),
+                  case .text(let blockValue) = row[1], let block = UUID(uuidString: blockValue), case .text(let text) = row[2] else { continue }
+            // Best first: the first passage met of a block is that block's best.
+            guard seen.insert(documentValue + blockValue).inserted else { continue }
+            hits.append(SemanticHit(documentID: document, blockID: block, text: text, score: candidate.score))
+        }
+        return hits
     }
 
     /// Notes read for the search by meaning with `model`, out of the notes not in the Lixeira.
@@ -563,12 +627,12 @@ public actor SQLiteStore {
     private func metadata(_ document: CanvasDocument) throws -> Data {
         var header = document
         header.blocks = []; header.assets = []; header.relations = []
-        return try JSONEncoder().encode(header)
+        return try encoder.encode(header)
     }
 
     private func decode<T: Decodable>(_ value: SQLValue) throws -> T {
         guard let data = value.data else { throw PersistenceError.corruptData("Expected JSON blob") }
-        return try JSONDecoder().decode(T.self, from: data)
+        return try decoder.decode(T.self, from: data)
     }
 
     private func readDocument(_ id: UUID) throws -> CanvasDocument {
@@ -605,40 +669,50 @@ public actor SQLiteStore {
             return block
         }
         guard texts.isEmpty else { throw PersistenceError.corruptData("Unexpected rich text row") }
+        document.assets = try readAssets(key)
+        document.relations = try db.execute("SELECT metadata FROM block_relations WHERE document_id = ? ORDER BY ordinal", [key]).map { try decode($0[0]) }
+        try DocumentValidator.validate(document)
+        return document
+    }
+
+    /// A note's assets with their derivatives, in order.
+    private func readAssets(_ key: SQLValue) throws -> [Asset] {
         let derivatives = try db.execute("SELECT asset_hash, metadata FROM asset_derivatives WHERE document_id = ? ORDER BY ordinal", [key])
         var byHash: [String: [AssetDerivative]] = [:]
         for row in derivatives {
             guard case .text(let hash) = row[0] else { throw PersistenceError.corruptData("Invalid derivative owner") }
             byHash[hash, default: []].append(try decode(row[1]))
         }
-        document.assets = try db.execute("SELECT hash, metadata FROM assets WHERE document_id = ? ORDER BY ordinal", [key]).map { row in
+        let assets: [Asset] = try db.execute("SELECT hash, metadata FROM assets WHERE document_id = ? ORDER BY ordinal", [key]).map { row in
             var asset: Asset = try decode(row[1])
             guard case .text(let hash) = row[0], hash == asset.hash else { throw PersistenceError.corruptData("Asset hash mismatch") }
             asset.derivatives = byHash.removeValue(forKey: asset.hash) ?? []
             return asset
         }
         guard byHash.isEmpty else { throw PersistenceError.corruptData("Unexpected derivative row") }
-        document.relations = try db.execute("SELECT metadata FROM block_relations WHERE document_id = ? ORDER BY ordinal", [key]).map { try decode($0[0]) }
-        try DocumentValidator.validate(document)
-        return document
+        return assets
     }
 
     /// Upsert only changed rows; never delete/reinsert unrelated blocks on typing.
     private func writeContents(_ document: CanvasDocument, previous: CanvasDocument? = nil) throws {
         let key = SQLValue.text(document.id.uuidString)
-        let encoder = JSONEncoder()
         try db.execute("UPDATE documents SET metadata = ? WHERE id = ?", [.blob(try metadata(document)), key])
         let oldBlocks = Dictionary(uniqueKeysWithValues: (previous?.blocks ?? []).enumerated().map { ($0.element.id, ($0.offset, $0.element)) })
         let oldAssets = Dictionary(uniqueKeysWithValues: (previous?.assets ?? []).enumerated().map { ($0.element.hash, ($0.offset, $0.element)) })
         let oldRelations = Dictionary(uniqueKeysWithValues: (previous?.relations ?? []).enumerated().map { ($0.element.id, ($0.offset, $0.element)) })
-        for old in previous?.relations ?? [] where !document.relations.contains(where: { $0.id == old.id }) {
-            try db.execute("DELETE FROM block_relations WHERE document_id = ? AND id = ?", [key, .text(old.id.uuidString)])
-        }
-        for old in previous?.blocks ?? [] where !document.blocks.contains(where: { $0.id == old.id }) {
-            try db.execute("DELETE FROM blocks WHERE document_id = ? AND id = ?", [key, .text(old.id.uuidString)])
-        }
-        for old in previous?.assets ?? [] where !document.assets.contains(where: { $0.hash == old.hash }) {
-            try db.execute("DELETE FROM assets WHERE document_id = ? AND hash = ?", [key, .text(old.hash)])
+        if let previous {
+            // What the note no longer has. Sets: looking each old row up in the new arrays grew
+            // with the square of the note's size, on every keystroke.
+            let relations = Set(document.relations.map(\.id)), blocks = Set(document.blocks.map(\.id)), assets = Set(document.assets.map(\.hash))
+            for old in previous.relations where !relations.contains(old.id) {
+                try db.execute("DELETE FROM block_relations WHERE document_id = ? AND id = ?", [key, .text(old.id.uuidString)])
+            }
+            for old in previous.blocks where !blocks.contains(old.id) {
+                try db.execute("DELETE FROM blocks WHERE document_id = ? AND id = ?", [key, .text(old.id.uuidString)])
+            }
+            for old in previous.assets where !assets.contains(old.hash) {
+                try db.execute("DELETE FROM assets WHERE document_id = ? AND hash = ?", [key, .text(old.hash)])
+            }
         }
         for (ordinal, asset) in document.assets.enumerated() {
             if let old = oldAssets[asset.hash], old.0 == ordinal, old.1 == asset { continue }

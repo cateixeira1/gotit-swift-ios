@@ -273,3 +273,63 @@ func rejectsInvalidDimensions(_ width: Double) {
     let prompt = NoteProposals.prompt(title: "", text: note, truncated: false, folders: ["Imóveis"])
     #expect(prompt.contains("- Imóveis") && prompt.contains("(sem título)") && prompt.contains("TAREFAS:"))
 }
+
+@Test func searchChangesFollowTitlesRemovalsAndRowNumbers() throws {
+    var note = CanvasDocument(title: "Nota")
+    let first = CanvasBlock(order: 0, content: .text(RichText("um")))
+    let second = CanvasBlock(order: 1, content: .text(RichText("dois")))
+    let shape = CanvasBlock(order: 2, layout: .init(mode: .absolute), content: .container)
+    note.blocks = [first, second, shape]
+    // A new note: everything it has. The same note: nothing.
+    #expect(SearchText.changes(from: nil, to: note).written == SearchText.entries(note))
+    let none = SearchText.changes(from: note, to: note)
+    #expect(none.removed.isEmpty && none.written.isEmpty)
+    // Moving a block (same text) changes nothing; removing one removes its entry only.
+    var moved = note
+    moved.blocks[0].layout.frame.x += 40
+    moved.blocks.remove(at: 1)
+    let change = SearchText.changes(from: note, to: moved)
+    #expect(change.removed == [second.id] && change.written.isEmpty)
+    // Title: renamed is rewritten, blanked is removed, spaces around it do not count.
+    var renamed = note; renamed.title = "Outra"
+    let title = SearchText.changes(from: note, to: renamed)
+    #expect(title.removed == [nil] && title.written == [SearchText.Entry(blockID: nil, kind: .title, text: "Outra")])
+    var blank = note; blank.title = "  "
+    #expect(SearchText.changes(from: note, to: blank).removed == [nil] && SearchText.changes(from: note, to: blank).written.isEmpty)
+    var padded = note; padded.title = " Nota "
+    #expect(SearchText.changes(from: note, to: padded).removed.isEmpty)
+    // A text emptied loses its entry; one filled gains it.
+    var emptied = note; emptied.blocks[0].content = .text(RichText(" "))
+    #expect(SearchText.changes(from: note, to: emptied).removed == [first.id] && SearchText.changes(from: note, to: emptied).written.isEmpty)
+    #expect(SearchText.changes(from: emptied, to: note).removed.isEmpty && SearchText.changes(from: emptied, to: note).written.map(\.blockID) == [first.id])
+
+    // Row numbers: the same for the same note and block, positive, different for each entry.
+    let rows = [SearchText.rowID(document: note.id, block: nil), SearchText.rowID(document: note.id, block: first.id),
+                SearchText.rowID(document: note.id, block: second.id), SearchText.rowID(document: first.id, block: note.id),
+                SearchText.rowID(document: first.id, block: nil)]
+    #expect(Set(rows).count == rows.count && rows.allSatisfy { $0 > 0 })
+    #expect(SearchText.rowID(document: note.id, block: first.id) == rows[1])
+    let fixed = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    #expect(SearchText.rowID(document: fixed, block: nil) == SearchText.rowID(document: fixed, block: nil))
+}
+
+@Test func onlyWebMailAndNoteLinksAreKeptAsLinks() {
+    #expect(NoteLinks.isAllowed("https://exemplo.com.br/a?b=1"))
+    #expect(NoteLinks.isAllowed("HTTP://exemplo.com"))
+    #expect(NoteLinks.isAllowed("mailto:alguem@exemplo.com"))
+    #expect(NoteLinks.isAllowed(NoteLinks.url(for: UUID())))
+    for other in [nil, "", "  ", "https://", "mailto:", "file:///etc/passwd", "tel:+5511999999999", "javascript:alert(1)", "gotit://nota/nao-e-um-id",
+                  "prefs:root=General", "outro-app://abrir", "exemplo.com"] as [String?] {
+        #expect(!NoteLinks.isAllowed(other), "\(other ?? "nil")")
+    }
+}
+
+@Test func storedVectorsAreComparedWhereTheyAre() {
+    let a: [Float] = [0.6, 0.8, 0], b: [Float] = [0.8, 0.6, 0]
+    let data = b.withUnsafeBufferPointer { Data(buffer: $0) }
+    #expect(data.withUnsafeBytes { SemanticChunks.similarity(a, stored: $0) } == SemanticChunks.similarity(a, b))
+    // Read from any offset (SQLite does not promise where a value starts), and only whole numbers.
+    let shifted = Data([7]) + data + Data([1, 2])
+    #expect(shifted.withUnsafeBytes { SemanticChunks.similarity(a, stored: UnsafeRawBufferPointer(rebasing: $0[1...])) } == SemanticChunks.similarity(a, b))
+    #expect(Data().withUnsafeBytes { SemanticChunks.similarity(a, stored: $0) } == 0)
+}

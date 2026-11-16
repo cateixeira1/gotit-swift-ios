@@ -66,6 +66,19 @@ public struct Folder: Equatable, Sendable, Identifiable {
         guard trimmed.count <= 120 else { throw DocumentError.invalid("O nome da pasta pode ter até 120 caracteres.") }
         return trimmed
     }
+
+    /// The generic name for a folder made without one: "Pasta N", N one more than the highest
+    /// number already used in a generic name ("Pasta 3" when "Pasta 1" and "Pasta 2" exist, also
+    /// after "Pasta 1" was renamed; "Pasta 1" when there is none). Case and accents do not matter.
+    public static func genericName(after names: [String]) -> String {
+        let highest = names.compactMap { name -> Int? in
+            let words = name.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ", omittingEmptySubsequences: true)
+            guard words.count == 2, words[0].compare("pasta", options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame,
+                  words[1].allSatisfy(\.isASCII), let number = Int(words[1]), number >= 0 else { return nil }
+            return number
+        }.max() ?? 0
+        return "Pasta \(highest + 1)"
+    }
 }
 
 /// Offline document repository. No async suspension occurs inside a database transaction.
@@ -525,6 +538,24 @@ public actor SQLiteStore {
             try db.execute("INSERT INTO folders(id, parent_id, name, created_at) VALUES (?, ?, ?, ?)",
                            [.text(folder.id.uuidString), parent.map { SQLValue.text($0.uuidString) } ?? .null, .text(folder.name),
                             .integer(Int64((date.timeIntervalSince1970 * 1000).rounded()))])
+        }
+        return folder
+    }
+
+    /// A new folder holding `documents` (taken out of wherever they were filed), made in one
+    /// transaction: either the folder exists with all of them inside, or nothing changed.
+    @discardableResult
+    public func createFolder(named name: String, in parent: UUID? = nil, containing documents: [UUID], at date: Date = Date()) throws -> Folder {
+        let folder = Folder(name: try Folder.validName(name), parentID: parent, createdAt: date)
+        try db.transaction {
+            if let parent { try requireFolder(parent) }
+            for id in documents { _ = try readHeader(id) }
+            try db.execute("INSERT INTO folders(id, parent_id, name, created_at) VALUES (?, ?, ?, ?)",
+                           [.text(folder.id.uuidString), parent.map { SQLValue.text($0.uuidString) } ?? .null, .text(folder.name),
+                            .integer(Int64((date.timeIntervalSince1970 * 1000).rounded()))])
+            for id in Set(documents) {
+                try db.execute("INSERT OR REPLACE INTO document_folders(document_id, folder_id) VALUES (?, ?)", [.text(id.uuidString), .text(folder.id.uuidString)])
+            }
         }
         return folder
     }

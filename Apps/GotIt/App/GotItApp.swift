@@ -496,6 +496,32 @@ final class AppModel {
         catch { self.error = String(describing: error) }
     }
 
+    /// How many notes (and how many Teias) the list shows before "Todas as Notas" / "Todas as Teias".
+    static let recentLimit = 9
+
+    /// Notes or Teias of the folder shown, most recently created or edited first.
+    func recent(_ kind: DocumentKind, limit: Int? = nil) -> [DocumentSummary] {
+        let sorted = visibleSummaries.filter { $0.kind == kind }
+            .sorted { (max($0.updatedAt, $0.createdAt), $0.id.uuidString) > (max($1.updatedAt, $1.createdAt), $1.id.uuidString) }
+        return limit.map { Array(sorted.prefix($0)) } ?? sorted
+    }
+
+    /// Name a folder gets when it is made without one ("Pasta N", after the highest such number).
+    var genericFolderName: String { Folder.genericName(after: folders.map(\.name)) }
+
+    /// One note (or Teia) dropped on another: a new folder, in the folder shown, holding both,
+    /// with the generic name until the user gives it another. Nil if it could not be made.
+    func makeFolder(dropping dragged: UUID, onto target: UUID) async -> Folder? {
+        guard let store, dragged != target,
+              activeSummaries.contains(where: { $0.id == dragged }), activeSummaries.contains(where: { $0.id == target }) else { return nil }
+        do {
+            let folder = try await store.createFolder(named: genericFolderName, in: currentFolder, containing: [target, dragged])
+            try await refresh()
+            return folder
+        } catch DocumentError.invalid(let reason) { self.error = reason; return nil }
+        catch { self.error = String(describing: error); return nil }
+    }
+
     /// A note or Teia just made goes into the folder being shown.
     private func file(_ document: CanvasDocument) async throws {
         guard let store, let folder = currentFolder else { return }
@@ -1496,12 +1522,14 @@ struct AppScreen: View {
             } else { ContentUnavailableView("Got It!", systemImage: "note.text", description: Text("Crie ou selecione uma nota.")) }
         }
         .sheet(isPresented: $showTrash) { TrashView(model: model) }
-        // The assistant, from every screen: above the pen when a note with the pen is open.
+        // The assistant, from every screen. In a note with the pen it is drawn by the editor,
+        // stacked above the pen in the canvas corner (the bottom bar below the canvas moved the
+        // pen up, under a button placed from the screen edge).
         .overlay(alignment: .bottomTrailing) {
-            if model.assistant.isAvailable {
+            if model.assistant.isAvailable && !penShown {
                 AssistantButton { showAssistant = true }
                     .padding(.trailing, 22)
-                    .padding(.bottom, penShown ? 92 : 22)
+                    .padding(.bottom, 22)
             }
         }
         .sheet(isPresented: $showAssistant) { AssistantChat(model: model) }

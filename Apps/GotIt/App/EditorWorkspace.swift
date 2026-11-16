@@ -28,6 +28,7 @@ struct EditorWorkspace: View {
     @State private var playing: PlayingVideo?
     private struct PlayingVideo: Identifiable { let id: UUID; let player: AVPlayer }
     @State private var showStickers = false
+    @State private var showAssistant = false
     /// Video whose "Reduzir tamanho…" was chosen (asks for the quality).
     @State private var reducing: UUID?
     @AppStorage(VideoReduction.importKey) private var videoImport = "original"
@@ -85,6 +86,7 @@ struct EditorWorkspace: View {
             NavigationStack { toolsPanel(sheet: true).navigationTitle("Ferramentas").navigationBarTitleDisplayMode(.inline).toolbar { Button("Concluir") { showTools = false } } }
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showAssistant) { AssistantChat(model: model) }
         .sheet(isPresented: $showStickers) { stickerPicker.presentationDetents([.medium, .large]) }
         .sheet(item: $pageSetup) { focus in PageSetupView(model: model, settings: document.canvas, focus: focus) }
         .onAppear { session.handwritingToText = handwritingToText; session.handwritingFont = handwritingFont }
@@ -212,7 +214,16 @@ struct EditorWorkspace: View {
                           onVisiblePage: { model.selectedPageID = $0 })
             .id(document.id)
             .accessibilityIdentifier("pageEditor")
-            .overlay(alignment: .bottomTrailing) { if !simple { floatingPen } }
+            .overlay(alignment: .bottomTrailing) {
+                // The assistant sits right above the pen, in the same column (never over it).
+                if !simple {
+                    VStack(spacing: 14) {
+                        if model.assistant.isAvailable { AssistantButton { showAssistant = true } }
+                        floatingPen
+                    }
+                    .padding(18)
+                }
+            }
     }
 
     /// One tap to draw, one tap to go back to the cursor; no need to open the tools panel.
@@ -228,7 +239,6 @@ struct EditorWorkspace: View {
                 .background(tool.isDrawing ? Color.accentColor : Color(uiColor: .systemBackground), in: Circle())
                 .shadow(color: .black.opacity(0.22), radius: 6, y: 3)
         }
-        .padding(18)
         .accessibilityLabel(tool.isDrawing ? "Parar de desenhar" : "Desenhar com a caneta")
         .accessibilityIdentifier("floatingPen")
     }

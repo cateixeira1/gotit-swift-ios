@@ -45,9 +45,19 @@ public struct PageNumbering: Codable, Equatable, Sendable {
     public var startAt: Int
     /// The first page (a cover) shows no number; numbering still counts it.
     public var skipFirstPage: Bool
-    public init(place: Place = .footer, alignment: BandAlignment = .center, format: Format = .number, startAt: Int = 1, skipFirstPage: Bool = false) {
+    /// Size of the number in points; nil (notes numbered before it could change): 11 pt.
+    public var size: Double?
+    public init(place: Place = .footer, alignment: BandAlignment = .center, format: Format = .number, startAt: Int = 1,
+                skipFirstPage: Bool = false, size: Double? = nil) {
         self.place = place; self.alignment = alignment; self.format = format; self.startAt = startAt; self.skipFirstPage = skipFirstPage
+        self.size = size
     }
+
+    public static let defaultSize = 11.0
+    /// Sizes offered: from small print to a number that can be read across the room.
+    public static let sizes = 8.0...48.0
+    /// Size the number is drawn at.
+    public var fontSize: Double { size ?? Self.defaultSize }
 
     /// Text for the page at `index` (0-based) of `count` pages; nil where no number is shown.
     public func label(index: Int, count: Int) -> String? {
@@ -108,6 +118,7 @@ public extension CanvasSettings {
             guard band.height.isFinite, band.height > 0, band.height <= size.height / 3 else { throw DocumentError.invalid("Invalid header or footer height") }
         }
         if let numbers = pageNumbers, !(0...100_000).contains(numbers.startAt) { throw DocumentError.invalid("Invalid first page number") }
+        if let size = pageNumbers?.size, !(size.isFinite && PageNumbering.sizes.contains(size)) { throw DocumentError.invalid("Invalid page number size") }
         try paper?.validate()
     }
 

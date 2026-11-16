@@ -582,3 +582,28 @@ antes de mexer.
 
 Verificação: 170 testes do núcleo em Swift 6.0.3/Linux (7 novos). App e interface dependem do CI
 em macOS; a proteção de arquivos, do aparelho.
+
+## Ajustes de 16/11/2026 — menu, pastas por arrastar e numeração
+
+- **Assistente e caneta**: nas notas com a caneta, o botão do assistente fica no canto do canvas,
+  empilhado logo acima da caneta (mesma coluna, 14 pt entre os dois). Antes ele era posicionado a
+  partir da borda da tela, e a barra inferior do iPhone (e o painel de ferramentas do iPad) subia a
+  caneta para baixo dele. Nas demais telas continua no canto inferior direito.
+- **Número de página**: "Tamanho do número" em Cabeçalho e rodapé, de 8 a 48 pt, de 1 em 1
+  (`PageNumbering.size`; notas numeradas antes continuam com 11 pt e abrem sem migração).
+- **Menu**: no máximo 9 notas e, abaixo, 9 Teias da pasta mostrada, as mais recentes por criação ou
+  edição (`AppModel.recent`). Embaixo de cada grade, um botão da largura da lista ("Todas as Notas",
+  "Todas as Teias"), seta à direita, todo ele clicável, que mostra todas, mais recentes primeiro.
+- **Arte das Teias**: post-its amarelos ligados por fios sobre o azul-petróleo do ícone, com o
+  check do Got It! no centro (`TeiaArt`, fonte em `docs/art/teia.svg`).
+- **Pasta por arrastar**: pressionar uma nota (ou Teia) a levanta; soltá-la sobre outra cria uma
+  pasta com as duas, na pasta mostrada, numa única transação (`SQLiteStore.createFolder(…containing:)`:
+  ou a pasta existe com as duas dentro, ou nada mudou). O campo do nome abre em seguida, com
+  "Pasta N" em cinza claro; sem digitar, fica "Pasta N", em que N é o maior número já usado num nome
+  genérico + 1 (`Folder.genericName`, sem preencher lacunas). Soltar sobre uma pasta da lista coloca
+  a nota dentro dela.
+- **Rodapé do menu**: a marca da Color Software (quatro pontos 2 × 2 — ameixa, verde, grafite e
+  cinza — como em colorsoftware.com.br) ao lado do nome, no lugar do logo do Got It!.
+
+Verificação: 173 testes do núcleo em Swift 6.0.3/Linux (3 novos), mais 1 teste novo do app no CI. Arrastar e
+soltar, o campo do nome e a posição dos botões dependem do teste no aparelho.

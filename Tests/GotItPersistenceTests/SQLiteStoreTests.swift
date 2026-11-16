@@ -605,6 +605,43 @@ private func multimediaDocument() -> CanvasDocument {
     try db.close()
 }
 
+@Test func droppingANoteOnAnotherMakesAFolderWithBothOrNothing() async throws {
+    let fixture = try DatabaseFixture(); defer { fixture.clean() }
+    let store = try SQLiteStore(url: fixture.url)
+    let first = try await store.create(CanvasDocument(title: "A"))
+    let second = try await store.create(CanvasDocument(title: "B"))
+    let web = try await store.create(CanvasDocument(title: "Teia", kind: .web))
+    let work = try await store.createFolder(named: "Trabalho")
+    try await store.moveDocument(second.id, to: work.id)
+    // Both go into the new folder (made inside the folder being shown), wherever they were.
+    let folder = try await store.createFolder(named: "Pasta 1", in: work.id, containing: [first.id, second.id])
+    var listed = try await store.listDocuments()
+    #expect(listed.first { $0.id == first.id }?.folderID == folder.id)
+    #expect(listed.first { $0.id == second.id }?.folderID == folder.id)
+    #expect(try await store.listFolders().first { $0.id == folder.id }?.parentID == work.id)
+    // A document that does not exist: no folder is left behind and nothing moves.
+    await #expect(throws: DocumentError.self) { try await store.createFolder(named: "Pasta 2", containing: [web.id, UUID()]) }
+    #expect(try await store.listFolders().count == 2)
+    listed = try await store.listDocuments()
+    #expect(listed.first { $0.id == web.id }?.folderID == nil)
+    // Teias too.
+    let other = try await store.create(CanvasDocument(title: "Outra Teia", kind: .web))
+    let webs = try await store.createFolder(named: "Pasta 2", containing: [web.id, other.id])
+    #expect(try await store.listDocuments().filter { $0.folderID == webs.id }.count == 2)
+    try await store.close()
+}
+
+@Test func foldersWithoutANameAreNumberedAfterTheHighestGenericOne() {
+    #expect(Folder.genericName(after: []) == "Pasta 1")
+    #expect(Folder.genericName(after: ["Trabalho", "Casos"]) == "Pasta 1")
+    #expect(Folder.genericName(after: ["Pasta 1", "Pasta 2"]) == "Pasta 3")
+    // The number follows the highest one, not the count (a gap is not filled).
+    #expect(Folder.genericName(after: ["Pasta 4", "Pasta 1"]) == "Pasta 5")
+    #expect(Folder.genericName(after: ["pasta 7", "PASTA 2"]) == "Pasta 8")
+    // Only the generic name counts: other names with numbers do not.
+    #expect(Folder.genericName(after: ["Pasta 2 de 2026", "Pasta azul", "Projeto 9", "Pasta"]) == "Pasta 1")
+}
+
 @Test func searchFindsWordsIgnoringAccentsAndFollowsEveryEdit() async throws {
     let fixture = try DatabaseFixture(); defer { fixture.clean() }
     var store = try SQLiteStore(url: fixture.url)

@@ -11,9 +11,21 @@ struct NotesSidebar: View {
     @Binding var showTrash: Bool
 
     private enum NameRequest: Identifiable {
-        case create, rename(Folder)
-        var id: String { if case .rename(let folder) = self { "rename-\(folder.id)" } else { "create" } }
+        /// "Nova pasta"; renaming a folder; naming the folder a drop just made (it already has the
+        /// generic name, kept when nothing is typed).
+        case create, rename(Folder), fresh(Folder)
+        var id: String {
+            switch self {
+            case .create: "create"
+            case .rename(let folder): "rename-\(folder.id)"
+            case .fresh(let folder): "fresh-\(folder.id)"
+            }
+        }
     }
+    /// "Todas as Notas" / "Todas as Teias": every one of that kind in the folder shown.
+    @State private var browsing: DocumentKind?
+    /// The tile (or folder) a dragged note is over.
+    @State private var dropTarget: UUID?
     @State private var naming: NameRequest?
     @State private var name = ""
     @State private var deleting: Folder?
@@ -42,6 +54,16 @@ struct NotesSidebar: View {
                         Text("Notas sobre o mesmo assunto, mesmo sem as palavras buscadas. Calculado no próprio aparelho.")
                     }
                 }
+            } else if let kind = browsing {
+                // Every note (or Teia) of the folder shown, most recent first.
+                let all = model.recent(kind)
+                Section {
+                    Button { browsing = nil } label: {
+                        Label("Voltar para \(model.folderName(model.currentFolder))", systemImage: "chevron.backward")
+                    }.accessibilityIdentifier("allBack")
+                    if all.isEmpty { Text(kind == .web ? "Nenhuma Teia aqui." : "Nenhuma nota aqui.").foregroundStyle(.secondary) }
+                }
+                if !all.isEmpty { Section { documentGrid(all) } header: { Text("\(all.count) \(kind == .web ? (all.count == 1 ? "Teia" : "Teias") : (all.count == 1 ? "nota" : "notas"))") } }
             } else {
             Section {
                 if let current = model.folder(model.currentFolder) {
@@ -57,8 +79,15 @@ struct NotesSidebar: View {
                     .accessibilityIdentifier("newFolder")
                 ForEach(model.subfolders(of: model.currentFolder)) { folder in folderRow(folder) }
             } header: { Text(model.currentFolder == nil ? "Notas e Teias" : model.folderName(model.currentFolder)) }
-            if !model.visibleSummaries.isEmpty {
-                Section { documentGrid }
+            // The nine most recent of each, then the way to all of them.
+            ForEach([DocumentKind.note, .web], id: \.self) { kind in
+                let recent = model.recent(kind, limit: AppModel.recentLimit)
+                if !recent.isEmpty {
+                    Section {
+                        documentGrid(recent)
+                        allButton(kind)
+                    } header: { Text(kind == .web ? "Teias" : "Notas") }
+                }
             }
             Section {
                 Button { showTrash = true } label: {
@@ -72,11 +101,12 @@ struct NotesSidebar: View {
                     .accessibilityIdentifier("openSettings")
             } footer: {
                 HStack(spacing: 8) {
-                    Image("LaunchLogo").resizable().frame(width: 22, height: 22)
-                    Text("Color Software").font(.footnote.weight(.medium)).foregroundStyle(.secondary)
+                    ColorSoftwareMark()
+                    Text("Color Software").font(.footnote.weight(.bold)).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity).padding(.top, 28)
-                .accessibilityElement(children: .combine)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Color Software")
             }
             }
         }
@@ -102,24 +132,36 @@ struct NotesSidebar: View {
                 Button { showSettings = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Ajustes")
             }
         }
-        .navigationTitle(model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder))
+        .navigationTitle(browsing.map { $0 == .web ? "Todas as Teias" : "Todas as Notas" }
+                         ?? (model.currentFolder == nil ? "Got It!" : model.folderName(model.currentFolder)))
+        .onChange(of: model.currentFolder) { _, _ in browsing = nil }
         // A deleted row (already faded) closes its gap smoothly instead of vanishing.
         .animation(.easeOut(duration: 0.2), value: model.visibleSummaries.map(\.id))
         .animation(.easeOut(duration: 0.2), value: model.currentFolder)
+        .animation(.easeOut(duration: 0.2), value: browsing)
+        .animation(.spring(duration: 0.25), value: dropTarget)
         .disabled(model.isSaving)
         .alert(namingTitle, isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
-            TextField("Nome da pasta", text: $name).accessibilityIdentifier("folderName")
+            // A folder made by dropping shows its generic name as the (lighter) placeholder: typing
+            // replaces it, leaving it empty keeps it.
+            TextField(namingPlaceholder, text: $name).accessibilityIdentifier("folderName")
             Button(namingAction) {
                 let request = naming, chosen = name
                 Task {
                     switch request {
                     case .create: await model.createFolder(named: chosen)
                     case .rename(let folder): await model.renameFolder(folder.id, to: chosen)
+                    case .fresh(let folder):
+                        let typed = chosen.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !typed.isEmpty && typed != folder.name { await model.renameFolder(folder.id, to: typed) }
                     case nil: break
                     }
                 }
             }
-            Button("Cancelar", role: .cancel) { }
+            // The folder already exists (with its generic name): nothing to cancel.
+            if !namingFresh { Button("Cancelar", role: .cancel) { } }
+        } message: {
+            if case .fresh(let folder) = naming { Text("Sem nome, ela se chama “\(folder.name)”.") }
         }
         .confirmationDialog("Apagar a pasta?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                             titleVisibility: .visible, presenting: deleting) { folder in
@@ -130,7 +172,15 @@ struct NotesSidebar: View {
     }
 
     private var namingTitle: String { if case .rename = naming { "Renomear pasta" } else { "Nova pasta" } }
-    private var namingAction: String { if case .rename = naming { "Renomear" } else { "Criar" } }
+    private var namingAction: String {
+        switch naming {
+        case .rename: "Renomear"
+        case .fresh: "OK"
+        default: "Criar"
+        }
+    }
+    private var namingFresh: Bool { if case .fresh = naming { true } else { false } }
+    private var namingPlaceholder: String { if case .fresh(let folder) = naming { folder.name } else { "Nome da pasta" } }
 
     private func resultRow(_ result: AppModel.SearchResult) -> some View {
         Button { Task { await model.open(result, query: query); preferredColumn = .detail } } label: {
@@ -177,6 +227,13 @@ struct NotesSidebar: View {
                 Image(systemName: "chevron.forward").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
             }
         }
+        // A note dragged onto a folder goes into it.
+        .dropDestination(for: String.self) { items, _ in
+            guard let id = draggedID(items) else { return false }
+            Task { await model.moveDocument(id, to: folder.id) }
+            return true
+        } isTargeted: { over in targeting(folder.id, over) }
+        .listRowBackground(dropTarget == folder.id ? Color.accentColor.opacity(0.15) : nil)
         .contextMenu {
             Button("Renomear", systemImage: "pencil") { name = folder.name; naming = .rename(folder) }
             moveMenu(excluding: model.descendants(of: folder.id), current: folder.parentID) { target in
@@ -187,33 +244,76 @@ struct NotesSidebar: View {
         .accessibilityIdentifier("folder-\(folder.name)")
     }
 
-    /// Notes and Teias three to a row, each a page preview with its title and date; the whole
-    /// tile opens it, a long press offers moving, a Teia and deleting.
-    private var documentGrid: some View {
+    /// Notes or Teias three to a row, each a page preview with its title and date; the whole tile
+    /// opens it. A long press lifts it: dropped on another tile it makes a folder with both, on a
+    /// folder it goes in; held still, it offers moving, a Teia and deleting.
+    private func documentGrid(_ items: [DocumentSummary]) -> some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: 3), spacing: 18) {
-            ForEach(model.visibleSummaries) { summary in documentTile(summary).transition(.opacity) }
+            ForEach(items) { summary in documentTile(summary).transition(.opacity) }
         }
         .padding(.vertical, 6)
         .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
         .listRowBackground(Color.clear)
     }
 
+    /// "Todas as Notas" / "Todas as Teias": the width of the list, the arrow at the right edge,
+    /// all of it one button.
+    private func allButton(_ kind: DocumentKind) -> some View {
+        Button { browsing = kind } label: {
+            HStack {
+                Text(kind == .web ? "Todas as Teias" : "Todas as Notas").font(.body.weight(.semibold)).foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.forward").font(.body.weight(.semibold)).foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressedButtonStyle())
+        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 10, trailing: 0))
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .accessibilityIdentifier(kind == .web ? "allWebs" : "allNotes")
+    }
+
+    /// A note or Teia being dragged, from the text it carries (its identifier).
+    private func draggedID(_ items: [String]) -> UUID? {
+        guard let text = items.first, let id = UUID(uuidString: text), model.activeSummaries.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    private func targeting(_ id: UUID, _ over: Bool) {
+        if over { dropTarget = id } else if dropTarget == id { dropTarget = nil }
+    }
+
     private func documentTile(_ summary: DocumentSummary) -> some View {
-        Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
+        let targeted = dropTarget == summary.id
+        return Button { Task { await model.open(summary.id); preferredColumn = .detail } } label: {
             VStack(spacing: 6) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10).fill(Color(uiColor: .secondarySystemGroupedBackground))
-                    if let preview = model.noteMetadata[summary.id]?.preview {
+                    if summary.kind == .web {
+                        // Teias have their own picture: post-its tied by threads, in the app's colors.
+                        Image("TeiaArt").resizable().scaledToFill()
+                    } else if let preview = model.noteMetadata[summary.id]?.preview {
                         Image(uiImage: preview).resizable().scaledToFit().padding(5)
                     } else {
-                        Image(systemName: summary.kind == .web ? "point.3.connected.trianglepath.dotted" : "note.text")
-                            .font(.system(size: 30)).foregroundStyle(.secondary)
+                        Image(systemName: "note.text").font(.system(size: 30)).foregroundStyle(.secondary)
+                    }
+                    if targeted {
+                        RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.18))
+                        Image(systemName: "folder.badge.plus").font(.system(size: 28, weight: .semibold)).foregroundStyle(Color.accentColor)
+                            .padding(10).background(.regularMaterial, in: Circle())
                     }
                 }
                 .aspectRatio(0.78, contentMode: .fit)
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(model.document?.id == summary.id ? Color.accentColor : Color.primary.opacity(0.1),
-                                                                    lineWidth: model.document?.id == summary.id ? 2 : 1))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(targeted || model.document?.id == summary.id ? Color.accentColor : Color.primary.opacity(0.1),
+                                                                    lineWidth: targeted || model.document?.id == summary.id ? 2 : 1))
                 .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+                .scaleEffect(targeted ? 1.06 : 1)
                 Text(summary.title.isEmpty ? "Sem título" : summary.title)
                     .font(.footnote.weight(.semibold)).lineLimit(2).multilineTextAlignment(.center)
                 Text(summary.createdAt, format: .dateTime.day().month(.abbreviated).year(.twoDigits))
@@ -233,8 +333,33 @@ struct NotesSidebar: View {
             moveMenu(excluding: [], current: summary.folderID) { target in Task { await model.moveDocument(summary.id, to: target) } }
             Button("Apagar", systemImage: "trash", role: .destructive) { Task { await model.moveToTrash(summary.id) } }
         }
+        // Long press and drag: the tile lifts and follows the finger.
+        .draggable(summary.id.uuidString) {
+            tilePreview(summary)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            guard let dragged = draggedID(items), dragged != summary.id else { return false }
+            Task {
+                guard let folder = await model.makeFolder(dropping: dragged, onto: summary.id) else { return }
+                name = ""; naming = .fresh(folder)
+            }
+            return true
+        } isTargeted: { over in targeting(summary.id, over) }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("document-\(summary.title)")
+    }
+
+    /// What follows the finger while a tile is dragged: its page, a little raised.
+    private func tilePreview(_ summary: DocumentSummary) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10).fill(Color(uiColor: .secondarySystemGroupedBackground))
+            if summary.kind == .web { Image("TeiaArt").resizable().scaledToFill() }
+            else if let preview = model.noteMetadata[summary.id]?.preview { Image(uiImage: preview).resizable().scaledToFit().padding(5) }
+            else { Image(systemName: "note.text").font(.system(size: 30)).foregroundStyle(.secondary) }
+        }
+        .frame(width: 96, height: 123)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 6)
     }
 
     /// "Mover para": the top level and every folder (indented under its parent), except where the
@@ -247,5 +372,31 @@ struct NotesSidebar: View {
                     .disabled(item.folder.id == current)
             }
         }
+    }
+}
+
+/// Darkens a little while pressed (a plain button in a list shows no highlight of its own).
+struct PressedButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.6 : 1).animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// The Color Software mark: four dots, two by two (plum, green, ink and grey), as on
+/// colorsoftware.com.br. The ink dot turns white in dark mode, as on the site's dark cover.
+struct ColorSoftwareMark: View {
+    var dot: CGFloat = 9
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        let colors: [Color] = [Color(red: 0x5a / 255, green: 0x2c / 255, blue: 0x4e / 255),
+                               Color(red: 0x0f / 255, green: 0x7d / 255, blue: 0x72 / 255),
+                               scheme == .dark ? .white : Color(red: 0x1c / 255, green: 0x1c / 255, blue: 0x1e / 255),
+                               scheme == .dark ? Color(red: 0x8a / 255, green: 0x8a / 255, blue: 0x90 / 255) : Color(red: 0xb9 / 255, green: 0xb9 / 255, blue: 0xbe / 255)]
+        Grid(horizontalSpacing: dot / 3, verticalSpacing: dot / 3) {
+            GridRow { Circle().fill(colors[0]); Circle().fill(colors[1]) }
+            GridRow { Circle().fill(colors[2]); Circle().fill(colors[3]) }
+        }
+        .frame(width: dot * 2 + dot / 3, height: dot * 2 + dot / 3)
+        .accessibilityHidden(true)
     }
 }

@@ -227,3 +227,20 @@ import Testing
     squared.canvas.paper = PaperStyle(kind: .grid)
     #expect(squared.storiesAffectedByObstacleChanges(since: note).isEmpty)
 }
+
+@Test func pageNumberSizeCanGrowAndShrinkAndOldNotesKeepTheirs() throws {
+    // Notes numbered before the size existed decode without it and keep 11 pt.
+    let old = #"{"place":"footer","alignment":"center","format":"number","startAt":1,"skipFirstPage":false}"#
+    let decoded = try JSONDecoder().decode(PageNumbering.self, from: Data(old.utf8))
+    #expect(decoded.size == nil && decoded.fontSize == 11)
+    var settings = CanvasSettings()
+    settings.pageNumbers = PageNumbering(size: 24)
+    #expect(settings.pageNumbers?.fontSize == 24)
+    try settings.validateLayout()
+    let again = try JSONDecoder().decode(CanvasSettings.self, from: JSONEncoder().encode(settings))
+    #expect(again.pageNumbers?.fontSize == 24)
+    for wrong in [4.0, 60, .nan, .infinity] {
+        settings.pageNumbers = PageNumbering(size: wrong)
+        #expect(throws: DocumentError.self) { try settings.validateLayout() }
+    }
+}

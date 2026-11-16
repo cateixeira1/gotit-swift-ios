@@ -41,7 +41,7 @@ import GotItDomain
         if let header = settings.header, let strip = settings.headerRect { draw(header, in: strip, inset: m, image: image) }
         if let footer = settings.footer, let strip = settings.footerRect { draw(footer, in: strip, inset: m, image: image) }
         if let label = settings.pageNumbers?.label(index: pageIndex, count: pageCount), let place = settings.pageNumberRect, let numbers = settings.pageNumbers {
-            let font = UIFont.systemFont(ofSize: 11)
+            let font = UIFont.systemFont(ofSize: CGFloat(numbers.fontSize))
             let text = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: UIColor(hex: "#4B5563")])
             let size = text.size()
             let x: CGFloat

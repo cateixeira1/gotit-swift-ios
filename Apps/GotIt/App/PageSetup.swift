@@ -32,6 +32,17 @@ struct PageSetupView: View {
                                 Text("Página 1 de N").tag(PageNumbering.Format.pageOfTotal)
                                 Text("– 1 –").tag(PageNumbering.Format.dashes)
                             }
+                            // Smaller or larger number (the same on every page), one point at a time.
+                            Stepper(value: Binding(get: { settings.pageNumbers?.fontSize ?? PageNumbering.defaultSize },
+                                                   set: { size in var n = settings.pageNumbers ?? PageNumbering(); n.size = size; settings.pageNumbers = n }),
+                                    in: PageNumbering.sizes, step: 1) {
+                                HStack {
+                                    Text("Tamanho do número")
+                                    Spacer()
+                                    Text("\(Int(settings.pageNumbers?.fontSize ?? PageNumbering.defaultSize)) pt").monospacedDigit().foregroundStyle(.secondary)
+                                }
+                            }
+                            .accessibilityIdentifier("pageNumberSize")
                             Stepper("Começar em \(settings.pageNumbers?.startAt ?? 1)", value: numbers(\.startAt), in: 0...9999)
                             Toggle("Sem número na primeira página", isOn: numbers(\.skipFirstPage))
                         }

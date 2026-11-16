@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 333" width="260" height="333">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b8999"/>
+      <stop offset="0.55" stop-color="#36677a"/>
+      <stop offset="1" stop-color="#204451"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.12" r="0.7">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="note" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#f9db94"/>
+      <stop offset="1" stop-color="#e9b452"/>
+    </linearGradient>
+    <linearGradient id="noteB" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#fbe3a8"/>
+      <stop offset="1" stop-color="#efc169"/>
+    </linearGradient>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3.2" flood-color="#0b1f27" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect width="260" height="333" fill="url(#bg)"/>
+  <rect width="260" height="333" fill="url(#glow)"/>
+  <!-- threads -->
+  <g fill="none" stroke="#f6e2b0" stroke-width="3.2" stroke-linecap="round" opacity="0.85">
+    <path d="M130 170 C 110 130, 90 110, 66 88"/>
+    <path d="M130 170 C 160 140, 180 120, 196 96"/>
+    <path d="M130 170 C 105 205, 85 225, 70 250"/>
+    <path d="M130 170 C 160 205, 180 230, 194 258"/>
+    <path d="M66 88 C 110 70, 150 72, 196 96" stroke-dasharray="1 8" stroke-width="3"/>
+  </g>
+  <g fill="#f6e2b0">
+    <circle cx="66" cy="88" r="4.5"/><circle cx="196" cy="96" r="4.5"/>
+    <circle cx="70" cy="250" r="4.5"/><circle cx="194" cy="258" r="4.5"/>
+  </g>
+  <!-- satellites -->
+  <g filter="url(#sh)">
+    <g transform="rotate(-7 60 82)"><rect x="34" y="56" width="52" height="52" rx="2" fill="url(#noteB)"/><rect x="34" y="56" width="52" height="8" fill="#ffffff" opacity="0.18"/>
+      <path d="M42 76 h30 M42 86 h36 M42 96 h22" stroke="#1b2c63" stroke-width="3" stroke-linecap="round" opacity="0.75"/></g>
+    <g transform="rotate(6 200 92)"><rect x="174" y="66" width="52" height="52" rx="2" fill="url(#noteB)"/><rect x="174" y="66" width="52" height="8" fill="#ffffff" opacity="0.18"/>
+      <path d="M182 86 h34 M182 96 h26 M182 106 h32" stroke="#1b2c63" stroke-width="3" stroke-linecap="round" opacity="0.75"/></g>
+    <g transform="rotate(5 68 256)"><rect x="42" y="230" width="52" height="52" rx="2" fill="url(#noteB)"/><rect x="42" y="230" width="52" height="8" fill="#ffffff" opacity="0.18"/>
+      <path d="M50 250 h28 M50 260 h36 M50 270 h20" stroke="#1b2c63" stroke-width="3" stroke-linecap="round" opacity="0.75"/></g>
+    <g transform="rotate(-6 196 262)"><rect x="170" y="236" width="52" height="52" rx="2" fill="url(#noteB)"/><rect x="170" y="236" width="52" height="8" fill="#ffffff" opacity="0.18"/>
+      <path d="M178 256 h34 M178 266 h22 M178 276 h30" stroke="#1b2c63" stroke-width="3" stroke-linecap="round" opacity="0.75"/></g>
+  </g>
+  <!-- center note with check and curled corner -->
+  <g filter="url(#sh)" transform="rotate(-4 130 168)">
+    <path d="M90 128 H170 V194 L154 210 H90 Z" fill="url(#note)"/>
+    <rect x="90" y="128" width="80" height="11" fill="#ffffff" opacity="0.2"/>
+    <path d="M170 194 L154 210 C 156 200, 160 196, 170 194 Z" fill="#fbe7b6"/>
+    <path d="M108 168 C 114 170, 120 178, 126 186 C 136 166, 148 150, 160 140" fill="none" stroke="#1b2c63" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -18,12 +18,15 @@ enum DerivedImages {
     /// Originals at most this big are decoded directly: a copy would save nothing.
     static let directBytes = 1_500_000
 
-    static var folder: URL? {
+    /// Made once (it was created again on every picture shown). The copies show what is in the
+    /// notes, so the folder is protected like them.
+    static let folder: URL? = {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let folder = caches.appendingPathComponent("GotIt-derived", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        DataProtection.protect(folder)
         return folder
-    }
+    }()
 
     static func url(_ hash: String, _ role: Role, in folder: URL? = DerivedImages.folder) -> URL? {
         // Hashes are 64 hex digits; anything else never names a file here.
@@ -97,12 +100,13 @@ enum PreviewCache {
     /// Raised when thumbnails are drawn differently, so older ones are not reused.
     static let drawingVersion = 1
 
-    static var folder: URL? {
+    static let folder: URL? = {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         let folder = caches.appendingPathComponent("GotIt-previews", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        DataProtection.protect(folder)
         return folder
-    }
+    }()
 
     static func url(_ id: UUID, revision: Int64, in folder: URL? = PreviewCache.folder) -> URL? {
         folder?.appendingPathComponent("\(id.uuidString)-r\(revision)-v\(drawingVersion).png")

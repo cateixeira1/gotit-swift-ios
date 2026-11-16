@@ -68,7 +68,7 @@ enum TextBridge {
             if let background = style.background { attributes[.backgroundColor] = UIColor(hex: background) }
             if style.underline == true { attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
             if style.strikethrough == true { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-            if let link = style.link, !link.isEmpty { attributes[.link] = link }
+            if let link = style.link, NoteLinks.isAllowed(link) { attributes[.link] = link }
             if style.baseline == .superscript { attributes[.baselineOffset] = font.pointSize * 0.35 }
             if style.baseline == .subscript { attributes[.baselineOffset] = -font.pointSize * 0.2 }
             if let named = style.namedStyle { attributes[.gotItNamedStyle] = named }
@@ -175,7 +175,8 @@ enum TextBridge {
             let alignment: TextAlignment
             switch paragraph?.alignment { case .center: alignment = .center; case .right: alignment = .trailing; case .justified: alignment = .justified; default: alignment = .leading }
             let offset = ownBaselineOffset(attributes)
-            let link = (attributes[.link] as? URL)?.absoluteString ?? (attributes[.link] as? String)
+            // Only web, e-mail and note links are kept (pasted text can carry any address).
+            let link = ((attributes[.link] as? URL)?.absoluteString ?? (attributes[.link] as? String)).flatMap { NoteLinks.isAllowed($0) ? $0 : nil }
             let list: TextListKind = paragraph?.textLists.first.map { $0.markerFormat == .decimal ? .numbered : .bullet } ?? .none
             let format = ParagraphFormat(lineSpacing: Double(paragraph?.lineSpacing ?? 0), paragraphSpacing: Double(paragraph?.paragraphSpacing ?? 0),
                                          headIndent: Double(paragraph?.headIndent ?? 0), firstLineIndent: Double(paragraph?.firstLineHeadIndent ?? 0), list: list)

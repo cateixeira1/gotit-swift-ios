@@ -15,6 +15,7 @@ import GotItCanvasUI
 struct GotItAppApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
+    init() { _ = TemporaryFiles.launch }
     var body: some Scene {
         WindowGroup { AppScreen(model: model).task { await model.start() } }
             .onChange(of: scenePhase) { _, phase in
@@ -72,6 +73,10 @@ final class AppModel {
             }
             #endif
             try FileManager.default.createDirectory(at: root.appendingPathComponent("assets"), withIntermediateDirectories: true)
+            // Before the database is opened, so the files it creates are protected from the start.
+            DataProtection.protectNotes(at: root)
+            DataProtection.protectExistingFiles(in: [root] + [DerivedImages.folder, PreviewCache.folder].compactMap { $0 })
+            TemporaryFiles.removeLeftovers()
             directory = root
             let repository = try SQLiteStore(url: root.appendingPathComponent("notes.sqlite"))
             store = repository
@@ -853,6 +858,8 @@ final class AppModel {
                 try? FileManager.default.removeItem(at: temporary)
                 if !FileManager.default.fileExists(atPath: destination.path) { throw error }
             }
+            // A file moved in keeps the protection it was created with, not the folder's.
+            DataProtection.protect(destination)
         }
         let bytes = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         return Asset(hash: hash, mediaType: mediaType, byteCount: Int64(bytes))
@@ -870,7 +877,7 @@ final class AppModel {
         guard let directory else { throw DocumentError.invalid("Storage unavailable") }
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let destination = directory.appendingPathComponent("assets").appendingPathComponent(hash)
-        if !FileManager.default.fileExists(atPath: destination.path) { try data.write(to: destination, options: .atomic) }
+        if !FileManager.default.fileExists(atPath: destination.path) { try data.write(to: destination, options: [.atomic, .completeFileProtectionUnlessOpen]) }
         return Asset(hash: hash, mediaType: mediaType, byteCount: Int64(data.count))
     }
 

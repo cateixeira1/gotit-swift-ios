@@ -15,17 +15,27 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     container: swift:6.0.3-jammy
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to the commit v4 pointed to on 2026-11-15: a tag can be moved to other code, a commit cannot.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The job only reads the code: the token is not left in the checkout for later steps.
+          persist-credentials: false
       - name: Install SQLite headers
         run: apt-get update && apt-get install -y libsqlite3-dev
       - name: Test core
         run: swift test
   apple:
     runs-on: macos-26
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to the commit v4 pointed to on 2026-11-15: a tag can be moved to other code, a commit cannot.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The job only reads the code: the token is not left in the checkout for later steps.
+          persist-credentials: false
       - name: Toolchain
         run: swift --version && xcodebuild -version
       - name: Test core on macOS
@@ -90,7 +100,7 @@ jobs:
               xcrun xcresulttool export attachments --path "$RUNNER_TEMP/$family.xcresult" --output-path "$RUNNER_TEMP/screenshots/$family" || true
             fi
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: native-editor-screenshots

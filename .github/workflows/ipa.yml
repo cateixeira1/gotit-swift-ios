@@ -21,7 +21,11 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to the commit v4 pointed to on 2026-11-15: a tag can be moved to other code, a commit cannot.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The job only reads the code: the token is not left in the checkout for later steps.
+          persist-credentials: false
       - name: Toolchain
         run: xcodebuild -version
       - name: Generate app project
@@ -54,7 +58,7 @@ jobs:
           SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
           zip -qry "GotIt-0.2-${{ github.run_number }}-$SHORT_SHA.ipa" Payload
           ls -l *.ipa
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: GotIt-ipa-${{ github.run_number }}
           path: ${{ runner.temp }}/ipa/*.ipa

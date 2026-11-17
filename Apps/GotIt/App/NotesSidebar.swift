@@ -35,81 +35,85 @@ struct NotesSidebar: View {
     @State private var showSettings = false
     private var searching: Bool { SearchText.query(query) != nil }
 
+    // A scroll view of grouped cards, not a List: in a List the whole grid of tiles is one row,
+    // so a drag lifted (and hid) every tile of it and drops never reached a single tile.
     var body: some View {
-        List {
-            if searching {
-                Section {
-                    if results.isEmpty && meaning.isEmpty {
-                        Text("Nada encontrado para “\(query.trimmingCharacters(in: .whitespaces))”.").foregroundStyle(.secondary)
-                            .accessibilityIdentifier("searchEmpty")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                if searching {
+                    SidebarGroup(header: "Resultados",
+                                 footer: "Procura no título, no texto, em post-its, transcrições, tabelas e legendas, em todas as pastas. Escrita à mão entra na busca depois de convertida em texto.") {
+                        if results.isEmpty && meaning.isEmpty {
+                            Text("Nada encontrado para “\(query.trimmingCharacters(in: .whitespaces))”.").foregroundStyle(.secondary)
+                                .padding(.horizontal, 16).padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("searchEmpty")
+                        }
+                        ForEach(results) { result in resultRow(result) }
                     }
-                    ForEach(results) { result in resultRow(result) }
-                } header: { Text("Resultados") } footer: {
-                    Text("Procura no título, no texto, em post-its, transcrições, tabelas e legendas, em todas as pastas. Escrita à mão entra na busca depois de convertida em texto.")
-                }
-                if !meaning.isEmpty {
-                    Section {
-                        ForEach(meaning) { result in resultRow(result) }
-                    } header: { Text("Por significado") } footer: {
-                        Text("Notas sobre o mesmo assunto, mesmo sem as palavras buscadas. Calculado no próprio aparelho.")
+                    if !meaning.isEmpty {
+                        SidebarGroup(header: "Por significado", footer: "Notas sobre o mesmo assunto, mesmo sem as palavras buscadas. Calculado no próprio aparelho.") {
+                            ForEach(meaning) { result in resultRow(result) }
+                        }
                     }
-                }
-            } else if let kind = browsing {
-                // Every note (or Teia) of the folder shown, most recent first.
-                let all = model.recent(kind)
-                Section {
-                    Button { browsing = nil } label: {
-                        Label("Voltar para \(model.folderName(model.currentFolder))", systemImage: "chevron.backward")
-                    }.accessibilityIdentifier("allBack")
-                    if all.isEmpty { Text(kind == .web ? "Nenhuma Teia aqui." : "Nenhuma nota aqui.").foregroundStyle(.secondary) }
-                }
-                if !all.isEmpty { Section { documentGrid(all) } header: { Text("\(all.count) \(kind == .web ? (all.count == 1 ? "Teia" : "Teias") : (all.count == 1 ? "nota" : "notas"))") } }
-            } else {
-            Section {
-                if let current = model.folder(model.currentFolder) {
-                    Button { model.currentFolder = current.parentID } label: {
-                        Label("Voltar para \(model.folderName(current.parentID))", systemImage: "chevron.backward")
-                    }.accessibilityIdentifier("folderBack")
-                }
-                Button("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
-                Button("Nova nota simples", systemImage: "note.text") { Task { await model.createSimpleNote(); preferredColumn = .detail } }
-                    .accessibilityIdentifier("newSimpleNote")
-                Button("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
-                Button("Nova pasta", systemImage: "folder.badge.plus") { name = ""; naming = .create }
-                    .accessibilityIdentifier("newFolder")
-                ForEach(model.subfolders(of: model.currentFolder)) { folder in folderRow(folder) }
-            } header: { Text(model.currentFolder == nil ? "Notas e Teias" : model.folderName(model.currentFolder)) }
-            // The nine most recent of each, then the way to all of them.
-            ForEach([DocumentKind.note, .web], id: \.self) { kind in
-                let recent = model.recent(kind, limit: AppModel.recentLimit)
-                if !recent.isEmpty {
-                    Section {
-                        documentGrid(recent)
-                        allButton(kind)
-                    } header: { Text(kind == .web ? "Teias" : "Notas") }
+                } else if let kind = browsing {
+                    // Every note (or Teia) of the folder shown, most recent first.
+                    let all = model.recent(kind)
+                    SidebarGroup {
+                        SidebarRow("Voltar para \(model.folderName(model.currentFolder))", systemImage: "chevron.backward") { browsing = nil }
+                            .accessibilityIdentifier("allBack")
+                    }
+                    if all.isEmpty {
+                        Text(kind == .web ? "Nenhuma Teia aqui." : "Nenhuma nota aqui.").foregroundStyle(.secondary).padding(.horizontal, 20)
+                    } else {
+                        SidebarGroup(header: "\(all.count) \(kind == .web ? (all.count == 1 ? "Teia" : "Teias") : (all.count == 1 ? "nota" : "notas"))", card: false) {
+                            documentGrid(all)
+                        }
+                    }
+                } else {
+                    SidebarGroup(header: model.currentFolder == nil ? "Notas e Teias" : model.folderName(model.currentFolder)) {
+                        if let current = model.folder(model.currentFolder) {
+                            SidebarRow("Voltar para \(model.folderName(current.parentID))", systemImage: "chevron.backward") { model.currentFolder = current.parentID }
+                                .accessibilityIdentifier("folderBack")
+                        }
+                        SidebarRow("Nova nota", systemImage: "plus") { Task { await model.createNote(); preferredColumn = .detail } }
+                        SidebarRow("Nova nota simples", systemImage: "note.text") { Task { await model.createSimpleNote(); preferredColumn = .detail } }
+                            .accessibilityIdentifier("newSimpleNote")
+                        SidebarRow("Nova Teia", systemImage: "point.3.connected.trianglepath.dotted") { Task { await model.createWeb(); preferredColumn = .detail } }
+                        SidebarRow("Nova pasta", systemImage: "folder.badge.plus") { name = ""; naming = .create }
+                            .accessibilityIdentifier("newFolder")
+                        ForEach(model.subfolders(of: model.currentFolder)) { folder in folderRow(folder) }
+                    }
+                    // The nine most recent of each, then the way to all of them.
+                    ForEach([DocumentKind.note, .web], id: \.self) { kind in
+                        let recent = model.recent(kind, limit: AppModel.recentLimit)
+                        if !recent.isEmpty {
+                            SidebarGroup(header: kind == .web ? "Teias" : "Notas", card: false) {
+                                VStack(spacing: 14) {
+                                    documentGrid(recent)
+                                    allButton(kind)
+                                }
+                            }
+                        }
+                    }
+                    SidebarGroup {
+                        SidebarRow("Lixeira", systemImage: "trash", detail: model.trashedSummaries.isEmpty ? nil : "\(model.trashedSummaries.count)") { showTrash = true }
+                            .accessibilityIdentifier("openTrash")
+                        SidebarRow("Ajustes", systemImage: "gearshape") { showSettings = true }
+                            .accessibilityIdentifier("openSettings")
+                    }
+                    HStack(spacing: 8) {
+                        ColorSoftwareMark()
+                        Text("Color Software").font(.footnote.weight(.bold)).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity).padding(.top, 2).padding(.bottom, 24)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Color Software")
                 }
             }
-            Section {
-                Button { showTrash = true } label: {
-                    HStack {
-                        Label("Lixeira", systemImage: "trash")
-                        Spacer()
-                        if !model.trashedSummaries.isEmpty { Text("\(model.trashedSummaries.count)").foregroundStyle(.secondary) }
-                    }
-                }.accessibilityIdentifier("openTrash")
-                Button { showSettings = true } label: { Label("Ajustes", systemImage: "gearshape") }
-                    .accessibilityIdentifier("openSettings")
-            } footer: {
-                HStack(spacing: 8) {
-                    ColorSoftwareMark()
-                    Text("Color Software").font(.footnote.weight(.bold)).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity).padding(.top, 28)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Color Software")
-            }
-            }
+            .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 90)
         }
+        .scrollDismissesKeyboard(.immediately)
+        .background(Color(uiColor: .systemGroupedBackground))
         .searchable(text: $query, placement: .sidebar, prompt: "Buscar nas notas")
         .task(id: query) {
             // A short pause after typing, then the index is asked (it answers in milliseconds).
@@ -194,8 +198,11 @@ struct NotesSidebar: View {
                 if result.hit.kind != .title { Text(Self.highlighted(result.hit.snippet)).font(.subheadline).lineLimit(3) }
                 if let folder = result.folder { Label(folder, systemImage: "folder").font(.caption).foregroundStyle(.secondary) }
             }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SidebarRowStyle())
         .accessibilityIdentifier("searchResult-\(result.title)")
     }
 
@@ -220,20 +227,24 @@ struct NotesSidebar: View {
 
     private func folderRow(_ folder: Folder) -> some View {
         Button { model.currentFolder = folder.id } label: {
-            HStack {
-                Label(folder.name, systemImage: "folder").foregroundStyle(.primary)
+            HStack(spacing: 12) {
+                Image(systemName: "folder").foregroundStyle(Color.accentColor).frame(width: 26)
+                Text(folder.name).foregroundStyle(.primary)
                 Spacer()
                 Text("\(model.count(in: folder.id))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 Image(systemName: "chevron.forward").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
             }
+            .padding(.horizontal, 16).frame(minHeight: 46)
+            .background(dropTarget == folder.id ? Color.accentColor.opacity(0.15) : Color.clear)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(SidebarRowStyle())
         // A note dragged onto a folder goes into it.
         .dropDestination(for: String.self) { items, _ in
             guard let id = draggedID(items) else { return false }
             Task { await model.moveDocument(id, to: folder.id) }
             return true
         } isTargeted: { over in targeting(folder.id, over) }
-        .listRowBackground(dropTarget == folder.id ? Color.accentColor.opacity(0.15) : nil)
         .contextMenu {
             Button("Renomear", systemImage: "pencil") { name = folder.name; naming = .rename(folder) }
             moveMenu(excluding: model.descendants(of: folder.id), current: folder.parentID) { target in
@@ -251,9 +262,7 @@ struct NotesSidebar: View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 14, alignment: .top), count: 3), spacing: 18) {
             ForEach(items) { summary in documentTile(summary).transition(.opacity) }
         }
-        .padding(.vertical, 6)
-        .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
-        .listRowBackground(Color.clear)
+        .padding(.vertical, 4)
     }
 
     /// "Todas as Notas" / "Todas as Teias": the width of the list, the arrow at the right edge,
@@ -272,9 +281,6 @@ struct NotesSidebar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressedButtonStyle())
-        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 10, trailing: 0))
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
         .accessibilityIdentifier(kind == .web ? "allWebs" : "allNotes")
     }
 
@@ -398,5 +404,70 @@ struct ColorSoftwareMark: View {
         }
         .frame(width: dot * 2 + dot / 3, height: dot * 2 + dot / 3)
         .accessibilityHidden(true)
+    }
+}
+
+/// A group of the menu, like a section of a grouped list: an optional title, the rows on a rounded
+/// card with lines between them (or, with `card: false`, straight on the background), a note below.
+struct SidebarGroup<Content: View>: View {
+    var header: String? = nil
+    var footer: String? = nil
+    var card = true
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let header {
+                Text(header).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 4)
+            }
+            if card {
+                VStack(spacing: 0) {
+                    Group(subviews: content) { rows in
+                        ForEach(rows) { row in
+                            row
+                            if row.id != rows.last?.id { Divider().padding(.leading, 54) }
+                        }
+                    }
+                }
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+            } else {
+                content
+            }
+            if let footer {
+                Text(footer).font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 4)
+            }
+        }
+    }
+}
+
+/// One row of a group: icon, title and (optionally) a number at the right; the whole row taps.
+struct SidebarRow: View {
+    let title: String
+    let systemImage: String
+    var detail: String? = nil
+    let action: () -> Void
+    init(_ title: String, systemImage: String, detail: String? = nil, action: @escaping () -> Void) {
+        self.title = title; self.systemImage = systemImage; self.detail = detail; self.action = action
+    }
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage).foregroundStyle(Color.accentColor).frame(width: 26)
+                Text(title).foregroundStyle(Color.accentColor)
+                Spacer()
+                if let detail { Text(detail).foregroundStyle(.secondary) }
+            }
+            .padding(.horizontal, 16).frame(minHeight: 46)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarRowStyle())
+    }
+}
+
+/// A row turns grey while pressed, as rows of a list do.
+struct SidebarRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.background(configuration.isPressed ? Color(uiColor: .systemFill) : Color.clear)
     }
 }

@@ -601,7 +601,9 @@ em macOS; a proteção de arquivos, do aparelho.
   ou a pasta existe com as duas dentro, ou nada mudou). O campo do nome abre em seguida, com
   "Pasta N" em cinza claro; sem digitar, fica "Pasta N", em que N é o maior número já usado num nome
   genérico + 1 (`Folder.genericName`, sem preencher lacunas). Soltar sobre uma pasta da lista coloca
-  a nota dentro dela.
+  a nota dentro dela. O menu deixou de ser uma `List`: lá a grade inteira era uma só linha, e o
+  arrasto levantava (e escondia) todas as notas da linha e nunca entregava o soltar a uma nota
+  (visto no aparelho, IPA 68). Agora é uma rolagem com grupos em cartões, no mesmo visual.
 - **Rodapé do menu**: a marca da Color Software (quatro pontos 2 × 2 — ameixa, verde, grafite e
   cinza — como em colorsoftware.com.br) ao lado do nome, no lugar do logo do Got It!.
 

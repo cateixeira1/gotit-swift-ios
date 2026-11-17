@@ -1,0 +1,81 @@
+name: GotItApp
+options:
+  bundleIdPrefix: com.gotit.prototype
+  deploymentTarget:
+    iOS: '18.0'
+packages:
+  GotIt:
+    path: ../..
+  LiteRTLM:
+    path: ../../Packages/LiteRTLM
+targets:
+  GotItApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    settings:
+      base:
+        SUPPORTS_MACCATALYST: YES
+        SWIFT_VERSION: '6.0'
+        # LiteRT-LM's Simulator slice is arm64 only (Apple silicon Macs).
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+        TARGETED_DEVICE_FAMILY: '1,2'
+        GENERATE_INFOPLIST_FILE: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "O Got It! usa o microfone para gravar áudios nas suas notas."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "O Got It! transcreve no próprio aparelho os áudios das suas notas."
+        PRODUCT_BUNDLE_IDENTIFIER: com.gotit.prototype.demo
+    dependencies:
+      - package: GotIt
+        product: GotItDomain
+      - package: GotIt
+        product: GotItPersistence
+      - package: GotIt
+        product: GotItCanvas
+      - package: GotIt
+        product: GotItCanvasUI
+      # LiteRT-LM ships for iPhone/iPad and their Simulator only: not linked into Mac Catalyst
+      # (the code checks `canImport(LiteRTLM)`; there the search by meaning is not offered).
+      - package: LiteRTLM
+        product: LiteRTLM
+        platformFilter: iOS
+  GotItAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    settings:
+      base:
+        SWIFT_VERSION: '6.0'
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: GotItApp
+      - package: GotIt
+        product: GotItDomain
+      - package: GotIt
+        product: GotItCanvas
+      - package: GotIt
+        product: GotItCanvasUI
+  GotItAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    settings:
+      base:
+        SWIFT_VERSION: '6.0'
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: GotItApp
+schemes:
+  GotItApp:
+    build:
+      targets:
+        GotItApp: all
+    test:
+      targets:
+        - GotItAppTests
+        - GotItAppUITests

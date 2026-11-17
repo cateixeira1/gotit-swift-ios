@@ -1,0 +1,10 @@
+.build/
+.swiftpm/
+.DS_Store
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+Examples/GotItDemo/GotItDemo.xcodeproj/
